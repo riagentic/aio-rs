@@ -450,6 +450,10 @@ version may break things.
   `incremental`) made an app that never built: a binary named `core` or
   `std` hides Rust's own crate from its code, and cargo keeps the others
   for its build folders. Such a name is refused, with another to use.
+- A new app failed `ax check` (and a CI's `cargo fmt --check`) at its
+  first step: every template is written in aio-rs's style, which plain
+  `cargo fmt` reflows. An `ax create` app has that style's
+  `rustfmt.toml`.
 
 ## [0.4.2] - 2026-11-11
 

@@ -395,6 +395,10 @@ impl<'a> New<'a> {
     }
 }
 
+/// How the template's Rust is formatted (aio-rs's own style): `cargo fmt`
+/// and `ax check` keep a new app as it was written.
+const RUSTFMT: &str = "# cargo fmt's style (aio-rs's): ax check runs cargo fmt --check.\nmax_width = 120\nuse_small_heuristics = \"Max\"\n";
+
 /// `--css tailwind`'s source sheet: Tailwind, then the template's own styles.
 const TAILWIND_SOURCE: &str = "/* The stylesheet's source: `[build] css` (Tailwind) writes assets/style.css from it
    before every build and on each saved change under ax dev. Edit this file, not that one. */
@@ -712,6 +716,7 @@ network = []            # hosts aio may reach besides this machine: "api.example
         ("app/src/main.rs".into(), main.into()),
         (".cargo/config.toml".into(), CARGO_CONFIG.into()),
         ("rust-toolchain.toml".into(), toolchain),
+        ("rustfmt.toml".into(), RUSTFMT.into()),
         (".gitignore".into(), ignore),
         (".gitattributes".into(), attributes.into()),
         ("README.md".into(), readme(n, ui)),
@@ -1256,6 +1261,25 @@ mod tests {
         std::fs::write(d.path().join("state.db"), "").unwrap();
         let said = prior_data("notes", d.path()).unwrap();
         assert!(said.contains(&d.path().display().to_string()) && said.contains("ax data notes"), "{said}");
+    }
+
+    /// `ax check` (cargo fmt --check, as CI runs it) passes on a new app of
+    /// every template: its Rust is formatted as its own rustfmt.toml says.
+    #[test]
+    fn every_template_is_formatted_as_its_rustfmt_toml_says() {
+        for (t, _) in TEMPLATES {
+            let all = files(&New { template: t, ..New::of("x") }).unwrap();
+            let d = tempfile::tempdir().unwrap();
+            write_all(d.path(), &all).unwrap();
+            let rs: Vec<&String> = all.iter().map(|(f, _)| f).filter(|f| f.ends_with(".rs")).collect();
+            let out = std::process::Command::new("rustfmt")
+                .args(["--check", "--edition", "2024"])
+                .args(&rs)
+                .current_dir(d.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{t}: {}", String::from_utf8_lossy(&out.stdout));
+        }
     }
 
     #[test]

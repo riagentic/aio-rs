@@ -84,6 +84,7 @@ notes/
 ├── app/src/main.rs       the launcher: boots the library
 ├── app/src/lib.rs        the same window on Android (app only)
 ├── rust-toolchain.toml   aio-rs's Rust, so one build folder serves every app
+├── rustfmt.toml          cargo fmt's style, the template's (ax check runs cargo fmt --check)
 ├── .cargo/config.toml    the bundled SQLite without the extensions aio never uses
 ├── .gitignore            target/, .data/, dist/, ax shot's pictures, .env, release keys
 ├── .gitattributes        LF line endings in every checkout
