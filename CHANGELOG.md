@@ -446,6 +446,10 @@ version may break things.
   typo) built for an `https://`, `file://` or `github:` source: the app
   shipped could never check a release, so no update could ever fix it.
   The build refuses it, as it did for a git source's.
+- `ax create core` (or `std`, `build`, `deps`, `examples`,
+  `incremental`) made an app that never built: a binary named `core` or
+  `std` hides Rust's own crate from its code, and cargo keeps the others
+  for its build folders. Such a name is refused, with another to use.
 
 ## [0.4.2] - 2026-11-11
 

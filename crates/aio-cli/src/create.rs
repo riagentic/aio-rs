@@ -121,6 +121,10 @@ LIBSQLITE3_FLAGS = \"-USQLITE_ENABLE_FTS3 -USQLITE_ENABLE_FTS3_PARENTHESIS -USQL
 -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_DEFAULT_MEMSTATUS=0\"
 ";
 
+/// Names an app's binary can't take: Rust's own crates (a binary `core`
+/// hides them from its code) and cargo's build folders.
+const TAKEN: [&str; 6] = ["core", "std", "build", "deps", "examples", "incremental"];
+
 /// A name a package, a binary and an app id can all be (pure): `my-app`.
 pub fn name_ok(name: &str) -> Result<(), String> {
     let ok = name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
@@ -526,6 +530,12 @@ fn agents(n: &New, ui: bool) -> String {
 pub fn files(n: &New) -> Result<Vec<(String, String)>, String> {
     let (name, template, id) = (n.name, n.template, n.id);
     name_ok(name)?;
+    if TAKEN.contains(&name) {
+        return Err(format!(
+            "{name}: a name Rust or cargo keeps for itself ({}): the app wouldn't build; another, such as my-{name}",
+            TAKEN.join(", ")
+        ));
+    }
     name_ok(id).map_err(|e| format!("--id {e}"))?;
     let (lib, main, mode, server) = match template {
         "app" => (APP_LIB, APP_MAIN, "standalone", ""),
@@ -1254,6 +1264,12 @@ mod tests {
         for bad in ["", "My", "2x", "a_b", "a.b", "x-", "app", "my-app", "../x"] {
             assert!(name_ok(bad).is_err(), "{bad}");
         }
+        // A name cargo or Rust keeps: an app that never builds (a binary `core` hides Rust's core).
+        for taken in ["core", "std", "build", "deps", "examples", "incremental"] {
+            let e = files(&New::of(taken)).err().unwrap_or_default();
+            assert!(e.contains("Rust or cargo keeps"), "{taken}: {e}");
+        }
+        assert!(files(&New { id: "build", ..New::of("my-build") }).is_ok(), "an id is no binary");
     }
 
     #[test]

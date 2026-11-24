@@ -42,7 +42,7 @@ ax create notes --force              # into a folder that holds files already
 
 | Option | What it does | Default |
 |---|---|---|
-| `<name>` | the folder, the package, the binary: lowercase letters, digits and `-`, starting with a letter, not `app` or ending in `-app` | – |
+| `<name>` | the folder, the package, the binary: lowercase letters, digits and `-`, starting with a letter, not `app` or ending in `-app`, nor a name Rust or cargo keeps (`core`, `std`, `build`, `deps`, `examples`, `incremental`) | – |
 | `--template` | `app`, `todo`, `canvas`, `cli` or `service` | `app` |
 | `--id` | `[app] id`: where its data lives; refused when an installed app has it (the two would share data) | the name |
 | `--aio-version` | the aio-rs release its `Cargo.toml` takes from git: `0.4.0`, `main` (the branch), `latest` (the newest release) | this `ax`'s version |
@@ -427,7 +427,7 @@ on disk, who decided each setting).
 | Symptom | Cause | Fix |
 |---|---|---|
 | `ax create --aio <dir>` refuses: no aio-rs checkout there | the folder holds no `crates/aio` and `crates/aio-shell` | name the checkout's root, or drop `--aio` (aio-rs from git) |
-| `ax create` refuses the name | not lowercase letters, digits and `-`, or `app` / `…-app` | `notes`, `my-notes` |
+| `ax create` refuses the name | not lowercase letters, digits and `-`, `app` / `…-app`, or one Rust or cargo keeps (`core`, `build`…) | `notes`, `my-notes` |
 | `ax create` refuses the id | an installed app has it | `--id notes-dev`, or `ax remove notes` first |
 | the build fails naming an `aio.toml` key | `aio.toml` is parsed as the app builds | fix that key ([reference](../reference/aio-toml.md)) |
 | `cc` or `link.exe` not found | no C toolchain | [setup](setup.md#1-rust-and-a-c-toolchain) |
