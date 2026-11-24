@@ -533,7 +533,6 @@ impl Default for Look
 impl Default for MacBuild
 impl Default for Memory
 impl Default for Mode
-impl Default for Moved
 impl Default for Neutral
 impl Default for Policy
 impl Default for RuntimeFrom
