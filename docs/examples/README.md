@@ -13,6 +13,7 @@ aio-rs's tests run. What you read is what works with this version.
 | [A CLI and a service](cli-service.md) | a job queue and the tool that drives it | a headless server, a scheduled worker, crash recovery, a `client`-mode CLI, `aio::cli`, pairing |
 | [A desktop app](desktop-app.md) | a local notes app | pages and Back, a menu, shortcuts, open and save dialogs, the tray, later launches, an update banner |
 | [Integrations](integrations.md) | a shop hub | an outside HTTP API with backoff, a signed webhook, streamed uploads, OIDC sign-in, monitoring |
+| [A secret-holding relay](relay.md) | a partner API's calls made for an app's installs | a key kept off the app, an allow-list, limits per install, nothing logged (`ax create --template relay`) |
 
 ## Which one to read
 
@@ -25,6 +26,7 @@ aio-rs's tests run. What you read is what works with this version.
 - No window at all: the [CLI and service](cli-service.md).
 - Anything that crosses the app's edge (HTTP in or out, sign-in,
   monitoring): [integrations](integrations.md).
+- A partner's key the app must not ship: the [relay](relay.md).
 
 ## Concepts by example
 

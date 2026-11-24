@@ -1,4 +1,4 @@
-//! `ax create <name> [--template app|cli|service] [--aio-version v | --aio dir]`
+//! `ax create <name> [--template app|cli|service|relay] [--aio-version v | --aio dir]`
 //! (aio's `am create`): a new app that runs, builds and tests as it is: its
 //! library (cell and window, or commands), the launcher `ax dev` and `aio
 //! build` run, `aio.toml`, a README, the agent brief's pointer, its own Cargo
@@ -15,6 +15,7 @@ pub const TEMPLATES: &[(&str, &str)] = &[
     ("service", "cells served to clients, no window (a board)"),
     ("todo", "a desktop window on a saved list: add, tick, filter, clear"),
     ("canvas", "a desktop window drawing a world a pure function moves"),
+    ("relay", "a partner API's calls made for an app's installs, its key held here"),
 ];
 
 /// The templates with a window.
@@ -28,6 +29,7 @@ const CLI_LIB: &str = include_str!("create/cli_lib.rs");
 const SERVICE_LIB: &str = include_str!("create/service_lib.rs");
 const TODO_LIB: &str = include_str!("create/todo_lib.rs");
 const CANVAS_LIB: &str = include_str!("create/canvas_lib.rs");
+const RELAY_LIB: &str = include_str!("create/relay_lib.rs");
 
 pub(crate) const APP_MAIN: &str = "// The launcher: the app is the library, so `ax dev` can hot-patch all of it.
 // A release build on Windows is a window app: no console opens with it.
@@ -103,6 +105,25 @@ fn main() -> std::io::Result<std::process::ExitCode> {
     // Served until asked to stop; the board is saved first.
     aio_shell::serve(&dirs)?;
     // `ax stop` stays down under the supervisor files `ax build` writes.
+    Ok(aio::lifecycle::exit_code())
+}
+";
+
+pub(crate) const RELAY_MAIN: &str = "// The launcher: the relay served until it is asked to stop.
+use aio_shell::Start;
+
+fn main() -> std::io::Result<std::process::ExitCode> {
+    let cfg = aio::config!();
+    let Start::Run(dirs) = aio_shell::start(&cfg, aio::app_version!())? else {
+        return Ok(std::process::ExitCode::SUCCESS);
+    };
+    // The partner's key, from the environment alone: never aio.toml, the code or a log.
+    let Some(key) = std::env::var(\"RELAY_KEY\").ok().filter(|k| !k.is_empty()) else {
+        eprintln!(\"RELAY_KEY is not set: the partner API's key, from the environment\");
+        return Ok(std::process::ExitCode::FAILURE);
+    };
+    let _relay = aio::Source::<app::Relay>::for_server_with(&cfg, &dirs, app::http(app::Partner::new(key)))?;
+    aio_shell::serve(&dirs)?;
     Ok(aio::lifecycle::exit_code())
 }
 ";
@@ -414,11 +435,13 @@ fn readme(n: &New, ui: bool) -> String {
         "todo" => "a desktop window on a saved todo list",
         "canvas" => "a desktop window drawing a world a pure function moves",
         "cli" => "a command-line tool on a saved cell",
+        "relay" => "a relay: a partner API's calls made for the app's installs, its key held here",
         _ => "a service: cells served to clients, no window",
     };
     let run = match n.template {
         "app" | "todo" | "canvas" => format!("ax dev {name}                 # the window; a saved edit hot-patches in"),
         "cli" => format!("cargo run -q -p {name}-app -- add milk   # one command, then out (list, done <n>)"),
+        "relay" => format!("RELAY_KEY=<key> ax dev {name}  # served on [server] listen until stopped"),
         _ => format!("ax dev {name}                 # served on [server] listen until stopped"),
     };
     let more = if ui {
@@ -480,6 +503,7 @@ fn agents(n: &New, ui: bool) -> String {
         "app" | "todo" => "its cell and its window",
         "canvas" => "its cell, `step` (the pure function that moves it, tested) and its window (a canvas)",
         "cli" => "its cell and its commands",
+        "relay" => "the partner, the calls relayed (`CALLS`) and their limits; the key comes from `RELAY_KEY`",
         _ => "its cell and its served methods",
     };
     let surface = match ui {
@@ -552,6 +576,13 @@ pub fn files(n: &New) -> Result<Vec<(String, String)>, String> {
             "server",
             "\n[server]\nlisten = \"127.0.0.1:7420\" # --port, --host and --expose change it at launch\n",
         ),
+        "relay" => (
+            RELAY_LIB,
+            RELAY_MAIN,
+            "server",
+            "\n[server]\nlisten = \"127.0.0.1:7420\" # --port, --host and --expose change it at launch\n\n\
+             [data]\npersist = false         # a relay keeps nothing\n",
+        ),
         t => {
             let all: Vec<&str> = TEMPLATES.iter().map(|(t, _)| *t).collect();
             return Err(format!("--template {t}: one of {}", all.join(", ")));
@@ -581,9 +612,12 @@ wasm-bindgen = "0.2"
     // One fixed feature set per kind (each other set is one more ax build).
     let feats = match template {
         "app" | "todo" | "canvas" => r#", features = ["kit"]"#,
-        "service" => r#", features = ["net"]"#,
+        "service" | "relay" => r#", features = ["net"]"#,
         _ => "",
     };
+    // The relay's HTTPS client (`aio::capabilities::agent`), aio's own.
+    let relay = "\n# The relay's calls to the partner: aio's HTTPS client (aio::capabilities::agent).\n\
+                 [dependencies.ureq]\nversion = \"3\"\ndefault-features = false\nfeatures = [\"rustls\"]\n";
     let root = format!(
         r#"[workspace]
 resolver = "3"
@@ -629,7 +663,11 @@ strip = false
 debug-assertions = false
 overflow-checks = false
 "#,
-        deps = if ui { web } else { String::new() },
+        deps = match template {
+            "relay" => relay.to_string(),
+            _ if ui => web,
+            _ => String::new(),
+        },
         from = match n.aio {
             Aio::Path(_) =>
                 "# aio-rs from a checkout beside the app (co-developing it): a clone builds\n\
@@ -689,9 +727,10 @@ maintainer = "{maintainer}" # "Name <email>": the Debian package's (ax build --d
 keep = "90d"            # how long the event log keeps every step
 
 [capabilities]
-network = []            # hosts aio may reach besides this machine: "api.example.org", "*.example.org", "lan", "*"
+network = [{network}]            # hosts aio may reach besides this machine: "api.example.org", "*.example.org", "lan", "*"
 {server}{build}"#,
-        docs = n.aio.docs()
+        docs = n.aio.docs(),
+        network = if template == "relay" { "\"api.example.org\"" } else { "" }
     );
     let toolchain = format!(
         "# The Rust ax builds with: one compiler for every app, so ax's shared build\n\
@@ -927,6 +966,9 @@ mod canvas_lib;
 #[path = "create/cli_lib.rs"]
 mod cli_lib;
 #[cfg(test)]
+#[path = "create/relay_lib.rs"]
+mod relay_lib;
+#[cfg(test)]
 #[path = "create/service_lib.rs"]
 mod service_lib;
 #[cfg(test)]
@@ -1010,6 +1052,18 @@ mod tests {
         let mode = |t| aio::config::Config::parse(get(&of("x", t), "aio.toml")).unwrap().app.mode;
         use aio::config::Mode;
         assert_eq!([mode("app"), mode("cli"), mode("service")], [Mode::Standalone, Mode::Cli, Mode::Server]);
+        let relay = of("x", "relay");
+        let cfg = aio::config::Config::parse(get(&relay, "aio.toml")).unwrap();
+        assert_eq!((cfg.app.mode, cfg.data.persist), (Mode::Server, false), "a relay serves and keeps nothing");
+        assert_eq!(cfg.capabilities.network, ["api.example.org"], "it reaches its partner alone");
+        assert!(
+            main("relay").contains("for_server_with(") && main("relay").contains("RELAY_KEY"),
+            "the key from the environment"
+        );
+        assert!(
+            get(&relay, "Cargo.toml").contains("[dependencies.ureq]")
+                && !get(&of("x", "service"), "Cargo.toml").contains("ureq")
+        );
         let app = get(&of("x", "app"), "Cargo.toml").to_string();
         assert!(
             app.contains(r#"features = ["kit"]"#) && !app.contains(crate::lint::RENDERER_0_1),
@@ -1022,7 +1076,10 @@ mod tests {
                 && lib.contains("android_app!")
                 && lib.contains("root: app::App")
         );
-        assert!(android("cli").is_none() && android("service").is_none(), "no window, no Android app");
+        assert!(
+            android("cli").is_none() && android("service").is_none() && android("relay").is_none(),
+            "no window, no Android app"
+        );
         for t in ["todo", "canvas"] {
             let all = of("x", t);
             assert_eq!(mode(t), Mode::Standalone, "{t}: a window");
@@ -1049,7 +1106,7 @@ mod tests {
         assert!(readme.contains("a clone builds only with that"), "{readme}");
         assert!(get(&of("x", "app"), "README.md").contains("A fresh clone builds as it is"));
         let game = files(&New { template: "game", ..New::of("x") });
-        assert!(game.unwrap_err().contains("one of app, cli, service, todo, canvas"));
+        assert!(game.unwrap_err().contains("one of app, cli, service, todo, canvas, relay"));
     }
 
     #[test]
@@ -1188,7 +1245,7 @@ mod tests {
             .collect();
         machine.push(env!("CARGO_MANIFEST_DIR").into());
         for (i, (t, _)) in TEMPLATES.iter().enumerate() {
-            let (at, name) = (dir.join(format!("apps{i}")), ["win", "tool", "board", "list", "balls"][i]);
+            let (at, name) = (dir.join(format!("apps{i}")), ["win", "tool", "board", "list", "balls", "proxy"][i]);
             std::fs::create_dir_all(&at).unwrap();
             let local = Aio::checkout(&at.join(name), &checkout).unwrap();
             assert_eq!(local, Aio::Path("../../code/aio-rs/crates".into()));
