@@ -120,3 +120,9 @@ fn an_optimistic_value_shows_actions_until_the_base_changes_or_they_are_cleared(
     p.click("fail");
     assert_eq!(p.text("n"), "11", "a refusal that changed nothing: cleared");
 }
+
+#[test]
+#[should_panic(expected = "65535")]
+fn an_element_with_more_children_than_a_template_holds_says_so() {
+    TestPage::mount(|| h("ul").children((0..70_000u32).map(|i| i.to_string())).view());
+}

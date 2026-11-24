@@ -158,6 +158,9 @@ version may break things.
 
 ### Fixed
 
+- `h(tag)` with more than 65 535 children (`.children(rows)` of a big
+  file) wrote a template the page misread (`air: unknown edit`); it says
+  what to do instead now: one child of views, or a `VirtualList`.
 - A `Breadcrumb` crumb with an `href` and no `onclick` was a dead link:
   it always had a click handler (one that did nothing), so the page kept
   the click. It has none now and the page follows it.
