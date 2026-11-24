@@ -2366,6 +2366,36 @@ fn a_qr_scanner_reads_the_cameras_frames_itself_says_each_code_once_and_lets_the
     assert_eq!(ui.eval("window.__stopped"), 1, "the camera let go with the view");
 }
 
+/// A scanner that goes once it read a code, as a pay screen's does.
+fn scan_once() -> View {
+    let shown = signal(|| false);
+    let said = signal(String::new);
+    rsx! {
+        button { "data-t": "show", onclick: move |_| shown.set(true), "Scan" }
+        if shown.get() {
+            QrScanner {
+                onscan: move |t: String| {
+                    said.set(t);
+                    shown.set(false);
+                },
+            }
+        }
+        p { "data-t": "said", "{said}" }
+    }
+}
+
+#[test]
+fn a_qr_scanner_its_own_scan_takes_away_lets_the_camera_go() {
+    let mut ui = TestUi::new(scan_once);
+    fake_camera(&mut ui, "none");
+    ui.click("show");
+    ui.until_text("said", "https://example.org/r/42");
+    assert_eq!(ui.count(".aio-qr"), 0);
+    ui.wait(Duration::from_millis(400));
+    assert_eq!(ui.eval("window.__stopped"), 1);
+    assert!(ui.failures().is_empty(), "{:?}", ui.failures());
+}
+
 #[test]
 fn a_qr_scanner_takes_the_browsers_own_reader_where_there_is_one() {
     let mut ui = TestUi::new(scanner);
