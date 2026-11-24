@@ -443,16 +443,16 @@ pub(crate) struct View {
 
 impl View {
     #[cfg(all(feature = "compat", feature = "server"))]
-    pub(crate) fn of<T: Cell>(h: &Handle<T>, viewer: &crate::Caller) -> Self {
+    pub(crate) fn of(h: &dyn Linked, viewer: &crate::Caller) -> Self {
         Self::at(h, viewer, Arc::from([]))
     }
 
     /// What `viewer` sees of the parts `paths` name (empty: all of it).
-    pub(crate) fn at<T: Cell>(h: &Handle<T>, viewer: &crate::Caller, paths: Arc<[String]>) -> Self {
-        let (seq, st) = h.snapshot();
+    pub(crate) fn at(h: &dyn Linked, viewer: &crate::Caller, paths: Arc<[String]>) -> Self {
+        let (seq, shown) = h.shown(viewer);
         let shown = match paths.is_empty() {
-            true => crate::shown(&*st, viewer),
-            false => crate::filter::pick(&crate::shown(&*st, viewer), &paths),
+            true => shown,
+            false => crate::filter::pick(&shown, &paths),
         };
         Self { seq, shown, size: 0, paths }
     }
@@ -469,7 +469,7 @@ impl View {
     /// digest of the view it makes (and, `js`, its [`patch::js_digest`]);
     /// `None` if nothing they may see changed. A patch over `full_percent`
     /// of the view is the view instead.
-    fn advance<T: Cell>(&mut self, h: &Handle<T>, viewer: &crate::Caller, full_percent: u32, js: bool) -> Option<Value> {
+    fn advance(&mut self, h: &dyn Linked, viewer: &crate::Caller, full_percent: u32, js: bool) -> Option<Value> {
         let now = View::at(h, viewer, self.paths.clone());
         if now.seq <= self.seq {
             return None;
@@ -979,6 +979,131 @@ pub(crate) async fn hello(w: &mut Sock, pulse: &mut Pulse, limits: &Limits, byte
     tokio::time::timeout(Duration::from_secs(15), next_ax(w, pulse, limits.max_message, bytes)).await.ok().flatten()
 }
 
+/// What a link needs of its cell: [`session`]'s body is made once for
+/// every cell, on this (a copy per cell type was ~50 KB of each binary).
+pub(crate) trait Linked: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn version(&self) -> u32;
+    fn is_async(&self, method: &str) -> bool;
+    fn quarantined(&self) -> Option<String>;
+    fn closing(&self) -> bool;
+    fn events(&self) -> tokio::sync::broadcast::Receiver<(u64, crate::Event)>;
+    fn tells(&self) -> tokio::sync::broadcast::Receiver<crate::tell::Tell>;
+    /// The event it is at, and what `viewer` sees of it then.
+    fn shown(&self, viewer: &crate::Caller) -> (u64, Value);
+    /// Itself, calling as `by`.
+    fn by(&self, by: By) -> Arc<dyn Linked>;
+    /// [`Gate::ask`] on it.
+    #[allow(clippy::too_many_arguments)]
+    fn ask(
+        &self,
+        gate: &Gate,
+        viewer: &By,
+        from: Option<&Arc<crate::Request>>,
+        method: &str,
+        args: Value,
+        op: Option<&str>,
+        parts: Option<crate::answer::Parts>,
+    ) -> Result<(Option<Value>, crate::Answer)>;
+    /// [`travel`] on it.
+    fn travel(&self, by: &By, msg: &Value) -> Value;
+    /// [`operate`] on it.
+    fn operate(&self, by: &By, ask: &Value) -> std::result::Result<Value, String>;
+}
+
+impl<T: Cell> Linked for Handle<T> {
+    fn id(&self) -> &'static str {
+        T::ID
+    }
+
+    fn version(&self) -> u32 {
+        T::VERSION
+    }
+
+    fn is_async(&self, method: &str) -> bool {
+        T::async_mode(method).is_some()
+    }
+
+    fn quarantined(&self) -> Option<String> {
+        self.store(|s| s.quarantined().map(String::from))
+    }
+
+    fn closing(&self) -> bool {
+        Handle::closing(self)
+    }
+
+    fn events(&self) -> tokio::sync::broadcast::Receiver<(u64, crate::Event)> {
+        Handle::events(self)
+    }
+
+    fn tells(&self) -> tokio::sync::broadcast::Receiver<crate::tell::Tell> {
+        Handle::tells(self)
+    }
+
+    fn shown(&self, viewer: &crate::Caller) -> (u64, Value) {
+        let (seq, st) = self.snapshot();
+        (seq, crate::shown(&*st, viewer))
+    }
+
+    fn by(&self, by: By) -> Arc<dyn Linked> {
+        Arc::new(Handle::by(self, by))
+    }
+
+    fn ask(
+        &self,
+        gate: &Gate,
+        viewer: &By,
+        from: Option<&Arc<crate::Request>>,
+        method: &str,
+        args: Value,
+        op: Option<&str>,
+        parts: Option<crate::answer::Parts>,
+    ) -> Result<(Option<Value>, crate::Answer)> {
+        gate.ask(self, viewer, from, method, args, op, parts)
+    }
+
+    fn travel(&self, by: &By, msg: &Value) -> Value {
+        travel(self, by, msg)
+    }
+
+    fn operate(&self, by: &By, ask: &Value) -> std::result::Result<Value, String> {
+        operate(self, by, ask)
+    }
+}
+
+/// [`session_of`] on `h`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn session<T: Cell>(
+    h: Handle<T>,
+    w: Sock,
+    limits: Limits,
+    from: String,
+    gate: Gate,
+    signed: Option<By>,
+    calls: Calls,
+    hooks: Hooks,
+    said: Option<Value>,
+) -> std::result::Result<(), String> {
+    session_of(Arc::new(h), w, limits, from, gate, signed, calls, hooks, said).await
+}
+
+/// A link's session, untyped. Boxed here, so its body is made once, in
+/// this crate, not again in each crate that serves a cell.
+#[allow(clippy::too_many_arguments)]
+fn session_of(
+    h: Arc<dyn Linked>,
+    w: Sock,
+    limits: Limits,
+    from: String,
+    gate: Gate,
+    signed: Option<By>,
+    calls: Calls,
+    hooks: Hooks,
+    said: Option<Value>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>> {
+    Box::pin(linked(h, w, limits, from, gate, signed, calls, hooks, said))
+}
+
 /// One aio-rs client, until it leaves. A tool (`Live`) says `tool: true`: it
 /// keeps no copy, so another cell version is fine; on the door it may
 /// also ask for the open links. `gate`: what it may call. `signed`: the user
@@ -986,8 +1111,8 @@ pub(crate) async fn hello(w: &mut Sock, pulse: &mut Pulse, limits: &Limits, byte
 /// no one in particular), or for a peer app the caller `hooks` make of it.
 /// `said`: its hello, when the server read it to find the cell.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn session<T: Cell>(
-    h: Handle<T>,
+async fn linked(
+    h: Arc<dyn Linked>,
     mut w: Sock,
     limits: Limits,
     from: String,
@@ -997,6 +1122,7 @@ pub(crate) async fn session<T: Cell>(
     hooks: Hooks,
     said: Option<Value>,
 ) -> std::result::Result<(), String> {
+    let (id, version) = (h.id(), h.version());
     let mut pulse = Pulse::new();
     let mut pace = Pace::new(limits.calls_per_sec);
     let mut bytes = Pace::new(limits.bytes_per_sec);
@@ -1004,8 +1130,8 @@ pub(crate) async fn session<T: Cell>(
         Some(v) => v,
         None => hello(&mut w, &mut pulse, &limits, &mut bytes).await.ok_or("no hello")?,
     };
-    if hello["t"] != "hello" || hello["cell"] != T::ID {
-        _ = send_ax(&mut w, &json!({ "t": "refused", "why": format!("this server has cell {}", T::ID) })).await;
+    if hello["t"] != "hello" || hello["cell"] != id {
+        _ = send_ax(&mut w, &json!({ "t": "refused", "why": format!("this server has cell {id}") })).await;
         return Err("refused a client: wrong cell".into());
     }
     let tool = hello["tool"] == true;
@@ -1013,8 +1139,8 @@ pub(crate) async fn session<T: Cell>(
     let js = hello["digest"] == "js";
     // A quarantined cell serves no client its last snapshot as if it were
     // current (aio's): the client keeps trying, and a fixed build answers.
-    if !tool && let Some(why) = h.store(|s| s.quarantined().map(String::from)) {
-        return Err(format!("{} is quarantined ({why}): no client is served until a fixed build starts", T::ID));
+    if !tool && let Some(why) = h.quarantined() {
+        return Err(format!("{id} is quarantined ({why}): no client is served until a fixed build starts"));
     }
     // Another app on the door ([`crate::peer`]) is a client there: what the
     // key lets in (`#[client]` methods, `visible`), never the operator's.
@@ -1049,7 +1175,7 @@ pub(crate) async fn session<T: Cell>(
     }
     if as_server {
         said = Some(By::System);
-        eprintln!("[aio] door: a tool of {} calls {} as the server", hello["user"].as_str().unwrap_or("?"), T::ID);
+        eprintln!("[aio] door: a tool of {} calls {} as the server", hello["user"].as_str().unwrap_or("?"), id);
     }
     let not_here = match gate {
         Gate::Local => "a release build's door serves a client's rights: the operator's tools need a debug build",
@@ -1057,13 +1183,13 @@ pub(crate) async fn session<T: Cell>(
     };
     // Copies replay events with their own code: both sides must run the same
     // version of the cell, or the copy would drift.
-    if !tool && hello["v"] != T::VERSION {
+    if !tool && hello["v"] != version {
         let why = format!(
             "this server runs {} v{}, the app has v{} — update {}",
-            T::ID,
-            T::VERSION,
+            id,
+            version,
             hello["v"],
-            if hello["v"].as_u64() < Some(T::VERSION.into()) { "the app" } else { "the server" }
+            if hello["v"].as_u64() < Some(version.into()) { "the app" } else { "the server" }
         );
         _ = send_ax(&mut w, &json!({ "t": "refused", "why": why, "skew": true })).await;
         return Err(format!("refused a client: {why}"));
@@ -1088,8 +1214,8 @@ pub(crate) async fn session<T: Cell>(
     // A tool (`ax call`, the local door) is no client link.
     let _heard = Heard::new(hooks.on_link.filter(|_| !tool), &user, &from);
     let who = format!("{user} from {from}");
-    let listed = Listed::new(Client::new(T::ID, user, wire, from));
-    let meter = (!tool).then_some((T::ID, listed.0));
+    let listed = Listed::new(Client::new(id, user, wire, from));
+    let meter = (!tool).then_some((id, listed.0));
     pulse.link = (!tool).then(|| (listed.0, who.clone()));
     // What it sees goes by its role too, read again on every account change
     // (heard before the read: no change between them is missed).
@@ -1109,12 +1235,12 @@ pub(crate) async fn session<T: Cell>(
             return Err(format!("refused a client: {why}"));
         }
     };
-    let mut view = View::at(&h, &seer, paths);
+    let mut view = View::at(&*h, &seer, paths);
     let mut first = view.full();
     first["limits"] = limits_wire(&limits);
     // What a copy may say past the first protocol (an older server ends a link on what it doesn't know).
     first["can"] = json!(["paths", "seen"]);
-    first["v"] = T::VERSION.into();
+    first["v"] = version.into();
     // Who the copy calls as: a page learns it here (its session's user).
     first["user"] = match &viewer {
         By::User(u) => u.as_str(),
@@ -1153,7 +1279,7 @@ pub(crate) async fn session<T: Cell>(
                     send_ax(&mut w, &p).await?;
                 }
                 while events.try_recv().is_ok() {}
-                if let Some(p) = view.advance(&h, &seer, limits.full_state_percent, js) {
+                if let Some(p) = view.advance(&*h, &seer, limits.full_state_percent, js) {
                     pushes.push(&p, crate::store::now_ms());
                     send_view(&mut w, meter, &p).await?;
                 }
@@ -1168,13 +1294,13 @@ pub(crate) async fn session<T: Cell>(
                 // A new role sees another view: sent whole.
                 if now != seer.role {
                     seer.role = now;
-                    view = View::at(&h, &seer, view.paths.clone());
+                    view = View::at(&*h, &seer, view.paths.clone());
                     send_view(&mut w, meter, &view.full()).await?;
                 }
             }
             () = paced.due() => {
                 paced.sent();
-                if let Some(p) = view.advance(&h, &seer, limits.full_state_percent, js) {
+                if let Some(p) = view.advance(&*h, &seer, limits.full_state_percent, js) {
                     pushes.push(&p, crate::store::now_ms());
                     send_view(&mut w, meter, &p).await?;
                 }
@@ -1190,7 +1316,7 @@ pub(crate) async fn session<T: Cell>(
                     }
                     if paced.now(urgent(&ev)) {
                         paced.sent();
-                        if let Some(p) = view.advance(&h, &seer, limits.full_state_percent, js) {
+                        if let Some(p) = view.advance(&*h, &seer, limits.full_state_percent, js) {
                             pushes.push(&p, crate::store::now_ms());
                             send_view(&mut w, meter, &p).await?;
                         }
@@ -1230,11 +1356,11 @@ pub(crate) async fn session<T: Cell>(
                         let (hh, g, by, req) = (h.clone(), gate.clone(), viewer.clone(), req.clone());
                         let (method, args) = (msg["method"].as_str().unwrap_or_default().to_string(), msg["args"].clone());
                         let op = msg["op"].as_str().map(String::from);
-                        let is_async = T::async_mode(&method).is_some();
+                        let is_async = h.is_async(&method);
                         // Its pieces (`cx.part`) go to this caller, when it streams the call.
                         let parts = (is_async && msg["stream"] == true)
                             .then(|| crate::answer::Parts { tx: parts_tx.clone(), op: msg["op"].clone() });
-                        let r = tokio::task::spawn_blocking(move || g.ask(&hh, &by, req.as_ref(), &method, args, op.as_deref(), parts))
+                        let r = tokio::task::spawn_blocking(move || hh.ask(&g, &by, req.as_ref(), &method, args, op.as_deref(), parts))
                             .await
                             .map_err(|e| e.to_string())?;
                         // An async method's end goes after its reply, once it comes.
@@ -1257,7 +1383,7 @@ pub(crate) async fn session<T: Cell>(
                         // Its change first, then the reply; named, so its copy
                         // knows this change is its own (no conflict with itself).
                         while events.try_recv().is_ok() {}
-                        if let Some(mut p) = view.advance(&h, &seer, limits.full_state_percent, js) {
+                        if let Some(mut p) = view.advance(&*h, &seer, limits.full_state_percent, js) {
                             if msg["op"].is_string() {
                                 p["op"] = msg["op"].clone();
                             }
@@ -1285,14 +1411,14 @@ pub(crate) async fn session<T: Cell>(
                     // What the client's own bus heard, onto this one (aio's diagnostic bus).
                     Some("heard") => crate::report::relay(&who, &msg, &mut relayed),
                     Some("resync") => {
-                        view = View::at(&h, &seer, view.paths.clone());
+                        view = View::at(&*h, &seer, view.paths.clone());
                         send_view(&mut w, meter, &view.full()).await?;
                     }
                     // Other parts of the cell: the view of them, whole. A
                     // refused list leaves the link on what it had, and says so.
                     Some("paths") => match crate::filter::paths_of(&msg["paths"]) {
                         Ok(p) => {
-                            view = View::at(&h, &seer, p);
+                            view = View::at(&*h, &seer, p);
                             send_view(&mut w, meter, &view.full()).await?;
                         }
                         Err(why) => send_ax(&mut w, &json!({ "t": "paths", "err": why })).await?,
@@ -1301,7 +1427,7 @@ pub(crate) async fn session<T: Cell>(
                     Some("travel") => {
                         let reply = if door {
                             let (hh, by) = (h.clone(), viewer.clone());
-                            tokio::task::spawn_blocking(move || travel(&hh, &by, &msg)).await.map_err(|e| e.to_string())?
+                            tokio::task::spawn_blocking(move || hh.travel(&by, &msg)).await.map_err(|e| e.to_string())?
                         } else {
                             json!({ "t": "travel", "err": not_here })
                         };
@@ -1325,7 +1451,7 @@ pub(crate) async fn session<T: Cell>(
                     // Who else is linked is the operator's to know: this user's tools only.
                     Some("clients") => {
                         let reply = if door {
-                            json!({ "t": "clients", "list": listing(T::ID) })
+                            json!({ "t": "clients", "list": listing(id) })
                         } else {
                             json!({ "t": "clients", "err": not_here })
                         };
@@ -1345,11 +1471,11 @@ pub(crate) async fn session<T: Cell>(
                             }
                         };
                         let (hh, by) = (h.clone(), viewer.clone());
-                        let r = tokio::task::spawn_blocking(move || operate(&hh, &by, &ask))
+                        let r = tokio::task::spawn_blocking(move || hh.operate(&by, &ask))
                             .await
                             .map_err(|e| e.to_string())?;
                         while events.try_recv().is_ok() {}
-                        if let Some(p) = view.advance(&h, &seer, limits.full_state_percent, js) {
+                        if let Some(p) = view.advance(&*h, &seer, limits.full_state_percent, js) {
                             pushes.push(&p, crate::store::now_ms());
                             send_view(&mut w, meter, &p).await?;
                         }
