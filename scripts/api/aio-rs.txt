@@ -27,47 +27,17 @@ aio::Call::state: fn state<T: Cell>(&self) -> Option<&T>
 aio::Caller.by: By
 aio::Caller.role: Option<String>
 aio::Caller::user: fn user(&self) -> Option<&str>
-aio::Cell::ASYNC: const &'static [(&'static str, crate::Mode)]
 aio::Cell::CLIENT: const &'static [&'static str]
-aio::Cell::COALESCED: const &'static [&'static str]
 aio::Cell::METHODS: const &'static [&'static str]
-aio::Cell::ON_AIO: const Option<&'static str>
-aio::Cell::ON_START: const Option<&'static str>
-aio::Cell::ON_STOP: const Option<&'static str>
-aio::Cell::REDACTED: const &'static [&'static str]
 aio::Cell::SCHEDULES: const &'static [Declared]
 aio::Cell::SIGNATURES: const &'static [&'static str]
-aio::Cell::SKIP_IF_RUNNING: const &'static [&'static str]
-aio::Cell::TTL: const &'static [&'static str]
-aio::Cell::UNPREDICTED: const &'static [&'static str]
-aio::Cell::UNTRAVELED: const &'static [&'static str]
 aio::Cell::allow: fn allow(&self, who: &Caller, method: &str, args: &Value) -> Result
 aio::Cell::apply: fn apply(&mut self, cx: &Cx, method: &str, args: Value) -> Result<Value>
-aio::Cell::async_mode: fn async_mode(method: &str) -> Option<crate::Mode>
 aio::Cell::check: fn check(&self) -> Result
-aio::Cell::redacts: fn redacts(method: &str) -> bool
-aio::CellData::AIO_CELLS: const &'static [compat::data::Slice]
-aio::CellData::COALESCE: const bool
-aio::CellData::DIAGNOSTICS: const bool
-aio::CellData::FIELDS: const &'static [Field]
 aio::CellData::ID: const &'static str
-aio::CellData::MIGRATES: const bool
-aio::CellData::PERSIST: const bool
-aio::CellData::PERSIST_INCLUDE: const &'static [&'static str]
-aio::CellData::REDACT: const bool
-aio::CellData::RETIRED: const &'static [&'static str]
-aio::CellData::SAVED: const bool
-aio::CellData::SCREENED: const bool
 aio::CellData::SERVER: const &'static [&'static str]
-aio::CellData::SHARED: const bool
-aio::CellData::TABLES: const &'static [(&'static str, &'static str, Option<&'static str>, Option<columns::Columns>)]
-aio::CellData::TRANSACTION: const Option<Transaction>
 aio::CellData::TRANSIENT: const &'static [&'static str]
 aio::CellData::VERSION: const u32
-aio::CellData::advance: fn advance(&mut self, method: &str) -> Result
-aio::CellData::changed_fields: fn changed_fields(&self, other: &Self) -> u64
-aio::CellData::machine_ends: fn machine_ends() -> Vec<String>
-aio::CellData::machine_errors: fn machine_errors(methods: &[&str]) -> Vec<String>
 aio::CellData::migrate: fn migrate(old: Value, from: u32) -> std::result::Result<Self, String>
 aio::CellData::project: fn project(&self, viewer: &Caller) -> Value
 aio::CellData::recovered: fn recovered(self, r: &Recovered) -> Self
@@ -1873,47 +1843,17 @@ aio::prelude::By::User(String)
 aio::prelude::Caller.by: By
 aio::prelude::Caller.role: Option<String>
 aio::prelude::Caller::user: fn user(&self) -> Option<&str>
-aio::prelude::Cell::ASYNC: const &'static [(&'static str, crate::Mode)]
 aio::prelude::Cell::CLIENT: const &'static [&'static str]
-aio::prelude::Cell::COALESCED: const &'static [&'static str]
 aio::prelude::Cell::METHODS: const &'static [&'static str]
-aio::prelude::Cell::ON_AIO: const Option<&'static str>
-aio::prelude::Cell::ON_START: const Option<&'static str>
-aio::prelude::Cell::ON_STOP: const Option<&'static str>
-aio::prelude::Cell::REDACTED: const &'static [&'static str]
 aio::prelude::Cell::SCHEDULES: const &'static [Declared]
 aio::prelude::Cell::SIGNATURES: const &'static [&'static str]
-aio::prelude::Cell::SKIP_IF_RUNNING: const &'static [&'static str]
-aio::prelude::Cell::TTL: const &'static [&'static str]
-aio::prelude::Cell::UNPREDICTED: const &'static [&'static str]
-aio::prelude::Cell::UNTRAVELED: const &'static [&'static str]
 aio::prelude::Cell::allow: fn allow(&self, who: &Caller, method: &str, args: &Value) -> Result
 aio::prelude::Cell::apply: fn apply(&mut self, cx: &Cx, method: &str, args: Value) -> Result<Value>
-aio::prelude::Cell::async_mode: fn async_mode(method: &str) -> Option<crate::Mode>
 aio::prelude::Cell::check: fn check(&self) -> Result
-aio::prelude::Cell::redacts: fn redacts(method: &str) -> bool
-aio::prelude::CellData::AIO_CELLS: const &'static [compat::data::Slice]
-aio::prelude::CellData::COALESCE: const bool
-aio::prelude::CellData::DIAGNOSTICS: const bool
-aio::prelude::CellData::FIELDS: const &'static [Field]
 aio::prelude::CellData::ID: const &'static str
-aio::prelude::CellData::MIGRATES: const bool
-aio::prelude::CellData::PERSIST: const bool
-aio::prelude::CellData::PERSIST_INCLUDE: const &'static [&'static str]
-aio::prelude::CellData::REDACT: const bool
-aio::prelude::CellData::RETIRED: const &'static [&'static str]
-aio::prelude::CellData::SAVED: const bool
-aio::prelude::CellData::SCREENED: const bool
 aio::prelude::CellData::SERVER: const &'static [&'static str]
-aio::prelude::CellData::SHARED: const bool
-aio::prelude::CellData::TABLES: const &'static [(&'static str, &'static str, Option<&'static str>, Option<columns::Columns>)]
-aio::prelude::CellData::TRANSACTION: const Option<Transaction>
 aio::prelude::CellData::TRANSIENT: const &'static [&'static str]
 aio::prelude::CellData::VERSION: const u32
-aio::prelude::CellData::advance: fn advance(&mut self, method: &str) -> Result
-aio::prelude::CellData::changed_fields: fn changed_fields(&self, other: &Self) -> u64
-aio::prelude::CellData::machine_ends: fn machine_ends() -> Vec<String>
-aio::prelude::CellData::machine_errors: fn machine_errors(methods: &[&str]) -> Vec<String>
 aio::prelude::CellData::migrate: fn migrate(old: Value, from: u32) -> std::result::Result<Self, String>
 aio::prelude::CellData::project: fn project(&self, viewer: &Caller) -> Value
 aio::prelude::CellData::recovered: fn recovered(self, r: &Recovered) -> Self

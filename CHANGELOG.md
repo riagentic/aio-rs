@@ -127,6 +127,18 @@ version may break things.
 
 ### Changed
 
+- **Breaking: ax's plumbing is out of the API**: `aio_shell`'s `runtime`,
+  `splash`, `place`, `prune`, `pidlock`, `macmove`, `oneclick`, `fuses`,
+  `swap`, `switches`, `inspect` and `delta`, `html_open`, every
+  `aio_shell::update` item but `cell` and `stub`, `instance::{hand_over,
+  programs, quit_at, DEV_ARGS}`, `guest::preload_refusal` and
+  `page::char_index` are `#[doc(hidden)]`: ax's, changed in any release.
+  So are the macro-made constants of `aio::Cell` and `aio::CellData` but
+  `ID`, `VERSION`, `METHODS`, `SIGNATURES`, `CLIENT`, `SCHEDULES`,
+  `SERVER` and `TRANSIENT`, and their `advance`, `changed_fields`,
+  `machine_errors`, `machine_ends`, `async_mode` and `redacts`. Code that
+  named one still compiles; it may break in any release: ask for what it
+  needs in an issue.
 - **Breaking:** `[build] budget_mb` takes a fraction (`14.5`) or a size
   as `[budgets]` writes one (`"14.5MB"`): `Build::budget_mb` is
   `Option<f64>`.

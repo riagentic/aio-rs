@@ -72,7 +72,7 @@ up to 30 s for its lock: a new build replacing an old one.
 
 ## The shared runtime
 
-aio-rs pins one Electron version (`aio_shell::runtime::VERSION`, the same
+aio-rs pins one Electron version (`ax setup` names it; the same
 release aio ships). The app never chooses it; an aio-rs upgrade moves it.
 
 Where the window's runtime comes from, first match wins:

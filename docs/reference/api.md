@@ -105,12 +105,14 @@ assert_eq!(h.state().n, 2); // the refused call changed nothing
 | `aio_shell::desktop` | notifications and the tray menu |
 | `aio_shell::os` | open a link, a file or a folder in the OS's own app |
 | `aio_shell::page` | what only the window can do: scroll, caret, copy, print, file pickers |
-| `aio_shell::update`, `delta`, `swap` | updates: check, download (whole or delta), stage, swap, roll back |
-| `aio_shell::runtime`, `prune`, `fuses`, `switches` | the shared runtime: fetch, prune, its fuses, allowed Chromium switches |
-| `aio_shell::splash`, `place`, `macmove`, `oneclick` | splash, window placement, macOS move to Applications, the Windows one-click exe |
-| `aio_shell::instance`, `inspect` | one instance per app; the dev DevTools door `ax shot` uses |
+| `aio_shell::update::cell`, `stub` | the `updates` cell the shell runs (checks, downloads, swaps, rolls back), and a stub of it for UI tests |
+| `aio_shell::instance` | one instance per app: `launches`, `quit` |
 | `aio_shell::android` | the Android host (target `android`) |
 | `aio_shell::web` | serving the browser build (feature `web` of `aio-rs-shell`) |
+
+The shared runtime, splash, window placement, update swap and the other
+modules `ax` drives (`runtime`, `splash`, `prune`, `pidlock`…) are hidden
+from the docs: ax's plumbing, not API, they change in any release.
 
 In `aio`: `aio::boot` (the boot report), `aio::paths` (where files are),
 `aio::lifecycle` (stop, restart, children), `aio::on_stopping`,
