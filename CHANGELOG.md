@@ -539,6 +539,10 @@ version may break things.
   taken silently, the second replacing the first; it is a compile error
   at the second now (two handlers of one event still both run).
 
+- `input { value: v }` with `v` going from `Some` to `None` removed the
+  `value` attribute and left the field showing the old text (what a field
+  shows is its property): `None` clears it now, as `dangerous_inner_html`'s.
+
 ## [0.4.2] - 2026-11-11
 
 A fix release from porting a large app: aio crash-journal replay for a

@@ -504,3 +504,21 @@ fn a_format_in_a_hole_reads_inline_names() {
     p.click("go");
     assert_eq!(p.text("log"), "2 $3");
 }
+
+/// A field's `value` (and `innerHTML`) is a property: an `Option`'s `None`
+/// clears it, as removing the attribute alone would leave the old text shown.
+#[test]
+fn a_value_that_turns_none_clears_the_field() {
+    fn app() -> View {
+        let v = Signal::new(Some("Ada".to_string()));
+        rsx! {
+            input { "data-t": "f", value: v.get() }
+            div { "data-t": "h", dangerous_inner_html: v.get() }
+            button { "data-t": "clear", onclick: move |_| v.set(None), "Clear" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    assert_eq!((p.attr("f", "value").as_deref(), p.attr("h", "innerHTML").as_deref()), (Some("Ada"), Some("Ada")));
+    p.click("clear");
+    assert_eq!((p.attr("f", "value").as_deref(), p.attr("h", "innerHTML").as_deref()), (Some(""), Some("")));
+}

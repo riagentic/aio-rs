@@ -696,6 +696,8 @@ pub(crate) fn set_attr_now(id: u32, name: &str, v: &AttrValue<'_>) {
         (AttrValue::Bool(b), true) if is_flag_prop(name) => (op::SET_BOOL, bool(*b)),
         (AttrValue::None, true) if is_flag_prop(name) => (op::SET_BOOL, "false"),
         (AttrValue::Bool(true), true) => (op::SET_PROP, ""),
+        // What a field shows is its property: none clears it (no attribute shows it).
+        (AttrValue::Bool(false) | AttrValue::None, true) if matches!(name, "value" | "innerHTML") => (op::SET_PROP, ""),
         (AttrValue::Bool(true), false) => (op::SET_ATTR, ""),
         (AttrValue::Bool(false) | AttrValue::None, _) => (op::REMOVE_ATTR, ""),
     };
