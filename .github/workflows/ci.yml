@@ -145,25 +145,7 @@ jobs:
         with:
           path: ~/.cache/aio-dx-rows
           key: aio-dx-${{ matrix.part }}-rows-${{ steps.dx.outputs.base }}-${{ steps.dx.outputs.machine }}
-      # Gradle's downloads (the Android plugin and its libraries), so the APK
-      # builds don't fetch them from Maven Central each run (it answers a
-      # busy runner with 429). Saved by main's runs, as the Rust caches.
-      - id: gradle
-        if: matrix.part == 'apk'
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('crates/aio-cli/android/**/*.kts', 'crates/aio-cli/android/gradle.properties') }}
       - run: scripts/dx-metrics --check --${{ matrix.part }} --base "${{ steps.dx.outputs.base }}" --rows ~/.cache/aio-dx-rows
-      - if: always() && matrix.part == 'apk' && github.event_name == 'push' && steps.gradle.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('crates/aio-cli/android/**/*.kts', 'crates/aio-cli/android/gradle.properties') }}
       - if: always() && (github.event_name == 'push' || steps.dxrows.outputs.cache-hit != 'true')
         uses: actions/cache/save@v4
         with:
