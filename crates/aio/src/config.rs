@@ -383,7 +383,7 @@ mod tests {
         let c =
             Config::parse("[app]\nid = \"t\"\n[log]\nkeep = 2\nfile_mb = 1\nheartbeat = 0\nsuppress = [\"t.tick\"]")
                 .unwrap();
-        assert_eq!((c.log.keep, c.log.file_mb, c.log.heartbeat, c.log.suppress), (2, 1, 0, vec!["t.tick".into()]));
+        assert_eq!((c.log.keep, c.log.file_mb, c.log.heartbeat, c.log.suppress), (2, 1, None, vec!["t.tick".into()]));
         assert!(Config::parse("[app]\nid = \"t\"\n[log]\nkeep = 0").unwrap_err().contains("at least 1"));
         assert!(Config::parse("[app]\nid = \"t\"\n[log]\nfile_mb = 0").is_err());
         let c = Config::parse("[app]\nid = \"t\"\n[memory]\nhigh = 70\nclear = 60").unwrap();
@@ -763,6 +763,30 @@ mod tests {
         assert!(parse_span("10").is_err());
         assert!(parse_span("213503982334602d").is_err(), "too long a span is an error, not wrapped round");
         assert!(Config::parse("[app]\nid = \"t\"\n[history]\nkeep = \"213503982334602d\"").is_err());
+    }
+
+    #[test]
+    fn every_time_key_takes_a_span_and_its_old_number() {
+        assert_eq!(parse_span("100ms"), Ok(Duration::from_millis(100)));
+        assert_eq!(span_text(Duration::from_millis(1500)), "1500ms");
+        assert!(parse_span("1.5s").unwrap_err().contains("ms, s, m, h or d"));
+        assert!(parse_span("ms").unwrap_err().contains("expected a whole number"));
+        let c = |toml: &str| Config::parse(&format!("[app]\nid = \"t\"\n{toml}"));
+        let spans = c("[data]\ncoalesce = \"250ms\"\n[server.limits]\nsync_interval = \"1s\"\n[log]\nheartbeat = \"off\"\n\
+                       [perf]\ncall_ceiling = \"2m\"\n[perf.methods]\n\"t.m\" = \"2s\"")
+        .unwrap();
+        let numbers = c("[data]\ncoalesce_ms = 250\n[server.limits]\nsync_interval_ms = 1000\n[log]\nheartbeat = 0\n\
+                         [perf]\ncall_ceiling = 120000\n[perf.methods]\n\"t.m\" = 2000")
+        .unwrap();
+        assert_eq!(spans, numbers, "a `_ms` key and a bare number are the old spelling of the same span");
+        assert_eq!((spans.data.coalesce, spans.log.heartbeat), (Duration::from_millis(250), None));
+        assert_eq!(c("[log]\nheartbeat = 60").unwrap().log.heartbeat, Some(Duration::from_secs(60)), "seconds, as before");
+        assert!(c("[data]\ncoalesce = \"2m\"").unwrap_err().contains("over a minute"));
+        assert!(c("[data]\nbackup_every = \"500ms\"").unwrap_err().contains("[data] backup_every must be at least 1s"));
+        assert!(c("[history]\nkeep = 90").is_err(), "a span key that never took a number still doesn't");
+        let v = serde_json::to_value(&spans).unwrap();
+        assert_eq!((v["data"]["coalesce"].as_str(), v["perf"]["call_ceiling"].as_str()), (Some("250ms"), Some("2m")));
+        assert_eq!(serde_json::from_value::<Config>(v).unwrap(), spans);
     }
 
     #[test]

@@ -90,10 +90,10 @@ with the fix (at most once per method per 10 s), a line in
 
 ```toml
 [perf]
-method = 50
+method = "50ms"
 
 [perf.methods]
-"shop.import" = 2000
+"shop.import" = "2s"
 
 [perf.storm]
 rate = 100
@@ -231,7 +231,7 @@ files.
 | `#[coalesce]`, or `cx.after` with one key (debounce) | fewer commits |
 | keystrokes in a view's own signal, a call on submit | no call per key |
 | bulk rows written by an effect in one transaction, a summary in state | one commit for the batch |
-| `[perf] method = 20` | catch slow methods early |
+| `[perf] method = "20ms"` | catch slow methods early |
 | `[perf.storm] breaker = true` | a runaway loop can't eat the machine |
 
 ### Long lists

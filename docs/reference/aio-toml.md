@@ -50,11 +50,10 @@ per section).
 
 | Type | Written as | Rules |
 |---|---|---|
-| span | `"90d"`, `"6h"`, `"30m"`, `"15s"` | a whole number, then one unit: `d`, `h`, `m` or `s`. No fractions (`"1.5h"`), no mixes (`"1h30m"`). |
+| span | `"90d"`, `"6h"`, `"30m"`, `"15s"`, `"250ms"` | a whole number, then one unit: `d`, `h`, `m`, `s` or `ms`. No fractions (`"1.5h"`), no mixes (`"1h30m"`). Every setting of how long or how often is one (the `[vitals]` thresholds, ms, and `[perf.storm] secs` are counts of what is measured); a key that took a number before (`coalesce_ms = 100`, `[perf] method = 50`, `[log] heartbeat = 3600`) still takes it, in its old unit. |
 | span or off | a span, or `"off"` | `"off"` turns the thing off (or "no limit": each key says). |
 | size | `"1MB"`, `"512KB"`, `"1.5 MB"`, `2048` | a number (fractions allowed), then `B`, `K`/`KB`, `M`/`MB` or `G`/`GB`, any case; `KB` = 1024. A bare number is bytes. Zero is refused. |
 | rate | `"20/s"`, `"20/sec"`, `"20 per second"`, `20` | per second; zero is refused. |
-| milliseconds | `5`, `2000` | a whole number. |
 | id | `"notes"` | letters, digits, `-`, `_`, `.`; not empty, not starting with `.`. |
 | host | `"api.example.org"`, `"10.0.0.5:8443"`, `"*.example.org"` | no scheme, path, `@` or space. |
 
@@ -84,7 +83,7 @@ retire = []
 pragmas = []
 persist = true
 only_persist = false
-coalesce_ms = 100
+coalesce = "100ms"
 backup_every = "off"
 backup_keep = 7
 
@@ -115,7 +114,7 @@ clients = 256
 max_message = 4194304
 calls_per_sec = 200
 bytes_per_sec = 8388608
-sync_interval_ms = 50
+sync_interval = "50ms"
 full_state_percent = 50
 
 [client]
@@ -159,14 +158,14 @@ color_scheme = "system"
 level = "info"
 keep = 5
 file_mb = 10
-heartbeat = 3600
+heartbeat = "1h"
 suppress = []
 per_run = false
 # dir = "/var/log/notes"    # default: <home>/logs
 
 [perf]
-effect = 5
-call_ceiling = 30000
+effect = "5ms"
+call_ceiling = "30s"
 
 [perf.storm]
 rate = 200
@@ -257,7 +256,7 @@ The store: one SQLite file in the app's `data/` folder
 | `pragmas` | statements | `[]` | Extra `PRAGMA` statements run on the store after aio's own (aio's `dbPragmas`). One SQLite ignores refuses the boot. |
 | `persist` | bool | `true` | `false`: the state lives in memory only, no store is opened, every launch starts from the defaults (aio's `persist: false`; the flag `--no-persist` does it for one launch). |
 | `only_persist` | bool | `false` | `true`: only `#[cell(persist)]` cells are saved; every other cell opens in memory and starts from its defaults each launch (aio's `cellDefaults: { persist: "none" }`). `false`: every cell opened on the store is saved, unless `#[cell(persist = false)]`. |
-| `coalesce_ms` | ms | `100` | How long a run of `#[coalesce]` calls is held before it is written (aio's `persistDebounceMs`); `0` writes each call. At most 60000. |
+| `coalesce` | span | `"100ms"` | How long a run of `#[coalesce]` calls is held before it is written (aio's `persistDebounceMs`); `"0s"` writes each call. At most a minute. Was `coalesce_ms` (ms), still read. |
 | `backup_every` | span or `"off"` | `"off"` | Timed whole backups into `<home>/backups` while the app runs ([backups](../persistence/files.md#scheduled-backups)). |
 | `snapshot_every` | span or `"off"` | `"off"` | How often the store's good copy is made again while the app runs (aio's rolling `db.snapshot` that `checkIntegrityOnBoot` restores from): a damaged store then loses at most this much. `"off"`: once a day, at boot. Each copy is checked before it replaces the last. |
 | `backup_keep` | count | `7` | Timed backups kept, the newest (at least 1); hand-made ones are never removed. |
@@ -405,7 +404,7 @@ learn them on connect, check sizes before sending and pace themselves.
 | `max_message` | bytes | `4194304` (4 MB) | Largest message a client may send. |
 | `calls_per_sec` | number | `200` | Calls a link may make per second (bursts up to twice that). |
 | `bytes_per_sec` | bytes | `8388608` (8 MB) | Bytes a link may send per second (bursts up to twice that). |
-| `sync_interval_ms` | ms | `50` | A link is sent at most one change per this window (aio's `syncIntervalMs`): the first of a burst at once, the rest folded into one patch; a person's call (a user's or an agent's) goes at once. `0`: each change at once. |
+| `sync_interval` | span | `"50ms"` | A link is sent at most one change per this window (aio's `syncIntervalMs`): the first of a burst at once, the rest folded into one patch; a person's call (a user's or an agent's) goes at once. `"0s"`: each change at once. Was `sync_interval_ms` (ms), still read. |
 | `full_state_percent` | percent | `50` | A patch over this share of the whole view goes as the view (aio's `fullStateThreshold`, `0.5` = `50`). `0`: always the view. Patches under 256 bytes always go as patches. |
 
 ### [server.dirs], [server.public_dirs]
@@ -639,8 +638,8 @@ start's Electron download runs on it, its bar under the text
 |---|---|---|---|
 | `image` | path | required | A `.png` in the app's folder (`"assets/splash.png"`, relative, no `..`); `…@2x.png` is drawn at half its pixel size. It must exist as the app builds: it is built in. |
 | `text` | string | none | Under the image, on the desktop, the web and Android: `{title}` is the app's name, `{version}` its version (what `--version` prints); `{got}`, `{total}` and `{pct}` read `0`, `?`, `?`; any other `{word}` stays as written. |
-| `min_ms` | milliseconds | `400` | It stays at least this long once shown. |
-| `max_ms` | milliseconds | `15000` | No window by then: it goes anyway. At least `min_ms`. |
+| `min` | span | `"400ms"` | It stays at least this long once shown. Was `min_ms` (ms), still read. |
+| `max` | span | `"15s"` | No window by then: it goes anyway. At least `min`. Was `max_ms`, still read. |
 | `background` | `["#light", "#dark"]` | the app's colours | Each `#rgb` or `#rrggbb`. |
 | `show` | `always`, `first-start`, `never` | `"always"` | When it shows: every start; only while a first start downloads Electron; never (the download window is then the plain one). `Window { splash_show }` decides at run time instead. |
 | `download_text` | string | `[build.download_window] text` | The line under the bar while the splash draws a first start's download: `{title}`, `{version}` (the app's), `{got}` and `{total}` (MB), `{pct}`. |
@@ -651,7 +650,7 @@ start's Electron download runs on it, its bar under the text
 | `margin` | px | 24 at the sides, 18 at the bottom | The text's gap to the edges. |
 | `radius` | px | `0` | The box's corner radius (the window is clear around it). |
 | `border` | `#rgb` / `#rrggbb` | none | A 1 px border. |
-| `fade_ms` | ms | `100`; Android `200` | Its fade out (on the desktop where the OS fades windows: Windows, macOS). |
+| `fade` | span | `"100ms"`; Android `"200ms"` | Its fade out (on the desktop where the OS fades windows: Windows, macOS). Was `fade_ms`, still read. |
 | `font` | family | the system's | The text's font: a generic family (`serif`, `sans-serif`, `monospace`; Android also `sans-serif-condensed`…) or a font's name. |
 | `font_size`, `bold` | px (Android: points), bool | `13` (Android `14`), `false` | The text's size and weight. |
 | `text_color` | `["#light", "#dark"]` | the app's | The text's colour. |
@@ -684,7 +683,7 @@ together, whatever the app does ([debugging](../debugging/README.md)).
 | `level` | `trace`, `debug`, `info`, `warn`, `error` | `"info"` | The lowest level written. |
 | `keep` | number | `5` | Files kept per log (`app.log`, `app.1.log`…), at least 1. |
 | `file_mb` | number | `10` | A file rotates at this size, at least 1. |
-| `heartbeat` | seconds | `3600` | Seconds between `heartbeat` lines (uptime, calls, errors); 0: none. |
+| `heartbeat` | span or off | `"1h"` | How often a `heartbeat` line (uptime, calls, errors) is written; `"off"`: never. A bare number is seconds (`0`: off), as before. |
 | `suppress` | methods | `[]` | Methods (`"notes.tick"`) whose calls are not logged, even at `debug`: a method called many times a second. |
 | `dir` | absolute or `~/…` | `<home>/logs` | The log folder of the app's own home (aio's `logging.dir`). A profile, an instance, `--home` or `AIORT_DATA` keeps its own `logs/`, so two copies never share a file. `ax logs` finds it from the app's workspace. Absolute as `[home] dir`. |
 | `per_run` | bool | `false` | Each run starts fresh files (aio's per-run `debug.log`): the last run's move to `app.1.log`…, so `keep` runs are kept (a run past `file_mb` still rotates). |
@@ -698,23 +697,24 @@ suppress = ["clock.tick"]
 
 ## [perf]
 
-Time budgets in milliseconds (aio's `perfBudget`); a call or step over
-its budget is a perf violation in the log and `ax health`.
+Time budgets (aio's `perfBudget`), spans; a bare number is ms, as
+before. A call or step over its budget is a perf violation in the log and
+`ax health`.
 
 | Key | Type | Default | What it is |
 |---|---|---|---|
-| `method` | milliseconds | 16 (debug), 100 (release) | A method's own time. |
-| `effect` | milliseconds | `5` | One effect step. |
-| `call_ceiling` | milliseconds | `30000` | How long each await of an async method may take (aio's `effectTimeoutMs`); one that never settles is cut off, its caller told. A `#[long]` method has none, a `#[long(ms)]` one its own. |
-| `methods` | table | `{}` | Per method, `"cell.method" = ms`: one meant to be slow while every other stays strict. A key naming no method of its cell is reported (a typo would budget nothing). |
-| `effects` | table | `{}` | Per effect, `"cell.name" = ms` (the name its key starts with). |
+| `method` | span | `"16ms"` (debug), `"100ms"` (release) | A method's own time. |
+| `effect` | span | `"5ms"` | One effect step. |
+| `call_ceiling` | span | `"30s"` | How long each await of an async method may take (aio's `effectTimeoutMs`); one that never settles is cut off, its caller told. A `#[long]` method has none, a `#[long("2m")]` one its own. |
+| `methods` | table | `{}` | Per method, `"cell.method" = "2s"`: one meant to be slow while every other stays strict. A key naming no method of its cell is reported (a typo would budget nothing). |
+| `effects` | table | `{}` | Per effect, `"cell.name" = "50ms"` (the name its key starts with). |
 
 ```toml
 [perf]
-method = 50
+method = "50ms"
 
 [perf.methods]
-"notes.import" = 2000
+"notes.import" = "2s"
 ```
 
 ### [perf.storm]
@@ -854,7 +854,7 @@ see [views](../ui/views.md) and the tables in
 | `scope: "client"` | a cell neither `persist` nor `shared`, in the view's module, or an `aio::ui::Global` |
 | `cancelOn` | `cx.abort("key")` from the method that should cancel ([effects](../state/effects.md)) |
 | `concurrency` | `#[mode(newest)]`, `#[mode(first)]` on a `pub async fn` (`first` joins a running call with the same arguments); per effect, `.mode(Mode::Newest / Queue / First)`; calls are always one at a time per cell |
-| `ttl` | `#[ttl(ms)]` on a `pub async fn` |
+| `ttl` | `#[ttl("1m")]` on a `pub async fn` |
 | `long` | `#[long]` on a `pub async fn` |
 | `selectors` | `#[derived] fn f(&self) -> T`; `#[derived(reads = [a, b])]` for a memo kept while those fields stay the same |
 | `listensTo` | `target.listens_to(&source, "method", f)` on a `Handle` |
@@ -897,7 +897,7 @@ see [views](../ui/views.md) and the tables in
 | `updates` | `[updates]` |
 | `feedback` | `[feedback]` |
 | `persist`, `persistKey`, `persistMode` | `#[cell(persist)]` per cell, `[data] persist = false` or `--no-persist` app-wide; each cell is its own row, keyed by its id |
-| `persistDebounceMs` | `[data] coalesce_ms` for `#[coalesce]` runs (default `aio::PERSIST_DEBOUNCE`, 100 ms) |
+| `persistDebounceMs` | `[data] coalesce` for `#[coalesce]` runs (default `aio::PERSIST_DEBOUNCE`, 100 ms) |
 | `ui` | `aio_shell::Window` in the launcher (title, size, icon, tray, head, lang, dir), `[app] lang`/`dir`, `[ui]` |
 | `baseDir`, `watch` | `ax dev` watches the app's crate; `[dev] watch` (or `--watch=`) only some folders of it |
 | `serveDirs`, `assets` | `[server.dirs]`, `[server.public_dirs]` |
@@ -917,7 +917,7 @@ see [views](../ui/views.md) and the tables in
 | `budgets` | `[budgets]` |
 | `renderBudget` | `[vitals.render]` |
 | `wire` | none: the wire's encoding is fixed ([wire](../migration/wire.md)) |
-| `effectTimeoutMs` | `[perf] call_ceiling` (ms, 30000 by default), the await ceiling of async methods; `#[long]` exempts one, `#[long(ms)]` gives one its own; per effect, `Effect::timeout(d)` |
+| `effectTimeoutMs` | `[perf] call_ceiling` (`"30s"` by default), the await ceiling of async methods; `#[long]` exempts one, `#[long("2m")]` gives one its own; per effect, `Effect::timeout(d)` |
 | `freezeState` | not needed: a method gets `&mut` of a copy, the committed state is an `Arc` nobody can change |
 | `memory` | `[memory]` |
 | `circuitBreaker` | `aio::Cells::trip_after(max, window)` |
@@ -930,7 +930,7 @@ see [views](../ui/views.md) and the tables in
 | `childWindows`, `electron` | `aio_shell::Window { web, permissions, require_sandbox, show_cap_ms, … }`; `electron.downloadWindow` is `[build.download_window]`, `allowLocalPeers` `[server] local_peers`; `ignoreDebugEnv` is always on in a release build |
 | `splash` | `[build.splash]`; its `show` at run time: `Window { splash_show }` |
 | `libraryMode` | `Handle::memory()`, `Handle::open` without `aio_shell::start` (tests, embedding) |
-| `syncIntervalMs`, `fullStateThreshold` | `[server.limits] sync_interval_ms`, `full_state_percent` (`0.5` is `50`) |
+| `syncIntervalMs`, `fullStateThreshold` | `[server.limits] sync_interval`, `full_state_percent` (`0.5` is `50`) |
 | `routes` | `aio::http::Http::route(Route::get(…))` |
 | `maxConnections`, `wsLimits` | `[server.limits]` |
 | `appFlags` | `[app] flags`: declared names; a near-miss is refused with the one meant, the rest reach the app |

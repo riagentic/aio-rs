@@ -411,7 +411,7 @@ assert_eq!(diff(&a, &b), [Op::Append { path: vec![Step::Key("reply".into())], va
   server serves every shared cell on one `/ws` (`Http::cell`), and a
   client's links (one per cell, each naming its cell in its hello) share
   one socket.
-- **Pacing** (aio's `syncIntervalMs`, `[server.limits] sync_interval_ms`,
+- **Pacing** (aio's `syncIntervalMs`, `[server.limits] sync_interval`,
   50 ms): a link gets the first change of a burst at once, then at most
   one patch per window, the changes between folded into one. A person's
   call (a user's or an agent's) skips the window, so typing stays

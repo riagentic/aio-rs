@@ -422,7 +422,7 @@ assert_eq!((h.state().free, h.state().held, h.state().sold), (5, 0, 1));
   second after the first; `#[mode(newest)]` lets a new call supersede
   the running one, `#[mode(first)]` shares the answer of a running one with the same
   arguments, and
-  `#[ttl(ms)]` keys them by the arguments.
+  `#[ttl("1m")]` keys them by the arguments.
 - A refusal in a later part refuses that part only. What earlier parts
   committed stays, so a later part must leave the state whole on its
   own (the `free += n` above).
@@ -430,8 +430,8 @@ assert_eq!((h.state().free, h.state().held, h.state().sold), (5, 0, 1));
   One that takes longer is cut off, said in the log and a report, its
   caller is told, and its later parts never run: undo what the first part
   held in `restore` or with a schedule. `#[long]` lifts the ceiling for a
-  method that waits by nature; `#[long(ms)]` gives one its own (aio's
-  per-method timeout: `#[long(120000)]` for a two-minute import).
+  method that waits by nature; `#[long("2m")]` gives one its own (aio's
+  per-method timeout, a span as in `aio.toml`, or ms: `#[long(120000)]`).
 - `cx.abort("sell")` from another method (a cancel button) stops the
   waiting awaits; their later parts never run, so that method gives back
   what they held.
@@ -575,8 +575,8 @@ stay apart, chain the calls and make each step undoable:
 | `args` schema | the argument types, then `ensure!` |
 | `transaction: true` / `{ serialize: true }` / `{ conflict: "warn" }`, `s.$commit()`, `s.$commit(ms)`, `s.$live`, `TX_CONFLICT` | `#[cell(transaction)]` / `transaction(serialize)` / `transaction(conflict = "warn")`, `cx.commit()`, `cx.commit_every(ms)`, `cx.live_state::<Self>()`, `Code::TxConflict`; reads found in the method's body ([transactions](#transactions)) |
 | `cancelOn`, `s.$signal` | `cx.abort(key)`; an aborted await's later parts never run |
-| `concurrency: "newest" / "first" / "queue"`, `ttl` | `#[mode(newest)]` / `#[mode(first)]` / the default; `#[ttl(ms)]`; `Mode` on an effect |
-| `long: [...]`, `effectTimeoutMs`, a method's own timeout | `#[long]`; `[perf] call_ceiling`; `#[long(ms)]` |
+| `concurrency: "newest" / "first" / "queue"`, `ttl` | `#[mode(newest)]` / `#[mode(first)]` / the default; `#[ttl("1m")]`; `Mode` on an effect |
+| `long: [...]`, `effectTimeoutMs`, a method's own timeout | `#[long]`; `[perf] call_ceiling`; `#[long("2m")]` |
 | `blocking(id, fn)`, `blocking.cancel(id)` | `aio::effect::blocking(key, f)`, `cancel_blocking(key)` |
 | `cell.$pending()` | `h.pending(Some("m"))`, `use_pending` |
 | `.type`, generated actions | the method's name; `Cell::METHODS`, `Cell::SIGNATURES` |

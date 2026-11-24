@@ -252,8 +252,8 @@ or the pairs `api_key`, `private_key`, `secret_key`, `access_token`,
 | `#[skip_travel]` | time travel steps over its events and its timeline leaves them out (aio's `skipActions`: a tick, a hover); they stay in the log |
 | `#[redact]` | its arguments are never kept (a passphrase); its event keeps the state instead |
 | `#[every("5m")]`, `#[cron("0 9 * * 1")]` | a schedule ([scheduling](scheduling.md)) |
-| `#[ttl(ms)]` | an async method's answer reused for the same arguments |
-| `#[long]`, `#[long(ms)]` | lifts the await ceiling of an async method, or gives it its own |
+| `#[ttl("1m")]` | an async method's answer reused for the same arguments |
+| `#[long]`, `#[long("2m")]` | lifts the await ceiling of an async method, or gives it its own |
 | `#[on_start]`, `#[on_stop]` | called as the cell goes live and as it stops ([lifecycle](#lifecycle)) |
 | `#[on_aio]` | in a ported app, run at boot on what aio changed in the file (feature `compat`, [data](../migration/data.md)) |
 

@@ -672,7 +672,7 @@ fn ok_type(r: &ReturnType) -> syn::Result<Option<Type>> {
 /// …(&self, …) -> T` is a derived value (aio selector), cached through
 /// `<Name>Derived` per state, or with `#[derived(reads = [rows, prices])]`
 /// while those fields stay the same (aio's `memoLast`). A `pub async fn`
-/// awaits I/O inline (see `lower`), `#[ttl(ms)]` reuses its answer, and
+/// awaits I/O inline (see `lower`), `#[ttl("1m")]` reuses its answer, and
 /// `#[mode(newest)]` / `#[mode(first)]` say what a second call does while one runs.
 /// `#[every("5m")]` or `#[cron("0 9 * * 1")]` (`, skip_if_running`) on a
 /// method without arguments runs it on that schedule (`aio::Declared`).
@@ -786,15 +786,9 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
         let inv = take(&mut f.attrs, "invariant").is_some();
         let ttl = match take(&mut f.attrs, "ttl") {
             Some(a) if f.sig.asyncness.is_none() => {
-                return Err(syn::Error::new(a.span(), "#[ttl(ms)] goes on a `pub async fn` method"));
+                return Err(syn::Error::new(a.span(), "#[ttl] goes on a `pub async fn` method"));
             }
-            Some(a) => {
-                let ms: i64 = a.parse_args::<LitInt>()?.base10_parse()?;
-                if ms <= 0 {
-                    return Err(syn::Error::new(a.span(), "#[ttl(ms)]: ms must be > 0"));
-                }
-                Some(ms)
-            }
+            Some(a) => Some(span(&a.parse_args()?, "i64", "#[ttl]")?),
             None => None,
         };
         if take(&mut f.attrs, "skip_travel").is_some() {
@@ -818,14 +812,11 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
         {
             return Err(syn::Error::new(a.span(), "#[long] goes on a `pub async fn` method"));
         }
-        // `#[long]`: no ceiling; `#[long(ms)]`: its own (aio's per-method timeout).
+        // `#[long]`: no ceiling; `#[long("2m")]`: its own (aio's per-method timeout).
         let ceiling = match &long {
             None => lower::Ceiling::App,
             Some(a) if matches!(a.meta, syn::Meta::Path(_)) => lower::Ceiling::None,
-            Some(a) => match a.parse_args::<LitInt>()?.base10_parse::<u64>()? {
-                0 => return Err(syn::Error::new(a.span(), "#[long(ms)]: ms must be > 0")),
-                ms => lower::Ceiling::Ms(ms),
-            },
+            Some(a) => lower::Ceiling::Ms(span(&a.parse_args()?, "u64", "#[long]")?),
         };
         let mode = match take(&mut f.attrs, "mode") {
             Some(a) if f.sig.asyncness.is_none() => {
@@ -883,7 +874,7 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
                 return Err(syn::Error::new(c.span(), "#[coalesce] goes on a `pub fn (&mut self, …)` method"));
             }
             if ttl.is_some() || long.is_some() {
-                let what = if ttl.is_some() { "#[ttl(ms)]" } else { "#[long]" };
+                let what = if ttl.is_some() { "#[ttl]" } else { "#[long]" };
                 return Err(syn::Error::new(f.sig.span(), format!("{what} goes on a `pub async fn` method")));
             }
             continue;
@@ -916,7 +907,7 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
                 ));
             };
             let (newest, first) = (mode.to_string().contains("Newest"), mode.to_string().contains("First"));
-            let l = lower::lower(f, r, ttl, ceiling, newest, first)?;
+            let l = lower::lower(f, r, ttl.clone(), ceiling, newest, first)?;
             steps.extend(l.fns.into_iter().map(ImplItem::Fn));
             arms.extend(l.arms);
             asyncs.push(quote!((#mname, #mode)));
@@ -1131,7 +1122,7 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
     })
 }
 
-/// `#[every(300_000)]`, `#[every("5m")]` (d, h, m, s) or `#[cron("0 9 * * 1")]`,
+/// `#[every(300_000)]`, `#[every("5m")]` or `#[cron("0 9 * * 1")]`,
 /// each optionally `, skip_if_running`: its `every`, `cron` and skip flag.
 fn schedule(h: &str, a: &Attribute) -> syn::Result<(Tokens, Tokens, bool)> {
     let parts = a.parse_args_with(syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated)?;
@@ -1142,24 +1133,20 @@ fn schedule(h: &str, a: &Attribute) -> syn::Result<(Tokens, Tokens, bool)> {
     };
     let bad = |why: &str| Err(syn::Error::new(a.span(), format!("#[{h}]: {why}")));
     let (every, cron) = match (h, lit(it.next())) {
-        ("every", Some(syn::Lit::Int(n))) => (n.base10_parse::<i64>()?, None),
-        ("every", Some(syn::Lit::Str(s))) => match span_ms(&s.value()) {
-            Some(ms) => (ms, None),
-            None => return bad("a span is a number and d, h, m or s (\"5m\"), or ms"),
-        },
-        ("cron", Some(syn::Lit::Str(s))) => (0, Some(s.value())),
+        ("every", Some(l @ (syn::Lit::Int(_) | syn::Lit::Str(_)))) => (Some(span(&l, "i64", "#[every]")?), None),
+        ("cron", Some(syn::Lit::Str(s))) => (None, Some(s.value())),
         ("every", _) => return bad("give the interval: #[every(\"5m\")] or #[every(300_000)]"),
         _ => return bad("give the expression: #[cron(\"0 9 * * 1\")]"),
     };
-    if cron.is_none() && every <= 0 {
-        return bad("the interval must be > 0");
-    }
     let skip = match it.next() {
         None => false,
         Some(Expr::Path(p)) if p.path.is_ident("skip_if_running") && it.next().is_none() => true,
         Some(_) => return bad("after the timing, only `skip_if_running`"),
     };
-    let every = if cron.is_some() { quote!(None) } else { quote!(Some(#every)) };
+    let every = match every {
+        Some(ms) => quote!(Some(#ms)),
+        None => quote!(None),
+    };
     let cron = match cron {
         Some(c) => quote!(Some(#c)),
         None => quote!(None),
@@ -1167,18 +1154,18 @@ fn schedule(h: &str, a: &Attribute) -> syn::Result<(Tokens, Tokens, bool)> {
     Ok((every, cron, skip))
 }
 
-/// `5m` → ms (as `aio.toml` spans: d, h, m, s).
-fn span_ms(s: &str) -> Option<i64> {
-    let (n, unit) = s.trim().split_at(s.trim().find(|c: char| !c.is_ascii_digit())?);
-    let n: i64 = n.parse().ok()?;
-    let unit = match unit {
-        "d" => 86_400_000,
-        "h" => 3_600_000,
-        "m" => 60_000,
-        "s" => 1000,
-        _ => return None,
-    };
-    n.checked_mul(unit)
+/// A `#[every]`, `#[ttl]` or `#[long]` value as `ty` ms: a number of ms,
+/// checked here, or a span (`"5m"`) that aio's one span parser
+/// (`aio::config::span_ms`) works out as the app builds, refusing it there
+/// if it is none.
+fn span(lit: &syn::Lit, ty: &str, what: &str) -> syn::Result<Tokens> {
+    let ty = format_ident!("{ty}");
+    match lit {
+        syn::Lit::Int(n) if n.base10_parse::<u64>()? == 0 => Err(syn::Error::new(n.span(), format!("{what}: ms must be > 0"))),
+        syn::Lit::Int(n) => Ok(quote!(#n)),
+        syn::Lit::Str(s) => Ok(quote::quote_spanned!(s.span()=> ::aio::__span_ms!(#ty, #s, #what))),
+        _ => Err(syn::Error::new(lit.span(), format!("{what}: a span (\"5m\") or a number of ms"))),
+    }
 }
 
 /// `#[client]`: any client that got in (with the key, or signed in);
@@ -1583,7 +1570,7 @@ fn options_impl(input: &syn::DeriveInput) -> syn::Result<Tokens> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HANDLE_METHODS, credential, expand, reads, secretish, span_ms, words};
+    use super::{HANDLE_METHODS, credential, expand, reads, secretish, words};
     use syn::parse_quote;
 
     #[test]
@@ -1741,7 +1728,10 @@ mod tests {
         assert!(!src(true).contains("call_ceiling"));
         let mut own: syn::ItemImpl = parse_quote!(impl S { #[long(120000)] pub async fn m(&mut self) -> Result { let n: u32 = io().await; Ok(()) } });
         let own = expand(&mut own).unwrap().to_string();
-        assert!(own.contains("from_millis (120000u64)") && !own.contains("call_ceiling"), "{own}");
+        assert!(own.contains("from_millis (120000)") && !own.contains("call_ceiling"), "{own}");
+        let mut own: syn::ItemImpl = parse_quote!(impl S { #[long("2m")] pub async fn m(&mut self) -> Result { let n: u32 = io().await; Ok(()) } });
+        let own = expand(&mut own).unwrap().to_string();
+        assert!(own.contains("from_millis (:: aio :: __span_ms ! (u64 , \"2m\" , \"#[long]\"))"), "{own}");
         let r = refused(parse_quote!(impl S { #[long(0)] pub async fn m(&mut self) -> Result { Ok(()) } }));
         assert!(r.contains("ms must be > 0"), "{r}");
     }
@@ -1780,8 +1770,10 @@ mod tests {
     fn a_declared_schedule_goes_on_a_method_without_arguments_and_says_its_timing() {
         let r = refused(parse_quote!(impl S { #[every("5m")] pub fn m(&mut self, n: u32) {} }));
         assert!(r.contains("#[every] goes on a `pub fn (&mut self)` method"), "{r}");
-        let r = refused(parse_quote!(impl S { #[every("5 minutes")] pub fn m(&mut self) {} }));
-        assert!(r.contains("a span is a number and d, h, m or s"), "{r}");
+        let r = refused(parse_quote!(impl S { #[every(5.0)] pub fn m(&mut self) {} }));
+        assert!(r.contains("give the interval"), "{r}");
+        let r = refused(parse_quote!(impl S { #[ttl(1.5)] pub async fn m(&mut self) -> Result { Ok(()) } }));
+        assert!(r.contains("#[ttl]: a span (\"5m\") or a number of ms"), "{r}");
         let r = refused(parse_quote!(impl S { #[every(0)] pub fn m(&mut self) {} }));
         assert!(r.contains("must be > 0"), "{r}");
         let r = refused(parse_quote!(impl S { #[cron(5)] pub fn m(&mut self) {} }));
@@ -1790,8 +1782,11 @@ mod tests {
         assert!(r.contains("only `skip_if_running`"), "{r}");
         let mut imp: syn::ItemImpl = parse_quote!(impl S { #[every("2h", skip_if_running)] pub fn m(&mut self) {} });
         let out = expand(&mut imp).unwrap().to_string();
-        assert!(out.contains("every : Some (7200000i64)") && out.contains("skip_if_running : true"), "{out}");
-        assert_eq!((span_ms("90s"), span_ms("1d"), span_ms("m")), (Some(90_000), Some(86_400_000), None));
+        // A span is worked out by aio's one parser as the app builds.
+        assert!(out.contains("every : Some (:: aio :: __span_ms ! (i64 , \"2h\" , \"#[every]\"))"), "{out}");
+        assert!(out.contains("skip_if_running : true"), "{out}");
+        let mut imp: syn::ItemImpl = parse_quote!(impl S { #[every(300_000)] pub fn m(&mut self) {} });
+        assert!(expand(&mut imp).unwrap().to_string().contains("every : Some (300_000)"));
     }
 
     #[test]

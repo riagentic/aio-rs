@@ -295,10 +295,11 @@ pub struct Limits {
     pub calls_per_sec: u32,
     /// Bytes a link may send per second (bursts up to twice that).
     pub bytes_per_sec: u32,
-    /// A link is sent at most one change per this many ms (aio's
+    /// A link is sent at most one change per this span (aio's
     /// `syncIntervalMs`): the first of a burst at once, the rest folded
-    /// into one; a person's call goes at once. `0`: each change at once.
-    pub sync_interval_ms: u64,
+    /// into one; a person's call goes at once. Zero: each change at once.
+    #[serde(alias = "sync_interval_ms", with = "ms_span")]
+    pub sync_interval: Duration,
     /// A change whose patch is more than this percent of the whole view is
     /// sent as the view (aio's `fullStateThreshold`, as a percent). `0`:
     /// always the view.
@@ -312,7 +313,7 @@ impl Default for Limits {
             max_message: 4 << 20,
             calls_per_sec: 200,
             bytes_per_sec: 8 << 20,
-            sync_interval_ms: 50,
+            sync_interval: Duration::from_millis(50),
             full_state_percent: 50,
         }
     }
@@ -622,9 +623,9 @@ pub struct Data {
     #[serde(default)]
     pub only_persist: bool,
     /// How long a run of `#[coalesce]` calls is held before it goes into the
-    /// log, in ms (aio's `persistDebounceMs`): a crash loses at most this much.
-    #[serde(default = "Data::default_coalesce_ms")]
-    pub coalesce_ms: u64,
+    /// log (aio's `persistDebounceMs`): a crash loses at most this much.
+    #[serde(default = "Data::default_coalesce", alias = "coalesce_ms", with = "ms_span")]
+    pub coalesce: Duration,
     /// How often a running app backs its store up into `<home>/backups`
     /// (`"1d"`, `"6h"`); `"off"` (the default): only when asked (`ax backup`).
     #[serde(default, with = "span_or_off")]
@@ -648,8 +649,8 @@ impl Data {
         "state.db".into()
     }
 
-    fn default_coalesce_ms() -> u64 {
-        100
+    fn default_coalesce() -> Duration {
+        Duration::from_millis(100)
     }
 
     fn default_backup_keep() -> usize {
@@ -666,7 +667,7 @@ impl Default for Data {
             pragmas: vec![],
             persist: true,
             only_persist: false,
-            coalesce_ms: Self::default_coalesce_ms(),
+            coalesce: Self::default_coalesce(),
             backup_every: None,
             snapshot_every: None,
             backup_keep: Self::default_backup_keep(),
@@ -735,8 +736,10 @@ pub struct Log {
     pub keep: usize,
     /// A file rotates at this size, in MB.
     pub file_mb: u64,
-    /// Seconds between `heartbeat` lines (uptime, calls, errors); 0 is none.
-    pub heartbeat: u64,
+    /// How often a `heartbeat` line (uptime, calls, errors) is written;
+    /// `None` (`"off"`): never.
+    #[serde(with = "heartbeat")]
+    pub heartbeat: Option<Duration>,
     /// Methods (`notes.tick`) whose calls are not logged even at `debug`.
     pub suppress: Vec<String>,
     /// Each run starts fresh files (aio's per-run `debug.log`): the last
@@ -754,7 +757,7 @@ impl Default for Log {
             level: crate::log::Level::Info,
             keep: 5,
             file_mb: 10,
-            heartbeat: 3600,
+            heartbeat: Some(Duration::from_secs(3600)),
             suppress: vec![],
             per_run: false,
             dir: None,
@@ -915,12 +918,12 @@ pub struct Splash {
     /// `0`, `?`, `?` (aio's set).
     #[serde(default)]
     pub text: Option<String>,
-    /// It stays at least this many milliseconds once shown.
-    #[serde(default = "Splash::default_min")]
-    pub min_ms: u64,
-    /// No window within this many milliseconds: it goes anyway.
-    #[serde(default = "Splash::default_max")]
-    pub max_ms: u64,
+    /// It stays at least this long once shown.
+    #[serde(default = "Splash::default_min", alias = "min_ms", with = "ms_span")]
+    pub min: Duration,
+    /// No window within this long: it goes anyway.
+    #[serde(default = "Splash::default_max", alias = "max_ms", with = "ms_span")]
+    pub max: Duration,
     /// Behind the image, `["#light", "#dark"]`; unset: the app's own colours.
     #[serde(default)]
     pub background: Option<[String; 2]>,
@@ -973,10 +976,10 @@ pub struct Splash {
     /// The text in bold.
     #[serde(default)]
     pub bold: bool,
-    /// How long it fades out, in milliseconds; unset: the target's (100 on
-    /// the desktop, 200 on Android).
-    #[serde(default)]
-    pub fade_ms: Option<u64>,
+    /// How long it fades out; unset: the target's (100 ms on the desktop,
+    /// 200 ms on Android).
+    #[serde(default, alias = "fade_ms", with = "opt_ms_span", skip_serializing_if = "Option::is_none")]
+    pub fade: Option<Duration>,
     /// Where it opens: centred where the app's window opens, on the primary
     /// display, or on the one under the pointer.
     #[serde(default)]
@@ -1020,8 +1023,8 @@ impl Default for Splash {
         Self {
             image: Default::default(),
             text: None,
-            min_ms: Self::default_min(),
-            max_ms: Self::default_max(),
+            min: Self::default_min(),
+            max: Self::default_max(),
             background: None,
             show: Default::default(),
             download_text: None,
@@ -1033,7 +1036,7 @@ impl Default for Splash {
             radius: 0,
             border: None,
             font: None,
-            fade_ms: None,
+            fade: None,
             font_size: None,
             bold: false,
             text_color: None,
@@ -1121,11 +1124,11 @@ pub enum BarPosition {
 }
 
 impl Splash {
-    fn default_min() -> u64 {
-        400
+    fn default_min() -> Duration {
+        Duration::from_millis(400)
     }
-    fn default_max() -> u64 {
-        15_000
+    fn default_max() -> Duration {
+        Duration::from_secs(15)
     }
     /// Drawn at half its pixel size (`…@2x.png`).
     pub fn retina(&self) -> bool {
@@ -1814,10 +1817,10 @@ impl Config {
         if c.data.backup_keep == 0 {
             return Err("aio.toml: [data] backup_keep must keep at least 1 backup".into());
         }
-        if c.data.coalesce_ms > 60_000 {
+        if c.data.coalesce > Duration::from_secs(60) {
             return Err(format!(
-                "aio.toml: [data] coalesce_ms = {} holds calls over a minute: a crash would lose them all",
-                c.data.coalesce_ms
+                "aio.toml: [data] coalesce = {:?} holds calls over a minute: a crash would lose them all",
+                span_text(c.data.coalesce)
             ));
         }
         if c.data.retire.contains(&c.data.store) {
@@ -1883,8 +1886,8 @@ impl Config {
             if s.bar_height.is_some_and(|h| h == 0 || h > 64) {
                 return Err("aio.toml: [build.splash] bar_height is px, 1 to 64".into());
             }
-            if s.min_ms > s.max_ms {
-                return Err("aio.toml: [build.splash] min_ms is more than max_ms".into());
+            if s.min > s.max {
+                return Err("aio.toml: [build.splash] min is more than max".into());
             }
         }
         if c.ui.hue.is_some_and(|h| h >= 360) {
@@ -1925,7 +1928,7 @@ impl Config {
         }
         if c.accounts.on || c.accounts.sessions {
             let p = c.accounts.policy();
-            if !(1..=crate::auth::MAX_TTL_MS).contains(&p.ttl_ms) {
+            if !(1000..=crate::auth::MAX_TTL_MS).contains(&p.ttl_ms) {
                 return Err("aio.toml: [accounts] session must be 1s to 100 years".into());
             }
             if p.max_sessions == Some(0) {
@@ -2038,8 +2041,22 @@ impl Config {
         {
             return Err("aio.toml: [feedback] url must be https://".into());
         }
-        if c.feedback.keep == 0 || c.feedback.timeout.is_zero() {
-            return Err("aio.toml: [feedback] keep and timeout must be at least 1".into());
+        if c.feedback.keep == 0 {
+            return Err("aio.toml: [feedback] keep must be at least 1".into());
+        }
+        // Spans in whole seconds and up before they took ms: a key that
+        // loops or waits on one (a backup every ms) is refused below a second.
+        let second = [
+            ("[history] keep", Some(c.history.keep)),
+            ("[feedback] timeout", Some(c.feedback.timeout)),
+            ("[data] backup_every", c.data.backup_every),
+            ("[data] snapshot_every", c.data.snapshot_every),
+            ("[client] retention", c.client.retention),
+            ("[updates] every", c.updates.every),
+        ];
+        let channels = c.updates.every_by_channel.values().map(|e| ("[updates] every_by_channel", *e));
+        if let Some((key, _)) = second.into_iter().chain(channels).find(|(_, d)| d.is_some_and(|d| d < Duration::from_secs(1))) {
+            return Err(format!("aio.toml: {key} must be at least 1s"));
         }
         if c.updates.keep < 2 {
             return Err("aio.toml: [updates] keep must be at least 2 (the running version and the one before)".into());
@@ -2051,29 +2068,75 @@ impl Config {
     }
 }
 
-/// `90d`, `12h`, `30m`, `45s`.
+/// A span's milliseconds (`"100ms"`, `"45s"`, `"30m"`, `"12h"`, `"90d"`: a
+/// whole number, then one unit), `None` if it isn't one or overflows: the
+/// one parser of `aio.toml`'s spans and of `#[every]`, `#[ttl]`, `#[long]`.
+pub const fn span_ms(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    let (mut i, mut n) = (0, 0u64);
+    while i < b.len() && b[i].is_ascii_digit() {
+        n = match n.checked_mul(10) {
+            Some(t) => match t.checked_add((b[i] - b'0') as u64) {
+                Some(t) => t,
+                None => return None,
+            },
+            None => return None,
+        };
+        i += 1;
+    }
+    if i == 0 {
+        return None;
+    }
+    let unit: u64 = match b.split_at(i).1 {
+        b"ms" => 1,
+        b"s" => 1000,
+        b"m" => 60_000,
+        b"h" => 3_600_000,
+        b"d" => 86_400_000,
+        _ => return None,
+    };
+    n.checked_mul(unit)
+}
+
+/// A span (see [`span_ms`]; spaces around it are fine).
 pub fn parse_span(s: &str) -> Result<Duration, String> {
     let s = s.trim();
-    let (n, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
-    let n: u64 = n.parse().map_err(|_| format!("`{s}`: expected a number and d, h, m or s"))?;
-    let secs = match unit {
-        "d" => 86_400,
-        "h" => 3600,
-        "m" => 60,
-        "s" => 1,
-        _ => return Err(format!("`{s}`: expected a number and d, h, m or s")),
-    };
-    n.checked_mul(secs).map(Duration::from_secs).ok_or_else(|| format!("`{s}`: too long a span"))
+    let unit = s.trim_start_matches(|c: char| c.is_ascii_digit());
+    span_ms(s).map(Duration::from_millis).ok_or_else(|| match ["ms", "s", "m", "h", "d"].contains(&unit) && unit != s {
+        true => format!("`{s}`: too long a span"),
+        false => format!("`{s}`: expected a whole number and ms, s, m, h or d (\"30s\")"),
+    })
 }
 
 /// A span as `aio.toml` spells it: the largest unit it is a whole number of.
 pub fn span_text(d: Duration) -> String {
-    let s = d.as_secs();
-    let (n, unit) = [(86_400, "d"), (3600, "h"), (60, "m")]
+    let ms = d.as_millis();
+    let (n, unit) = [(86_400_000, "d"), (3_600_000, "h"), (60_000, "m"), (1000, "s")]
         .into_iter()
-        .find(|(u, _)| s > 0 && s.is_multiple_of(*u))
-        .unwrap_or((1, "s"));
-    format!("{}{unit}", s / n)
+        .find(|(u, _)| ms > 0 && ms.is_multiple_of(*u))
+        .unwrap_or(if ms == 0 { (1000, "s") } else { (1, "ms") });
+    format!("{}{unit}", ms / n)
+}
+
+/// A span, or a bare number of ms (the keys that took ms before spans).
+fn span_or_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
+    struct V;
+    impl serde::de::Visitor<'_> for V {
+        type Value = Duration;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a span (\"100ms\", \"30s\", \"5m\") or a number of ms")
+        }
+        fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Duration, E> {
+            parse_span(s).map_err(E::custom)
+        }
+        fn visit_u64<E: serde::de::Error>(self, n: u64) -> Result<Duration, E> {
+            Ok(Duration::from_millis(n))
+        }
+        fn visit_i64<E: serde::de::Error>(self, n: i64) -> Result<Duration, E> {
+            u64::try_from(n).map(Duration::from_millis).map_err(|_| E::custom(format!("{n}: a span is never negative")))
+        }
+    }
+    d.deserialize_any(V)
 }
 
 mod span {
@@ -2084,6 +2147,67 @@ mod span {
     pub fn serialize<S: Serializer>(d: &std::time::Duration, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&super::span_text(*d))
     }
+}
+
+/// A span, or a bare number of ms (a key that took ms before spans).
+pub(crate) mod ms_span {
+    use serde::Deserializer;
+    use std::time::Duration;
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
+        super::span_or_ms(d)
+    }
+    pub use super::span::serialize;
+}
+
+/// An optional [`ms_span`].
+pub(crate) mod opt_ms_span {
+    use serde::{Deserializer, Serializer};
+    use std::time::Duration;
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+        super::ms_span::deserialize(d).map(Some)
+    }
+    pub fn serialize<S: Serializer>(d: &Option<Duration>, s: S) -> Result<S::Ok, S::Error> {
+        match d {
+            Some(d) => super::span::serialize(d, s),
+            None => s.serialize_none(),
+        }
+    }
+}
+
+/// A table of [`ms_span`]s.
+pub(crate) mod ms_span_map {
+    use serde::{Deserialize, Deserializer};
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Duration>, D::Error> {
+        #[derive(Deserialize)]
+        struct One(#[serde(with = "super::ms_span")] Duration);
+        Ok(BTreeMap::<String, One>::deserialize(d)?.into_iter().map(|(k, v)| (k, v.0)).collect())
+    }
+    pub fn serialize<S: serde::Serializer>(m: &BTreeMap<String, Duration>, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_map(m.iter().map(|(k, d)| (k, super::span_text(*d))))
+    }
+}
+
+/// `[log] heartbeat`: a span, `"off"`, or a bare number of seconds (0: off).
+mod heartbeat {
+    use serde::{Deserialize, Deserializer};
+    use std::time::Duration;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Secs(u64),
+        Text(String),
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+        let every = match Raw::deserialize(d)? {
+            Raw::Secs(n) => Duration::from_secs(n),
+            Raw::Text(t) if t == "off" => Duration::ZERO,
+            Raw::Text(t) => super::parse_span(&t).map_err(serde::de::Error::custom)?,
+        };
+        Ok(Some(every).filter(|d| !d.is_zero()))
+    }
+    pub use super::span_or_off::serialize;
 }
 
 /// A span, or `"off"`.

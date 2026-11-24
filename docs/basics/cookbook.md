@@ -331,7 +331,7 @@ assert_eq!((h.state().samples.len(), h.state().status.as_str()), (2, "done"), "t
 
 ## 6. Answer an identical call from cache
 
-`#[ttl(ms)]` on an async method: a call with the same arguments within
+`#[ttl("1m")]` on an async method: a call with the same arguments within
 `ms` of a finished one answers `Ok(())` without running again.
 
 ```rust
@@ -351,7 +351,7 @@ async fn fetch_temp(city: String) -> i32 {
 
 #[methods]
 impl Weather {
-    #[ttl(60_000)]
+    #[ttl("1m")]
     pub async fn forecast(&mut self, city: String) -> Result {
         let t: i32 = fetch_temp(city).await;
         self.temp = Some(t);

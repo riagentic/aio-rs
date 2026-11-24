@@ -433,7 +433,7 @@ once per method every `aio::perf::QUIET`, 10 s), and the `on_problem` hook
 
 ```toml
 [perf]
-method = 16      # ms; unset: 16 in a debug build, 100 in a release build
+method = "16ms" # unset: 16 ms in a debug build, 100 ms in a release build
 effect = 5       # ms per effect step (one poll); unset: 5
 
 [perf.methods]   # one meant to be slow, the rest stay strict

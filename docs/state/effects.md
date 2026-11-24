@@ -120,7 +120,7 @@ other.
   `effectTimeoutMs`): one that never settles is cut off, logged and
   reported, its later steps never run, and its caller is told. `#[long]`
   lifts the ceiling for a method that legitimately waits (a long download);
-  `#[long(ms)]` sets that method's own.
+  `#[long("2m")]` sets that method's own.
 
 ## What happens to an effect
 
@@ -270,7 +270,7 @@ assert_eq!(end.now(), Some(Ok(())), "and its caller has the end");
   (aio's `concurrency: "first"`). `cx.abort("scan")` stops every call of
   `scan`. Without one, overlapping calls'
   awaits run in turn.
-- `#[ttl(ms)]` answers a repeated call with the same arguments within
+- `#[ttl("1m")]` answers a repeated call with the same arguments within
   `ms` of a finished one with its kept answer, without running it again
   (aio's `ttl`); its effects are keyed by the arguments. A network
   caller's answer is kept for that caller (user and role) alone, and a

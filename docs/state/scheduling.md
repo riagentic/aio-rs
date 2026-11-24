@@ -457,8 +457,8 @@ skip all of that.
   commits from effects, schedules and other threads; a call from the
   view shows at once ([performance](../performance.md)).
 - Pushes to a client are paced: a schedule's or an effect's commits
-  reach a link at most once per `[server.limits] sync_interval_ms` (50
-  ms, aio's `syncIntervalMs`), folded into one patch; a person's call
+  reach a link at most once per `[server.limits] sync_interval` (`"50ms"`,
+  aio's `syncIntervalMs`), folded into one patch; a person's call
   goes at once. To send less, call less (one effect that commits once
   per batch) or make the viewer's view smaller ([visibility](visibility.md)).
 - Keep a tick out of the timeline, reports and the debug log with

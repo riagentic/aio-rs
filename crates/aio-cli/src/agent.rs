@@ -169,7 +169,7 @@ fields #[transient] #[server] · methods #[client(role, allow, predict)] #[deriv
   pub async fn: awaits anywhere (let x: T = io.await?; in if/match/loop),
   each part atomic and logged; h.m(..)?.await is its end (value or refusal);
   #[mode(newest|first)];
-  #[ttl(ms)] reuses an answer; #[long] lifts the await ceiling; #[redact]
+  #[ttl(\"1m\")] reuses an answer; #[long] lifts the await ceiling; #[redact]
   keeps args out of logs; #[coalesce] on a cursor/scroll/selection method
   (called per keypress): each call shows at once, the run is written once,
   100 ms after it began (aio's persistDebounceMs), at a call that can't wait
@@ -351,7 +351,7 @@ at run time · a refusal nobody took · sleeping in a test instead of TestCells:
   include_str!/include_bytes!.
 - TestCells/TestUi fail at the end on refusals nobody took: take the
   expected ones with failures().
-- Waiting in real time in a cell test: TestCells::advance(ms) moves the
+- Waiting in real time in a cell test: TestCells::advance(d) moves the
   schedule and the effects' clock; settle() runs effects to their end.
 - Calling a method from a view without act!/Ui: the view isn't told.
 - A signal read in an if let / while let / match scrutinee

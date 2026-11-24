@@ -69,21 +69,21 @@ pub(crate) struct Lowered {
 }
 
 /// How long each await of an async method may take.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) enum Ceiling {
     /// The app's (`[perf] call_ceiling`).
     App,
     /// `#[long]`: as long as it needs.
     None,
-    /// `#[long(ms)]`: its own.
-    Ms(u64),
+    /// `#[long(ms)]`: its own, as `u64` ms.
+    Ms(Tokens),
 }
 
 struct Lower {
     m: Ident,
     cx: Ident,
     r: Type,
-    ttl: Option<i64>,
+    ttl: Option<Tokens>,
     long: Ceiling,
     newest: bool,
     awaits: usize,
@@ -482,7 +482,7 @@ impl Lower {
         self.hidden(&fun, &params, body);
         let (names, tys) = (params.iter().map(|v| &v.name), params.iter().map(|v| v.ty.as_ref().expect("typed")));
         let (names2, cx, m) = (names.clone(), &self.cx, self.m.to_string());
-        let ttl = match self.ttl {
+        let ttl = match &self.ttl {
             Some(ms) => quote!(::aio::ttl_key(cx, #m, #ms)),
             None => quote!(::std::option::Option::None),
         };
@@ -522,7 +522,7 @@ impl Lower {
             }
         };
         let names = params.iter().map(|v| &v.name);
-        let ceiling = match self.long {
+        let ceiling = match &self.long {
             Ceiling::App => Some(quote!(.timeout(::aio::effect::call_ceiling()))),
             Ceiling::None => None,
             Ceiling::Ms(ms) => Some(quote!(.timeout(::std::time::Duration::from_millis(#ms)))),
@@ -784,7 +784,7 @@ impl VisitMut for Rewrite<'_> {
 pub(crate) fn lower(
     f: &mut ImplItemFn,
     r: Type,
-    ttl: Option<i64>,
+    ttl: Option<Tokens>,
     long: Ceiling,
     newest: bool,
     join: bool,
@@ -809,6 +809,7 @@ pub(crate) fn lower(
         f.sig.inputs.insert(1, parse_quote!(__aio_cx: &::aio::Cx));
         format_ident!("__aio_cx")
     });
+    let cached = ttl.is_some();
     let mut l = Lower {
         m: m.clone(),
         cx: cx.clone(),
@@ -823,11 +824,11 @@ pub(crate) fn lower(
     };
     let stmts = std::mem::take(&mut f.block.stmts);
     let body = l.seq(&stmts, scope, &Names::new(), &Cont::Return, &Names::new())?;
-    if ttl.is_some() && l.awaits == 0 {
+    if cached && l.awaits == 0 {
         return err(&f.sig, "#[ttl] caches what an async method awaits: this one awaits nothing");
     }
     // Keyed by its arguments too: a `#[ttl]` answer, a `#[mode(first)]` join.
-    let key = match ttl.is_some() || join {
+    let key = match cached || join {
         true => {
             let name = m.to_string();
             quote!(let __aio_key = ::aio::call_key(#cx, #name, &::aio::json(&(#(&#first,)*))?)?;)

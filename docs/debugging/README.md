@@ -114,7 +114,7 @@ id = "notes"
 level = "info"              # trace, debug, info (default), warn, error
 keep = 5                    # files kept per log
 file_mb = 10                # a file rotates at this size
-heartbeat = 3600            # seconds between heartbeat lines (uptime, calls, errors); 0: none
+heartbeat = "1h"           # how often a heartbeat line (uptime, calls, errors) is written; "off": never
 suppress = ["notes.tick"]   # methods whose calls are never logged, even at debug
 per_run = false             # true: each run starts fresh files (app.1.log is the last run)
 ```
@@ -250,10 +250,10 @@ auto = true
 network = ["reports.example.org"]
 
 [perf]
-method = 50
+method = "50ms"
 
 [perf.methods]
-"notes.import" = 2000
+"notes.import" = "2s"
 
 [perf.storm]
 rate = 200

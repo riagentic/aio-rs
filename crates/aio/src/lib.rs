@@ -135,6 +135,23 @@ pub use web::{Handle, Source, sync};
 pub use aio_config::icon;
 #[doc(hidden)]
 pub use aio_config_macro::config as __config_lit;
+#[doc(hidden)]
+pub use aio_config::config::span_ms as __span_ms_of;
+
+/// `#[every("5m")]`, `#[ttl("1m")]`, `#[long("2m")]`: the span's ms as
+/// `$t`, worked out as the app builds by `aio.toml`'s span parser; a bad
+/// one fails the build.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __span_ms {
+    ($t:ty, $s:literal, $what:literal) => {{
+        const MS: $t = match $crate::__span_ms_of($s) {
+            Some(ms) if ms > 0 && ms <= <$t>::MAX as u64 => ms as $t,
+            _ => panic!(concat!($what, "(", stringify!($s), "): a span is a whole number and ms, s, m, h or d (\"5m\"), more than 0")),
+        };
+        MS
+    }};
+}
 /// The app's one hue as a `u16`, from its `aio.toml` as it builds
 /// (`Config::hue`): what `kit::theme_css` takes, so the page is the colour
 /// of its icon and splash.
@@ -805,6 +822,31 @@ pub(crate) fn shown<T: CellData>(st: &T, viewer: &Caller) -> Value {
 /// aio's `schedules:`): armed whenever the cell goes live, under the key
 /// `@<method>`; one no longer declared is removed. `skip_if_running`: a
 /// tick is skipped while the method's effect from the last one still runs.
+///
+/// A span is `aio.toml`'s (`"500ms"`, `"30s"`, `"5m"`, `"12h"`, `"1d"`), as
+/// in `#[ttl]` and `#[long]`; a bare number is ms. Anything else fails the build:
+///
+/// ```compile_fail
+/// use aio::prelude::*;
+/// #[cell]
+/// pub struct Clock { pub n: u32 }
+/// #[methods]
+/// impl Clock {
+///     #[every("5 minutes")]
+///     pub fn tick(&mut self) { self.n += 1 }
+/// }
+/// ```
+/// ```
+/// use aio::prelude::*;
+/// #[cell]
+/// pub struct Clock { pub n: u32 }
+/// #[methods]
+/// impl Clock {
+///     #[every("500ms")]
+///     pub fn tick(&mut self) { self.n += 1 }
+/// }
+/// assert_eq!(<Clock as aio::Cell>::SCHEDULES[0].every, Some(500));
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Declared {
     pub method: &'static str,
@@ -879,7 +921,7 @@ pub trait Cell: CellData {
     /// `#[coalesce]` methods: a cursor, a scroll, a selection, called many
     /// times a second (every plain method of a `#[cell(coalesce)]` cell).
     /// Each call shows its state at once, without a write; a run of them
-    /// goes into the log `[data] coalesce_ms` (default [`PERSIST_DEBOUNCE`])
+    /// goes into the log `[data] coalesce` (default [`PERSIST_DEBOUNCE`])
     /// after its first call (aio's debounced persistence), or when a call that can't wait (one with an
     /// effect, a schedule, an id) or a time-travel step comes, or the app
     /// closes: as one event, its last call, when that alone ends where the

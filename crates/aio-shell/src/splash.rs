@@ -152,8 +152,8 @@ pub fn markup(s: &Splash, title: &str, version: &str, colors: &[[String; 4]; 2],
         weight = if s.bold { "bold" } else { "normal" },
         font = s.font_size.unwrap_or(13),
         family = family(s.font.as_deref()),
-        min = s.min_ms,
-        max = s.max_ms,
+        min = s.min.as_millis(),
+        max = s.max.as_millis(),
         lb = l[0],
         lt = l[1],
         db = d[0],
@@ -200,11 +200,11 @@ pub fn plan(s: &Splash, colors: &[[String; 4]; 2], target: Option<[i32; 4]>) -> 
     Some(aio::serde_json::json!({
         "width": w,
         "height": h,
-        "min": s.min_ms,
-        "max": s.max_ms,
+        "min": u64::try_from(s.min.as_millis()).unwrap_or(u64::MAX),
+        "max": u64::try_from(s.max.as_millis()).unwrap_or(u64::MAX),
         "bg": [colors[0][0], colors[1][0]],
         "clear": clear,
-        "fade": s.fade_ms.unwrap_or(100),
+        "fade": s.fade.map_or(100, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
         "mode": s.position,
         "target": target,
         "windowShadow": s.window_shadow.unwrap_or(cfg!(target_os = "macos")),
@@ -302,13 +302,13 @@ pub(crate) mod tests {
         Splash {
             image: image.into(),
             text: text.map(String::from),
-            min_ms: 400,
-            max_ms: 15_000,
+            min: std::time::Duration::from_millis(400),
+            max: std::time::Duration::from_millis(15_000),
             background: None,
             font: None,
             font_size: None,
             bold: false,
-            fade_ms: None,
+            fade: None,
             png: png(640, 400),
             ..Default::default()
         }
@@ -381,10 +381,10 @@ pub(crate) mod tests {
         // Rounded, faded: the clear window and the fade run in the real runtime too.
         // Its cap far off: a splash drawn later than it (a loaded machine) is never up.
         let s = Splash {
-            min_ms: 900,
-            max_ms: 300_000,
+            min: std::time::Duration::from_millis(900),
+            max: std::time::Duration::from_millis(300_000),
             radius: 10,
-            fade_ms: Some(150),
+            fade: Some(std::time::Duration::from_millis(150)),
             ..splash("assets/splash.png", Some("Starting {title}"))
         };
         // Built in: the Windows lane runs this binary away from the source tree.
@@ -420,7 +420,7 @@ pub(crate) mod tests {
             margin: Some(20),
             radius: 12,
             border: Some("#ccc".into()),
-            fade_ms: Some(250),
+            fade: Some(std::time::Duration::from_millis(250)),
             font_size: Some(15),
             font: Some("Iosevka Term".into()),
             bold: true,

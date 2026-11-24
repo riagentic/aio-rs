@@ -139,6 +139,20 @@ version may break things.
   `machine_errors`, `machine_ends`, `async_mode` and `redacts`. Code that
   named one still compiles; it may break in any release: ask for what it
   needs in an issue.
+- **Breaking: every time in `aio.toml` is a span**, one parser
+  (`aio::config::span_ms`) for all of them and for `#[every]`, `#[ttl]`
+  and `#[long]`, with `ms` as a unit now (`"250ms"`): `[data] coalesce`,
+  `[server.limits] sync_interval`, `[build.splash] min`, `max` and `fade`,
+  `[perf] method`, `effect`, `call_ceiling`, `methods` and `effects`, and
+  `[log] heartbeat` (or `"off"`). The old `coalesce_ms`, `sync_interval_ms`,
+  `min_ms`, `max_ms` and `fade_ms` keys and bare numbers (ms; seconds for
+  `heartbeat`) still read; `#[ttl("1m")]` and `#[long("2m")]` join
+  `#[ttl(60000)]`. In Rust the fields are `Duration`s: `Data::coalesce`,
+  `Limits::sync_interval`, `Splash::{min, max, fade}`, `perf::Budgets`'
+  five and `Log::heartbeat` (`Option`): write
+  `Duration::from_millis(n)` where a number was. A span under a second is
+  refused where a second was the least before (`[history] keep`,
+  `[data] backup_every`, `[updates] every`…).
 - **Breaking:** `[build] budget_mb` takes a fraction (`14.5`) or a size
   as `[budgets]` writes one (`"14.5MB"`): `Build::budget_mb` is
   `Option<f64>`.

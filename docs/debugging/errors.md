@@ -82,7 +82,7 @@ assert_eq!((e.code(), e.code().as_ref().map(Code::as_str)), (Some(Code::ActionRe
 | `ReduceError` | `REDUCE_ERROR` | the method panicked: a bug, its call changed nothing | fix the method; `ax errors` has the panic |
 | `InitError` | `INIT_ERROR` | an `#[on_start]` refused or panicked | the log and `ax errors` say why |
 | `DestroyError` | `DESTROY_ERROR` | an `#[on_stop]` refused or panicked (the cell still stops) | the log and `ax errors` say why |
-| `EffectTimeout` | `EFFECT_TIMEOUT` | an async call's awaited I/O ran past the call ceiling (`[perf] call_ceiling`, `#[long(ms)]`) and was cut off | call again, or give the method `#[long]` |
+| `EffectTimeout` | `EFFECT_TIMEOUT` | an async call's awaited I/O ran past the call ceiling (`[perf] call_ceiling`, `#[long("2m")]`) and was cut off | call again, or give the method `#[long]` |
 | `EffectError` | `EFFECT_ERROR` | an async call's awaited I/O panicked before it answered: a bug | fix the I/O; `ax errors` has the panic |
 | `HookError` | `HOOK_ERROR` | a reaction (`listens_to`) to another cell's call refused or panicked; on the bus, never a caller's answer | the log says why |
 | `QueueOverflow` | `QUEUE_OVERFLOW` | a synced copy's 500 calls wait for the server | wait for the link; tell the person their changes wait |
@@ -291,7 +291,7 @@ instruction:
   start). aio's `--no-backup-logs` (each run on fresh files, nothing kept)
   is `[log] per_run = true` with `keep = 1`.
 - When the log closes, its last line counts the run's errors and
-  warnings; every `[log] heartbeat` seconds (3600) a line says uptime,
+  warnings; every `[log] heartbeat` (an hour) a line says uptime,
   calls and errors.
 
 [Debugging: logs](README.md#3-logs) has `[log]` in full and `ax logs`.

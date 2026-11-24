@@ -273,8 +273,7 @@ impl<T: Cell> Source<T> {
                     h.store(|st| st.set_durability(durability)).map_err(|e| std::io::Error::other(e.0))?;
                     h.store(|st| st.set_pragmas(&cfg.data.pragmas)).map_err(|e| std::io::Error::other(e.0))?;
                     h.store(|st| st.keep_history(cfg.history.keep)).map_err(|e| std::io::Error::other(e.0))?;
-                    let coalesce = std::time::Duration::from_millis(cfg.data.coalesce_ms);
-                    h.store(|st| st.set_coalesce(coalesce)).map_err(|e| std::io::Error::other(e.why))?;
+                    h.store(|st| st.set_coalesce(cfg.data.coalesce)).map_err(|e| std::io::Error::other(e.why))?;
                 }
                 if let Some(every) = cfg.data.snapshot_every {
                     crate::store::snapshot_every(&dirs.store, every);

@@ -339,7 +339,7 @@ fn a_coalesced_cell_holds_every_plain_call_and_logs_them_in_order() {
 }
 
 #[test]
-fn coalesce_ms_sets_the_window_and_zero_logs_each_call() {
+fn coalesce_sets_the_window_and_zero_logs_each_call() {
     let mut s = Store::<List>::memory();
     filled(&mut s);
     s.set_coalesce(std::time::Duration::ZERO).unwrap();
