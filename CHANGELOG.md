@@ -434,8 +434,8 @@ version may break things.
   every other verb takes: a script adding `--text` to each `ax` call (as
   0.4.0's note on piped JSON says) failed its lint step. `--text` is as
   it is; `--quiet` prints nothing without an error.
-- `ax new notes` (cargo's habit) answered "did you mean dev?": `new` and
-  `init` name `ax create <name>`.
+- The verb `new` (cargo's habit) for a new app answered "did you mean
+  dev?": `new` and `init` name `ax create <name>`.
 - `ax release` of an app whose `aio.toml` doesn't trust its signing key
   (a new app has no `[updates]` yet) said so and no more: it names the
   line to add, `keys = ["ed25519:…"]` with the key's own value.
