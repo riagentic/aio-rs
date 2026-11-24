@@ -127,6 +127,9 @@ version may break things.
 
 ### Changed
 
+- A commit runs statements prepared once per connection, where it
+  prepared four or more each time: a call in memory takes about half the
+  time (7 -> 3.6 µs, release), a saved one a fifth less (13 -> 10 µs).
 - **Breaking:** `[build] budget_mb` takes a fraction (`14.5`) or a size
   as `[budgets]` writes one (`"14.5MB"`): `Build::budget_mb` is
   `Option<f64>`.
@@ -209,6 +212,15 @@ version may break things.
 
 ### Fixed
 
+- A start removes the temp files a crash left mid-write in the app's data
+  folder (`.<name>.<id>.tmp`, those over a minute old): only a store's
+  open did, beside its own file, so an app with no saved cell (or
+  `[data] store` elsewhere) kept them.
+- Android: a new private file (`aio::paths::write_private`: the sync
+  token, paired keys) and a blob's name are put in place whole, by a
+  rename that never replaces a file (`renameat2(RENAME_NOREPLACE)`), where
+  the app's sandbox refuses the hard link: they were written in place,
+  and a crash mid-write left part of one.
 - A second launch's arguments reach the app however long its start
   takes: the running instance takes launches from `aio_shell::start` on
   (it did from its window's start, after the app's own setup: past a
