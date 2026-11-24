@@ -407,6 +407,10 @@ version may break things.
 - An `aio.toml` edit under `ax dev` was hot-patched with the old build's
   features (an added `[updates] url` left the updater off). It now
   rebuilds, with the features it turns on.
+- `ax dev`: a Rust edit that didn't compile as a hot patch kept rustc's
+  colour codes (cargo asks for them whatever the terminal) in
+  `build.log` and `ax errors` (`--json` too), and the window's overlay
+  said "build failed" with no error in it. They are plain text.
 
 ## [0.4.2] - 2026-11-11
 
