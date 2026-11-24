@@ -210,8 +210,8 @@ pub mod __rt {
     /// logged), as the app's expanded templates see it.
     pub const DEV: bool = cfg!(feature = "dev");
     pub use crate::dom::{
-        AttrSlot, Range, Template, attr, attr_of, branch, child, comp, each, handler, handler_fn, mounted, mounted_fn,
-        on, show, text, text_of, tpl, view,
+        AttrSlot, Range, Template, attr, attr_of, branch, child, comp, each, handler, handler_fn, keyed, mounted,
+        mounted_fn, on, show, text, text_of, tpl, view,
     };
     pub use crate::event::{
         DragData, FormData, KeyboardData, MouseData, PlainData, PointerData, ResizeData, ScrollData, VisibleData,

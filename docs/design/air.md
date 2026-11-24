@@ -272,6 +272,9 @@ nothing behind (`air::live()`, the test page's `named`: gate 1).
   (`src_object`, `text_content`, …).
 - `for pat in expr { row }` is a keyed list: `key:` on the row is required.
   Items must be `Clone + PartialEq`: a key whose item changed gets a new row.
+  `key:` elsewhere (an element or a component no `for` row starts with)
+  makes what it is on again, its state afresh, when the key changes
+  (React's remount; a memo of the key, no hole for a constant one).
 - `if cond { … } else { … }` swaps only when `cond` flips (`memo`).
   `if let` (and `else if let`, `let` chains) and `match` (guards, an arm
   `=> { nodes }` or `=> node`) are a branch hole: a memo of the matching

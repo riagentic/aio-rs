@@ -561,6 +561,12 @@ version may break things.
   under no owner now: what they start lives as long as its handle, or
   until it is done.
 
+- `key:` on an element or a component outside a `for` row was ignored
+  (`ax lint` warned it was): it makes what it is on again, its state
+  afresh, when the key changes now (React's remount: `Editor { key:
+  "{doc.id}", .. }` starts over for another document). `ax lint` warns
+  only on a key on a row's later node (it keys no row).
+
 ## [0.4.2] - 2026-11-11
 
 A fix release from porting a large app: aio crash-journal replay for a

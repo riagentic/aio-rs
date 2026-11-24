@@ -644,6 +644,7 @@ type Res<T> = Result<T, (Span, String)>;
 /// A `match` arm in `rsx!`: its pattern, its guard, its nodes.
 pub(crate) type Arm = (TokenStream, Option<TokenStream>, Vec<Node>);
 
+#[derive(Clone)]
 pub(crate) enum Node {
     Text(String),
     /// A `"…{x}…"` text: `format!`'s literal and arguments, and the names it reads.
@@ -658,6 +659,8 @@ pub(crate) enum Node {
         spreads: Vec<TokenStream>,
         children: Vec<Node>,
         key: Option<TokenStream>,
+        /// Its key is its `for` row's (the list's), not a remount's.
+        row: bool,
     },
     Comp {
         path: Vec<TokenTree>,
@@ -665,6 +668,7 @@ pub(crate) enum Node {
         spreads: Vec<TokenStream>,
         children: Vec<Node>,
         key: Option<TokenStream>,
+        row: bool,
     },
     For {
         /// Where its `for` is written (a row without a key is said there).
@@ -686,11 +690,13 @@ pub(crate) enum Node {
 }
 
 /// A component's prop: a declared one (a name), or an attribute (`"data-t"`).
+#[derive(Clone)]
 pub(crate) enum PropName {
     Field(Ident),
     Attr(String),
 }
 
+#[derive(Clone)]
 pub(crate) enum Val {
     Static(String),
     Present(bool),
@@ -766,7 +772,11 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
         let pat: TokenStream = toks[start..*i].iter().cloned().collect();
         *i += 1;
         let (expr, body) = until_block(toks, i)?;
-        return Ok(Node::For { at, pat, expr, body: parse_nodes(&body)? });
+        let mut body = parse_nodes(&body)?;
+        if let Some(Node::El { row, .. } | Node::Comp { row, .. }) = body.first_mut() {
+            *row = true;
+        }
+        return Ok(Node::For { at, pat, expr, body });
     }
     if is_ident(t, "if") {
         *i += 1;
@@ -936,10 +946,10 @@ fn element(path: Vec<TokenTree>, toks: &[TokenTree], comp: bool) -> Res<Node> {
         }
     }
     if comp {
-        return Ok(Node::Comp { path, props, spreads, children, key });
+        return Ok(Node::Comp { path, props, spreads, children, key, row: false });
     }
     let (tag, at) = (path[0].to_string().trim_start_matches("r#").to_string(), path[0].span());
-    Ok(Node::El { tag, at, attrs, spreads, children, key })
+    Ok(Node::El { tag, at, attrs, spreads, children, key, row: false })
 }
 
 /// The style attributes (the HTML global attributes' `style` namespace, as
@@ -1868,6 +1878,16 @@ fn let_bound(cond: &TokenStream) -> Vec<String> {
 /// Is `n` a placeholder in its template (an anchor its content goes before)?
 fn anchored(n: &Node) -> bool {
     matches!(n, Node::Expr(_) | Node::Comp { .. } | Node::For { .. } | Node::If { .. } | Node::Match { .. })
+        || remounted(n).is_some()
+}
+
+/// The key of an element or component keyed outside a `for` row: what it
+/// is on is made again when the key changes.
+fn remounted(n: &Node) -> Option<&TokenStream> {
+    match n {
+        Node::El { key: Some(k), row: false, .. } | Node::Comp { key: Some(k), row: false, .. } => Some(k),
+        _ => None,
+    }
 }
 
 struct Tpl {
@@ -1913,7 +1933,7 @@ impl Tpl {
                 };
                 self.holes.push(hole);
             }
-            Node::El { tag, attrs, spreads, children, .. } => {
+            Node::El { tag, attrs, spreads, children, .. } if remounted(n).is_none() => {
                 let outer = IN_SVG.get();
                 // 5: an element in SVG's namespace though its template has no `svg` above it.
                 let svg_root = root && tag != "svg" && (outer || SVG_ONLY.contains(&tag.as_str()));
@@ -2011,6 +2031,21 @@ impl Tpl {
                 self.bytes.push(4);
                 let id = self.mark();
                 let hole = match n {
+                    // Its own view in a hole that makes it again when its key changes.
+                    _ if let Some(key) = remounted(n) => {
+                        let mut inner = n.clone();
+                        if let Node::El { row, .. } | Node::Comp { row, .. } = &mut inner {
+                            *row = true;
+                        }
+                        let (mut ck, mut cr) = (vec![], vec![]);
+                        captures(key, &mut ck);
+                        node_captures(std::slice::from_ref(&inner), &mut cr);
+                        let (ck, cr) = (clones(&ck), clones(&cr));
+                        let view = body(std::slice::from_ref(&inner));
+                        quote!(air::__rt::keyed(#id,
+                            { #ck ::std::boxed::Box::new(move || (#key).to_owned()) },
+                            { #cr ::std::boxed::Box::new(move || #view) });)
+                    }
                     Node::Expr(e) => hole_fn(
                         e,
                         quote!(move ||),

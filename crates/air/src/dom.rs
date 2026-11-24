@@ -1098,6 +1098,27 @@ pub fn branch(at: u32, f: Box<dyn Hole<(u32, View)>>) {
     );
 }
 
+/// A keyed view outside a list (`key:` on an element or a component that
+/// is no `for` row's): `view()` before anchor `at`, made again (its state
+/// afresh) when `key()` changes, never else.
+#[doc(hidden)]
+pub fn keyed<K: PartialEq + 'static>(at: u32, key: Box<dyn Fn() -> K>, view: Box<dyn Hole<View>>) {
+    let (k, marks) = crate::reactive::recorded(&key);
+    if marks.is_empty() {
+        // A key that reads nothing never changes: no hole.
+        show_child(at, Child::Views(vec![untrack(|| view.run())]));
+        return;
+    }
+    let k = crate::reactive::memo_seeded(key, k, marks);
+    child_live(
+        at,
+        Box::new(move || {
+            k.with(|_| ());
+            Child::Views(vec![untrack(|| view.run())])
+        }),
+    );
+}
+
 /// A row in the page: what made it and where it is.
 struct Placed {
     owner: Owner,

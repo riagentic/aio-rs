@@ -522,3 +522,31 @@ fn a_value_that_turns_none_clears_the_field() {
     p.click("clear");
     assert_eq!((p.attr("f", "value").as_deref(), p.attr("h", "innerHTML").as_deref()), (Some(""), Some("")));
 }
+
+#[component]
+fn Draft(start: u32) -> View {
+    let n = signal(|| start);
+    rsx! { button { "data-t": "bump", onclick: move |_| n += 1, "{n}" } }
+}
+
+/// `key:` outside a list remounts what it is on when it changes (its state
+/// and the page's starts afresh: a form for another record), never else.
+#[test]
+fn a_key_outside_a_list_remounts_what_it_is_on_when_it_changes() {
+    fn app() -> View {
+        let (doc, other) = (Signal::new(1u32), Signal::new(0u32));
+        rsx! {
+            Draft { key: "{doc}", start: 10 }
+            input { key: doc.get(), "data-t": "f", value: "", oninput: move |_| {} }
+            button { "data-t": "next", onclick: move |_| doc += 1, "Next" }
+            button { "data-t": "other", onclick: move |_| other += 1, "{other} {doc}" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    p.click("bump");
+    p.input("f", "typed");
+    p.click("other");
+    assert_eq!((p.text("bump"), p.attr("f", "value").as_deref()), ("11".into(), Some("typed")), "the same key: kept");
+    p.click("next");
+    assert_eq!((p.text("bump"), p.attr("f", "value").as_deref()), ("10".into(), Some("")), "a new key: made anew");
+}
