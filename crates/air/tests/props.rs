@@ -148,6 +148,36 @@ fn a_live_prop_or_attribute_is_worked_out_once_at_mount() {
     assert_eq!((p.attr("a", "aria-pressed").as_deref(), CALLS.get()), (Some("true"), 22));
 }
 
+/// A `Prop` is `Copy`, as a signal is: one prop in two `move` closures.
+#[component]
+fn Twice(at: &'static str, value: Prop<String>) -> View {
+    let len = memo(move || value.with(String::len));
+    let said = signal(String::new);
+    rsx! { p { "data-t": at, onclick: move |_| said.set(value.get()), "{len} {said}" } }
+}
+
+#[test]
+fn a_prop_is_copy_and_its_constant_ends_with_its_row() {
+    let mut p = TestPage::mount(|| {
+        let rows = signal(|| vec!["ab".to_string()]);
+        let name = signal(|| "xyz".to_string());
+        rsx! {
+            for r in rows.get() { Twice { key: "{r}", at: "row", value: r } }
+            Twice { at: "live", value: name.get() }
+            button { "data-t": "clear", onclick: move |_| rows.write().clear(), "clear" }
+            button { "data-t": "name", onclick: move |_| name.set("v".into()), "name" }
+        }
+    });
+    let base = air::live();
+    p.click("row");
+    assert_eq!(p.text("row"), "2 ab", "a constant, read in a memo and a handler");
+    p.click("name");
+    p.click("live");
+    assert_eq!(p.text("live"), "1 v", "a live one follows");
+    p.click("clear");
+    assert!(air::live().nodes < base.nodes, "the row's constant went with it");
+}
+
 #[test]
 fn a_prop_given_a_constant_holds_no_state() {
     let p = TestPage::mount(|| rsx! { Label { value: "fixed", hint: "h" } });

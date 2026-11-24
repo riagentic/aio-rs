@@ -1114,6 +1114,10 @@ macro_rules! client {
         #[derive(Clone, Copy)]
         pub struct Ui;
 
+        impl $crate::ui::Client for Ui {
+            type Cell = $cell;
+        }
+
         impl $crate::Door<$cell> for Ui {
             fn call(&self, method: &str, args: $crate::serde_json::Value) -> $crate::Result<$crate::serde_json::Value> {
                 // The state before the call is the one the views know of.
@@ -1190,11 +1194,19 @@ pub fn whole_read(cell: &str, at: &'static std::panic::Location<'static>, heap: 
     }
 }
 
+/// The cell a `client!`'s `Ui` door calls: how `act!` finds its methods.
+#[doc(hidden)]
+pub trait Client {
+    type Cell: crate::Typed;
+}
+
 /// Call a cell method from a view: `act!(toggle(id, day))`; a refusal is
-/// logged and gives `None` (needs `Ui` and the `<Cell>Calls` trait in scope).
+/// logged and gives `None` (needs `Ui` in scope, no trait import).
 #[macro_export]
 macro_rules! act {
-    ($($call:tt)*) => { $crate::call!(Ui, $($call)*) };
+    ($($call:tt)*) => {
+        $crate::call!(<<Ui as $crate::ui::Client>::Cell as $crate::Typed>::calls(&Ui), $($call)*)
+    };
 }
 
 #[cfg(test)]

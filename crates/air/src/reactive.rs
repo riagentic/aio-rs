@@ -272,6 +272,26 @@ pub(crate) fn dispose(k: Key) {
 /// [`dispose`]; `soon`: what the nodes held is kept in [`LEFT`] and dropped
 /// by [`drop_left`] (a list's rows that left: the frame goes out first).
 fn dispose_then(k: Key, soon: bool) {
+    // A bare node (a probe): nothing to walk, run or drop.
+    let bare = rt(|rt| {
+        let Some(n) = rt.node_mut(k) else { return true };
+        let bare = n.owned.is_empty()
+            && n.cleanups.is_empty()
+            && n.value.is_none()
+            && n.run.is_none()
+            && n.extra.is_none()
+            && !n.dirty;
+        if bare {
+            n.live = false;
+            n.subs = vec![];
+            n.deps = vec![];
+            rt.free.push(k.idx);
+        }
+        bare
+    });
+    if bare {
+        return;
+    }
     take_cleanups(k).into_iter().for_each(|f| f());
     let (cleanups, trash) = rt(|rt| {
         let mut stack = vec![k];

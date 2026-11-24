@@ -765,10 +765,11 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
         return Err(syn::Error::new(ty.span(), "#[methods] goes on `impl Cell`: a type by its name"));
     };
     let calls = format_ident!("{}Calls", type_name);
+    let typed = format_ident!("{}Typed", type_name);
     let derived_trait = format_ident!("{}Derived", type_name);
     let (mut arms, mut names, mut clients, mut invs, mut sigs, mut bodies) =
         (vec![], vec![], vec![], vec![], vec![], vec![]);
-    let (mut dsigs, mut dbodies) = (vec![], vec![]);
+    let (mut dsigs, mut dbodies, mut typed_fns) = (vec![], vec![], vec![]);
     let (mut steps, mut rules, mut unpredicted, mut redacted, mut said) = (vec![], vec![], vec![], vec![], vec![]);
     let (mut schedules, mut coalesced, mut asyncs, mut ttls, mut reads_of) = (vec![], vec![], vec![], vec![], vec![]);
     let mut skipping: Vec<String> = vec![];
@@ -987,6 +988,9 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
         let prefix = if is_async { "async " } else { "" };
         said.push(format!("{prefix}{mname}({}) -> {}", ps.join(", "), text(quote!(#r))));
         if is_async {
+            typed_fns.push(quote! {
+                pub fn #m(&self, #(#params),*) -> ::aio::Result<::aio::Answer<#r>> { #calls::#m(self.0, #(#vars),*) }
+            });
             sigs.push(quote!(fn #m(&self, #(#params),*) -> ::aio::Result<::aio::Answer<#r>>;));
             bodies.push(quote! {
                 fn #m(&self, #(#params),*) -> ::aio::Result<::aio::Answer<#r>> {
@@ -994,6 +998,9 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
                 }
             });
         } else {
+            typed_fns.push(quote! {
+                pub fn #m(&self, #(#params),*) -> ::aio::Result<#r> { #calls::#m(self.0, #(#vars),*) }
+            });
             sigs.push(quote!(fn #m(&self, #(#params),*) -> ::aio::Result<#r>;));
             bodies.push(quote! {
                 fn #m(&self, #(#params),*) -> ::aio::Result<#r> {
@@ -1103,6 +1110,21 @@ fn expand(imp: &mut ItemImpl) -> syn::Result<Tokens> {
 
         impl<D: ::aio::Door<#ty> + ?Sized> #calls for D {
             #(#bodies)*
+        }
+
+        /// The typed calls as a value's own methods: what `act!` calls.
+        #[doc(hidden)]
+        pub struct #typed<'a, D: ?Sized>(&'a D);
+
+        impl<D: ::aio::Door<#ty> + ?Sized> #typed<'_, D> {
+            #(#typed_fns)*
+        }
+
+        impl ::aio::Typed for #ty {
+            type Calls<'a, D: ::aio::Door<Self> + ?Sized + 'a> = #typed<'a, D>;
+            fn calls<D: ::aio::Door<Self> + ?Sized>(door: &D) -> #typed<'_, D> {
+                #typed(door)
+            }
         }
 
         #derived
