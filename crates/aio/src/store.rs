@@ -351,31 +351,17 @@ fn good_copy(path: &Path) -> std::path::PathBuf {
 }
 
 /// D6: temp files a crash left beside the store (a half-made good copy, a
-/// half-restored store, a half-written `write_atomic` file) are removed. A
-/// `write_atomic` file under a minute old may be another thread's, mid-write
-/// (the health file): it stays, for the next start.
+/// half-restored store, a half-written `write_atomic` file) are removed
+/// ([`crate::paths::sweep`]).
 pub(crate) fn sweep(path: &Path) {
     let (dir, name) =
         (crate::paths::parent(path), path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let f = e.file_name().to_string_lossy().into_owned();
-        let old = || {
-            e.metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age > std::time::Duration::from_secs(60))
-        };
-        let stray = f == format!("{name}.good.tmp")
-            || f == format!("{name}.restoring")
-            || (f.starts_with('.') && f.ends_with(".tmp") && old());
-        if stray && std::fs::remove_file(e.path()).is_ok() {
+    for f in [format!("{name}.good.tmp"), format!("{name}.restoring")] {
+        if std::fs::remove_file(dir.join(&f)).is_ok() {
             eprintln!("[aio] storage: removed {f}, left by a crash");
         }
     }
+    crate::paths::sweep(dir);
 }
 
 /// `PRAGMA quick_check` on the file at `path` (fine if it doesn't exist

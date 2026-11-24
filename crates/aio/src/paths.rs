@@ -296,6 +296,27 @@ pub(crate) fn parent(p: &std::path::Path) -> &std::path::Path {
     p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."))
 }
 
+/// D6: the temp files a crash left in `dir` mid-write ([`write_private`],
+/// [`write_atomic`]: `.<name>.<id>.tmp`) removed. One under a minute old
+/// may be another thread's, mid-write (the health file): it stays, for the
+/// next start.
+pub(crate) fn sweep(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let f = e.file_name().to_string_lossy().into_owned();
+        let old = || {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > std::time::Duration::from_secs(60))
+        };
+        if f.starts_with('.') && f.ends_with(".tmp") && old() && std::fs::remove_file(e.path()).is_ok() {
+            eprintln!("[aio] storage: removed {f}, left by a crash");
+        }
+    }
+}
+
 /// Write a new private file (mode 0600), whole, on disk when this
 /// returns; an existing one is an error (`AlreadyExists`), also between
 /// writers racing. Written to a temp file and linked in (a link never
@@ -933,6 +954,7 @@ impl AppDirs {
                     return Err(refused(why));
                 }
                 let claim = crate::compat::data::Home::open(&home, &app, p.profile.as_deref())?.claim;
+                sweep(&p.data);
                 private_dir(&p.logs)?;
                 std::fs::create_dir_all(&p.cache)?;
                 let (data, logs, cache, store, profile, from) = (p.data, p.logs, p.cache, p.store, p.profile, p.from);
@@ -964,6 +986,8 @@ impl AppDirs {
             std::fs::TryLockError::Error(e) => e,
         })?;
         let _lock = std::sync::Arc::new(Held(lock));
+        // Held: no other process writes here now.
+        sweep(&data);
         Ok(AppDirs {
             id: id.into(),
             store: data.join("state.db"),
@@ -981,6 +1005,23 @@ impl AppDirs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_start_sweeps_the_temp_files_a_crash_left_in_the_data_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let (old, new) = (data.join(".sync.token.0123abcd.tmp"), data.join(".paired.json.4567ef01.tmp"));
+        for f in [&old, &new] {
+            std::fs::write(f, "part").unwrap();
+        }
+        let two_minutes_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(two_minutes_ago).unwrap();
+        let dirs = AppDirs::at(root.path(), "notes").unwrap();
+        assert!(!old.exists(), "a write's temp file a crash left is swept at start");
+        assert!(new.exists(), "one under a minute old may be mid-write: kept");
+        drop(dirs);
+    }
 
     #[test]
     fn the_persons_tool_home_stays_in_sight_while_a_test_runs_sandboxed() {
