@@ -85,6 +85,7 @@ version may break things.
 - `aio::log::parse_stamp`: an RFC 3339 time (as `aio::log::stamp` writes
   it, or with an offset) as ms since the epoch.
 - `air::Prop::new(v)`: a constant prop.
+- `air::GlobalMemo::read_untracked` and `with_untracked`, as `Memo` has.
 - `[home] moved = [{ from, files }]`: an app's own older layout
   (`$XDG_DATA_HOME/<id>`, `~/…`) moved into its home once, before the
   store opens, on `aio::compat::scatter`'s safe move (never over a file
@@ -169,6 +170,9 @@ version may break things.
   `Diagnostic::problem()`), so `Code` is only a refusal's wire code;
   `aio::ui::Tab` is `aio::ui::BrowserTab` and `aio::http::Tab`
   `aio::http::TabWire`, so `Tab` is only the kit's tab.
+- **Breaking: `MountedData::scroll_to` takes a `ScrollBehavior`**, as
+  `scroll` does, not a `bool`: `scroll_to(ScrollBehavior::Smooth)` for
+  `scroll_to(true)`, `ScrollBehavior::Instant` for `false`.
 - **Breaking:** `[build] budget_mb` takes a fraction (`14.5`) or a size
   as `[budgets]` writes one (`"14.5MB"`): `Build::budget_mb` is
   `Option<f64>`.
