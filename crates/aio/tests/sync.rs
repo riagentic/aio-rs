@@ -400,6 +400,10 @@ async fn a_confirmed_call_whose_answer_went_with_the_link_says_so() {
     let asked = tokio::task::spawn_blocking(move || r2.call_confirmed("add", serde_json::json!(["x"])));
     until("run on the server", || h.state().notes.len() == 1).await;
     relay.live.lock().unwrap().drain(..).for_each(|t| t.abort());
+    // Released once the old link is gone: an abort takes effect at the
+    // relay task's next poll, and a poll under way on another thread could
+    // still pass the held reply on. (The new link can't come up while held.)
+    until("offline", || !r.online()).await;
     relay.held.store(false, Ordering::SeqCst);
     // Re-sent on the next link: applied once, and its lost answer is said,
     // never a silent `null` for the id it returned.
@@ -452,6 +456,10 @@ async fn a_transaction_sent_again_while_it_awaits_runs_once() {
     let asked = tokio::task::spawn_blocking(move || r2.call_confirmed("sell", serde_json::json!([])));
     until("awaiting on the server", || CHARGED.load(Ordering::SeqCst) == 1).await;
     relay.live.lock().unwrap().drain(..).for_each(|t| t.abort());
+    // Released once the old link is gone: an abort takes effect at the
+    // relay task's next poll, and a poll under way on another thread could
+    // still pass the held reply on. (The new link can't come up while held.)
+    until("offline", || !r.online()).await;
     relay.held.store(false, Ordering::SeqCst);
     let got = asked.await.unwrap();
     assert_eq!(CHARGED.load(Ordering::SeqCst), 1, "its await ran once");
