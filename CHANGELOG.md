@@ -171,6 +171,10 @@ version may break things.
 
 ### Fixed
 
+- `aio::peer::blob(link, id, start, end)` returns bytes `start..end` only:
+  a server that ignored the range (from 0) or sent more than asked had
+  its whole answer read into memory and returned.
+
 - `aio::process`: a `Child` waited for and dropped later signalled its
   process group by the program's pid after the program was reaped: by
   then a process that took the pid over (and led a group of its own, as

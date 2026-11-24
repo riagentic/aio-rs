@@ -103,7 +103,7 @@ impl Peer {
 /// its root over TLS). Held to `[capabilities] network`.
 #[cfg(feature = "outbound")]
 pub async fn blob(link: &Link, id: &str, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
-    use std::io::{Error, ErrorKind};
+    use std::io::{Error, ErrorKind, Read};
     if !crate::blobs::id_ok(id) {
         return Err(Error::new(ErrorKind::InvalidInput, format!("blobs: {id:?} is not a blob id")));
     }
@@ -134,7 +134,13 @@ pub async fn blob(link: &Link, id: &str, start: u64, end: u64) -> std::io::Resul
             .map_err(|e| Error::other(format!("{url}: {e}")))?;
         match r.status().as_u16() {
             200 if start > 0 => Err(Error::other(format!("{url}: asked bytes {start}.. and got the whole blob"))),
-            200 | 206 => r.body_mut().with_config().limit(u64::MAX).read_to_vec().map_err(Error::other),
+            // Only the bytes asked for, whatever the server sends (the
+            // whole blob, from 0, when it ignores the range).
+            200 | 206 => {
+                let mut v = Vec::new();
+                r.body_mut().with_config().limit(u64::MAX).reader().take(end - start).read_to_end(&mut v)?;
+                Ok(v)
+            }
             416 => Ok(vec![]),
             404 => Err(Error::new(ErrorKind::NotFound, format!("{url}: no such blob"))),
             s => Err(Error::new(
