@@ -546,11 +546,9 @@ fn a_canvas_gets_webgl() {
 #[test]
 fn a_wait_that_times_out_names_the_component_still_rendering() {
     static DONE: Global<u32> = Global::new(|| 0);
-    // Remounts on its own success, through the page: drawn, its size is
-    // told (`onresize`), which gives it a new key.
     #[component]
     fn Field(n: u32) -> View {
-        rsx! { p { onresize: move |_| DONE.set(n + 1), "field" } }
+        rsx! { p { "field {n}" } }
     }
     fn app() -> View {
         rsx! {
@@ -558,14 +556,20 @@ fn a_wait_that_times_out_names_the_component_still_rendering() {
             for n in [DONE.get()] { Field { key: n, n } }
         }
     }
-    let got = fails(|| {
-        let mut ui = TestUi::new(app);
-        ui.until_within(std::time::Duration::from_secs(1), "the field to settle", || false);
-    });
-    // Where the page tells the size within the edits' own step, the
-    // mount's settle fails first; else the wait times out.
-    let failed = got.contains("never settle") || got.contains("waiting for: the field to settle\n");
-    assert!(failed && got.contains("still rendering: Field"), "{got}");
+    // Each look of the wait remounts the field (a new key). A step as long
+    // as the wait itself, as on a slow machine, still names it.
+    let patience = std::time::Duration::from_secs(1);
+    for step in [std::time::Duration::ZERO, patience] {
+        let got = fails(|| {
+            let mut ui = TestUi::new(app);
+            ui.until_within(patience, "the field to settle", || {
+                DONE.set(DONE.get_untracked() + 1);
+                std::thread::sleep(step);
+                false
+            });
+        });
+        assert!(got.contains("waiting for: the field to settle\n  still rendering: Field"), "a step of {step:?}: {got}");
+    }
     let mut ui = TestUi::new(counter);
     let got = fails(|| ui.until_within(std::time::Duration::from_secs(1), "nothing", || false));
     assert!(!got.contains("still rendering"), "a still page names none: {got}");

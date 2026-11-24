@@ -757,6 +757,7 @@ impl TestUi {
     pub fn until_within(&mut self, patience: Duration, what: &str, f: impl Fn() -> bool) {
         let (end, mut late) = (Instant::now() + patience, None);
         loop {
+            self.mark(end, &mut late);
             self.settle();
             if self.in_root(&f) {
                 // It may have turned true after that settle (a commit off
@@ -768,14 +769,16 @@ impl TestUi {
                 let why = format!("timed out after {patience:?} waiting for: {what}{}", self.busy(&late));
                 panic!("{why}\n  screen:\n{}{}", self.surface(), self.trace(&why));
             }
-            self.near(end, &mut late);
             self.pause(Duration::from_millis(10));
         }
     }
 
-    /// A wait's last stretch begun (`end` is near): the components then, once.
-    fn near(&self, end: Instant, late: &mut Option<Vec<air::Mounted>>) {
-        if late.is_none() && Instant::now() + LATE >= end {
+    /// The components as a wait's step begins, kept from the step in which
+    /// its last stretch (`LATE` before `end`) begins: what a failure names
+    /// spans that stretch and at least the whole last step, however long a
+    /// step takes on a slow machine.
+    fn mark(&self, end: Instant, late: &mut Option<Vec<air::Mounted>>) {
+        if late.is_none() || Instant::now() + LATE < end {
             *late = Some(self.drawn());
         }
     }
@@ -803,6 +806,7 @@ impl TestUi {
     fn until_shows(&mut self, t: &str, what: &str, ok: impl Fn(&str) -> bool) {
         let (end, mut late) = (Instant::now() + PATIENCE, None);
         loop {
+            self.mark(end, &mut late);
             let now = self.js("el", json!({ "path": t }));
             if now.as_ref().is_ok_and(|e| ok(e["text"].as_str().unwrap_or_default())) {
                 return;
@@ -815,7 +819,6 @@ impl TestUi {
                 let why = format!("timed out after {PATIENCE:?} waiting for {t} to {what}: {seen}{}", self.busy(&late));
                 panic!("{why}\n  screen:\n{}{}", self.surface(), self.trace(&why));
             }
-            self.near(end, &mut late);
             self.wait(Duration::from_millis(10));
         }
     }
@@ -833,6 +836,7 @@ impl TestUi {
     pub fn expect_cell<T: Cell>(&mut self, door: &impl Door<T>, what: &str, f: impl Fn(&T) -> bool) {
         let (end, mut late) = (Instant::now() + PATIENCE, None);
         loop {
+            self.mark(end, &mut late);
             self.settle();
             if self.in_root(|| door.read(&f)) {
                 self.settle();
@@ -842,7 +846,6 @@ impl TestUi {
                 let state = self.in_root(|| door.read(|s| dump(s, 2000)));
                 panic!("{what}{}\n  state: {state}{}", self.busy(&late), self.trace(what));
             }
-            self.near(end, &mut late);
             self.pause(Duration::from_millis(10));
         }
     }
