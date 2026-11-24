@@ -368,7 +368,7 @@ app.whenReady().then(() => {
       if (m.t === 'pick') pick(m)
       if (m.t === 'save') save(m)
       if (m.t === 'notify') notify(m)
-      if (m.t === 'tooltip' && tray) tray.setToolTip(m.text)
+      if (m.t === 'tooltip') tooltip(m.text)
       if (m.t === 'icon') setIcon(m)
       if (m.t === 'cdp') devtools(m)
       if (m.t === 'cdp-end') undevtools()
@@ -661,6 +661,12 @@ app.whenReady().then(() => {
   // click on the icon shows or hides the window. An item runs in the app
   // ({"t":"tray","i":n}); one with a route brings the window forward first.
   let tray = null
+  // The tooltip the app set, kept until there is a tray to show it.
+  let tip = null
+  function tooltip(text) {
+    tip = text
+    if (tray) tray.setToolTip(tip)
+  }
   function openTray() {
     // Linux with no display (none set, or Chromium's headless ozone: `ax
     // build --smoke` without Xvfb): GTK aborts the whole runtime on a tray.
@@ -695,7 +701,7 @@ app.whenReady().then(() => {
     } catch (e) {
       return console.error(`[aio-shell] tray: no system tray on this desktop: ${e.message}`)
     }
-    tray.setToolTip(TRAY.tooltip)
+    tray.setToolTip(tip ?? TRAY.tooltip)
     const items = TRAY.menu.map((it) => it === '-' ? { type: 'separator' } : {
       label: it.label,
       click: () => {

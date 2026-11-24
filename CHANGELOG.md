@@ -163,6 +163,10 @@ version may break things.
 
 ### Fixed
 
+- `desktop::tooltip` called before the window was up (in `main`, at
+  start) was lost: the tray kept its declared tooltip. The runtime gets
+  it when it connects and the tray shows it when it is made; an icon set
+  while the runtime connects is no longer lost either.
 - A character the app's control line to the window split across two
   reads (lines queued up, or a long one) arrived as two replacement
   characters: a notice's title, a dialog's title or start folder, a tray

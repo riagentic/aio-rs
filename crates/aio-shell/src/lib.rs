@@ -657,11 +657,14 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
             while let Ok(s) = ctl_listener.accept_only(&ctl_only).await {
                 use tokio::io::AsyncWriteExt;
                 let (r, mut w) = tokio::io::split(s);
-                // What it missed: the icons the app set before it connected.
-                for l in desktop::icon_lines() {
+                // What it missed: the icons and the tooltip the app set before
+                // it connected; one set meanwhile waits, then goes to it too.
+                let mut slot = c.lock().await;
+                for l in desktop::look_lines() {
                     _ = w.write_all(format!("{l}\n").as_bytes()).await;
                 }
-                *c.lock().await = Some(w);
+                *slot = Some(w);
+                drop(slot);
                 tokio::spawn(control(r, c.clone(), state.clone(), win));
             }
         });
