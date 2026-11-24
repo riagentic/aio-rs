@@ -251,6 +251,7 @@ aio::Source::connect: fn connect(addr: &str, token: &str, user: &str) -> std::io
 aio::Source::for_app: fn for_app(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs) -> std::io::Result<Self>
 aio::Source::for_app_with: fn for_app_with(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs, http: crate::http::Http) -> std::io::Result<Self>
 aio::Source::for_server: fn for_server(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs) -> std::io::Result<Self>
+aio::Source::for_server_with: fn for_server_with(cfg: &crate::config::Config, dirs: &crate::paths::AppDirs, http: crate::http::Http) -> std::io::Result<Self>
 aio::Source::listen: fn listen(&self, f: impl Fn(&Arc<T>) + Send + Sync + 'static)
 aio::Source::on_change: fn on_change<R, M>(&self, immediate: bool, f: impl Fn(&T) -> R + Send + Sync + 'static, on: impl Fn(&R, Option<&R>) -> M + Send + Sync + 'static) -> crate::Watching where R: PartialEq + Clone + Send + 'static, M: Send + 'static
 aio::Source::on_pending: fn on_pending(&self, f: impl Fn() + Send + Sync + 'static)

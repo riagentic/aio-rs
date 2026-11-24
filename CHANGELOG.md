@@ -133,6 +133,15 @@ version may break things.
   (`onstate`: `QrState`). An app that shows none builds none of it; one
   that does grows by about 70 KB in a web build (the reader 42 KB of it)
   ([kit](docs/ui/kit.md#qr-codes-from-the-camera)).
+- `ax create <name> --template relay`: a server that makes a partner
+  API's calls for the app's installs with the partner's key, which it
+  reads from `RELAY_KEY` and nothing else holds. Only the calls it lists
+  pass (method, path, query keys), each part an install fills in kept in
+  its place; per-install and per-address limits a minute; it keeps
+  nothing and logs nothing of a call. One binary, 5.5 MB on Linux
+  ([relay](docs/examples/relay.md)).
+- `Source::for_server_with(cfg, dirs, http)`: `for_server` serving the
+  app's own routes too, without the sync client `for_app_with` holds.
 
 ### Changed
 

@@ -103,4 +103,5 @@ pages! {
     ExDashboard = "examples/dashboard.md",
     #[cfg(feature = "oidc")]
     ExIntegrations = "examples/integrations.md",
+    ExRelay = "examples/relay.md",
 }

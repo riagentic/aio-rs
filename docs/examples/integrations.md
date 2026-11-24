@@ -348,6 +348,8 @@ rt.block_on(async {
 In the launcher, the app's HTTP goes in with the cell, and the source is
 kept for the routes:
 `_ = app::HUB.set(aio::Source::for_app_with(&cfg, &dirs, app::http(secret, aio::blobs::Blobs::of(&dirs)))?);`
+A binary that is never a client (`mode = "server"`) takes
+`Source::for_server_with` instead: the same, without the sync client.
 
 ## 3. Uploads
 
