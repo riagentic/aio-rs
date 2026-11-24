@@ -342,7 +342,8 @@ The views run when the test acts or waits, never behind its back.
 
 - Each wait fails with what it waited for, the screen as `surface()`
   shows it, and a trace file; and the components that rendered in its
-  last half second (`still rendering: Gallery/Thumb`), where one that
+  last half second, and at least in its last step however long that took
+  (`still rendering: Gallery/Thumb`), where one that
   never stops (it remounts on its own success) is the usual cause.
 - `settle()` never gives up silently: a view and a page that keep
   answering each other fail (`the views and their page never settle`),

@@ -2029,10 +2029,19 @@ pub(crate) mod browser {
     }
 
     /// Notes, from the page's first script, when `#slow` first shows and
-    /// when it shows its count (`window.slow`: ms, and the texts it showed).
-    const SLOW: &str = "window.slow = { texts: [] }; new MutationObserver(() => { const s = document.getElementById('slow'); \
+    /// when it shows its count (`window.slow`: ms, and the texts it showed),
+    /// and whether the count showed in the task that read its part (the
+    /// values block after a swap's template), before any other task ran
+    /// (`inItsTask`): it waited on no script, wasm or hydration.
+    const SLOW: &str = "window.slow = { texts: [] }; new MutationObserver((ms) => { \
+                        if (!window.slow.read && ms.some((m) => m.previousSibling?.localName === 'template' && \
+                        [...m.addedNodes].some((n) => n.matches?.('script[data-aio-data]')))) { \
+                        window.slow.read = true; setTimeout(() => window.slow.later = true) } \
+                        const s = document.getElementById('slow'); \
                         const t = s && s.textContent; if (t && t !== window.slow.texts.at(-1)) { window.slow.texts.push(t); \
-                        window.slow[t] = performance.now() } }).observe(document, { childList: true, subtree: true, characterData: true })";
+                        window.slow[t] = performance.now(); \
+                        if (t === '7 counted') window.slow.inItsTask = !!window.slow.read && !window.slow.later } }) \
+                        .observe(document, { childList: true, subtree: true, characterData: true })";
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_streamed_page_shows_at_once_and_fills_in_what_waited_before_its_view_hydrates() {
@@ -2058,7 +2067,7 @@ pub(crate) mod browser {
         let timing = "(() => { const n = performance.getEntriesByType('navigation')[0], \
                       p = performance.getEntriesByName('first-contentful-paint')[0]; \
                       return [n.responseStart, n.responseEnd, p ? p.startTime : -1, window.slow.counting ?? -1, \
-                      window.slow['7 counted'] ?? -1] })()";
+                      window.slow['7 counted'] ?? -1, n.domInteractive] })()";
         let mut runs = vec![];
         for _ in 0..5 {
             t.call("Page.navigate", json!({ "url": url })).await.unwrap();
@@ -2068,6 +2077,8 @@ pub(crate) mod browser {
             // before the view ran, which took both over as they were.
             assert_eq!(t.eval("window.slow.texts").await.unwrap(), json!(["counting", "7 counted"]));
             assert_eq!(t.eval("window.__airHydrated.replaced").await.unwrap(), json!(0));
+            // Shown in the task that read it, however slow the machine.
+            assert_eq!(t.eval("window.slow.inItsTask").await.unwrap(), json!(true), "the count waited on another task");
             let at: Vec<f64> = aio::serde_json::from_value(t.eval(timing).await.unwrap()).unwrap();
             runs.push(at);
         }
@@ -2079,15 +2090,17 @@ pub(crate) mod browser {
             v.sort_by(f64::total_cmp);
             v[v.len() / 2]
         };
-        let (first_byte, last_byte, first_paint, fallback, filled) =
-            (median(0), median(1), median(2), median(3), median(4));
+        let (first_byte, last_byte, first_paint, fallback, filled, parsed) =
+            (median(0), median(1), median(2), median(3), median(4), median(5));
         eprintln!(
             "streamed, median ms from navigation: first byte {first_byte:.1}, first paint {first_paint:.1}, \
-             fallback {fallback:.1}, filled in {filled:.1}, last byte {last_byte:.1} ({runs:?})"
+             fallback {fallback:.1}, filled in {filled:.1}, last byte {last_byte:.1}, parsed {parsed:.1} ({runs:?})"
         );
         // A page rendered whole would send its first byte after its last.
+        // When the page shows a part is the renderer's (a loaded machine's
+        // parses late: the count still shows in the task that read it).
         assert!(first_byte + 100.0 < last_byte, "first byte {first_byte} ms, last {last_byte} ms");
-        assert!(fallback < filled && filled <= last_byte + 50.0, "fallback {fallback} ms, filled {filled} ms");
+        assert!(fallback < filled, "fallback {fallback} ms, filled {filled} ms");
     }
 
     /// Types `text` into the field `t` names, as a person does.

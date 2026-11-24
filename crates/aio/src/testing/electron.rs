@@ -109,9 +109,13 @@ fn flags(os: &str) -> Vec<&'static str> {
 
 /// This test binary's browser, started on first use; a machine without
 /// the runtime fails the test, saying how to get it.
+#[track_caller]
 pub(crate) fn browser() -> Arc<Browser> {
     static ONE: OnceLock<Result<Arc<Browser>, String>> = OnceLock::new();
-    ONE.get_or_init(|| start(page()).map(Arc::new)).clone().unwrap_or_else(|e| panic!("{e}"))
+    match ONE.get_or_init(|| start(page()).map(Arc::new)) {
+        Ok(b) => b.clone(),
+        Err(e) => panic!("{e}"),
+    }
 }
 
 /// The test page: the window's own body (`aio::page`) with the test's bridge.
@@ -337,21 +341,28 @@ pub(crate) struct Page {
 impl Page {
     /// A page `width` × `height` CSS px showing the test page, reaching
     /// this machine and `network`'s hosts (`*`: any) only.
+    #[track_caller]
     pub(crate) fn open(width: u32, height: u32, network: &[String]) -> Self {
         let browser = browser();
         let r = browser.call(json!({ "open": { "width": width, "height": height, "network": network } }));
-        let id = r.and_then(|v| v["page"].as_u64().ok_or(format!("no page in {v}"))).unwrap_or_else(|e| panic!("{e}"));
+        let id = match r.and_then(|v| v["page"].as_u64().ok_or(format!("no page in {v}"))) {
+            Ok(id) => id,
+            Err(e) => panic!("{e}"),
+        };
         Self { browser, id }
     }
 
     /// A DevTools protocol call on the page; a refusal panics, naming it.
+    #[track_caller]
     pub(crate) fn cmd(&self, method: &str, params: Value) -> Value {
-        self.browser
-            .call(json!({ "page": self.id, "method": method, "params": params }))
-            .unwrap_or_else(|e| panic!("{method}: {e}"))
+        match self.browser.call(json!({ "page": self.id, "method": method, "params": params })) {
+            Ok(v) => v,
+            Err(e) => panic!("{method}: {e}"),
+        }
     }
 
     /// `expr`'s value in the page (a promise awaited); a throw panics with it.
+    #[track_caller]
     pub(crate) fn eval(&self, expr: &str) -> Value {
         let r = self.cmd("Runtime.evaluate", json!({ "expression": expr, "returnByValue": true, "awaitPromise": true }));
         if let Some(e) = r.get("exceptionDetails") {
@@ -362,9 +373,13 @@ impl Page {
     }
 
     /// The page as a person would see it now, a PNG.
+    #[track_caller]
     pub(crate) fn shot(&self) -> Vec<u8> {
         use base64::Engine;
-        let r = self.browser.call(json!({ "shot": self.id })).unwrap_or_else(|e| panic!("a screenshot: {e}"));
+        let r = match self.browser.call(json!({ "shot": self.id })) {
+            Ok(r) => r,
+            Err(e) => panic!("a screenshot: {e}"),
+        };
         base64::engine::general_purpose::STANDARD.decode(r["png"].as_str().unwrap_or_default()).unwrap_or_default()
     }
 
@@ -375,6 +390,7 @@ impl Page {
 
     /// Answer the page's requests to each of `stubs`' hosts with its stub,
     /// from now on.
+    #[track_caller]
     pub(crate) fn answer(&self, stubs: Vec<(String, Stub)>) {
         if stubs.is_empty() {
             return;

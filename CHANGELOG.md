@@ -72,6 +72,10 @@ version may break things.
 
 ### Added
 
+- `aio::config::Mode::has_window()`: whether an app of that mode opens a
+  window (a server or a CLI doesn't), the one rule `ax dev`, `ax start`,
+  `ax build` (`--smoke`, a bundled runtime) and the updater follow; each
+  kept its own list before.
 - `GuestEvent::LoadFailed { url, code, description }`: a `Browser`'s guest
   could not open an address (`did-fail-load`, its main frame; `-3`, a
   load given up for another, is none). It said nothing before: the panel
@@ -243,6 +247,39 @@ version may break things.
   hands over (Windows: after `--`) can't smuggle one in.
 - Links that come while nothing listens (`aio::ui::links`) are held up to
   the newest 16, where every one was kept.
+- `ax lint` checks the closures a cell method runs (`.map(|_|
+  rand::random())`, one it keeps and calls) for the clock, randomness and
+  I/O: it skipped every closure. A closure handed to `Effect::new` and an
+  `async` block are still the effect's.
+- `ax dev`: an app that exits 0 on its own (a command-line tool done)
+  "finished; a save runs it again", where it said "waiting: save a fix".
+- `ax dev`'s `[aio] boot: … settings in the log` line is said once the
+  boot report ends: it waited for the app's next line, so it came after a
+  hot patch or at stop. `aio::boot::say` writes its rows in one write
+  (`aio::boot::said`, added, the lines).
+- `[app] version` is checked as `aio.toml` is read (`aio::config!()`,
+  `ax config`, `ax dev`, `ax test`, the app's start): `version =
+  "banana"` passed everything but `ax build`. Its form lives in
+  `aio_config::version` (`declared`), which `ax build` reads too.
+- `ax release` reads the app's `aio.toml` and checks its signing key
+  before the release build: a missing key, or one `[updates] keys` doesn't
+  trust, failed only after the build. `--unsigned` makes one key for all
+  the platforms of a run.
+- `ax status --json` prints ax's one object (`{"ok":…,"value":[…]}`,
+  with `error` and `exit` when an app isn't started), as every verb does:
+  it printed a bare list, and an unknown app as text on stderr.
+- `ax` exits 2 for a wrong command line also when the verb finds it as it
+  runs (`--last abc`, `--css sass`, an unknown `--template`, a bad
+  `--wait`, `--window`, `--port`, flags that don't go together): it
+  exited 1, as for a failure, where the docs say 2.
+- A failed `TestUi` step (`click`, `text`, `press`, `eval`, a wait, …),
+  `TestCells::settle`, `settle_for`, `advance`, `reset` and
+  `aio::testing::expect` point at the test's line: the panic named a line
+  in aio's own code.
+- A `TestUi` wait that timed out named no component still rendering when
+  one step of the wait took longer than its last half second (a slow
+  machine): the components are now taken as each step begins, so the
+  last step is always in what it names.
 - A second launch's arguments reach the app however long its start
   takes: the running instance takes launches from `aio_shell::start` on
   (it did from its window's start, after the app's own setup: past a

@@ -322,7 +322,7 @@ pub fn start(logs: &Path) -> io::Result<()> {
     let back = unsafe { libc::dup(term.as_raw_fd()) };
     let paint = colour_for(&term);
     let copier =
-        std::thread::Builder::new().name("aio-log".into()).spawn(move || copy(pipe, Some(term), paint, log))?;
+        std::thread::Builder::new().name("aio-log".into()).spawn(move || copy(pipe, Some(term), paint, log, brief()))?;
     *tee() = Some((copier, back));
     finish_at_exit();
     heartbeat();
@@ -344,16 +344,22 @@ fn tee() -> std::sync::MutexGuard<'static, Option<(std::thread::JoinHandle<()>, 
 /// The copier: each line to the terminal (when there is one, its level
 /// word coloured when `paint`) and the log; repeats collapsed, and the run's
 /// errors and warnings counted on the last line.
-fn copy(pipe: File, mut term: Option<impl Write>, paint: bool, mut log: Sinks) {
+fn copy(pipe: File, mut term: Option<impl Write>, paint: bool, mut log: Sinks, brief: bool) {
     let (mut repeats, mut tally) = (Repeats::default(), Tally::default());
     ERRORS.store(0, Relaxed);
-    let mut brief = BriefBoot { on: std::env::var("AIORT_BOOT").is_ok_and(|v| v == "brief"), rows: vec![] };
-    let mut out = |line: &str| {
+    let mut brief = BriefBoot { on: brief, rows: vec![] };
+    // A line, or `None`: the app went quiet (the boot report it held is said).
+    let mut out = |line: Option<&str>| {
         if let Some(t) = term.as_mut() {
-            for l in brief.next(line) {
+            let shown = match line {
+                Some(l) => brief.next(l),
+                None => brief.flush(),
+            };
+            for l in shown {
                 _ = writeln!(t, "{}", if paint { painted(&l) } else { l.as_str().into() });
             }
         }
+        let Some(line) = line else { return };
         #[cfg(target_os = "android")]
         logcat(line);
         _ = log.line(now_ms(), line);
@@ -398,14 +404,15 @@ fn copy(pipe: File, mut term: Option<impl Write>, paint: bool, mut log: Sinks) {
         }
         tally.count(&line);
         ERRORS.store(tally.errors, Relaxed);
-        repeats.next(line).iter().for_each(|l| out(l));
-    }
-    repeats.end().iter().chain(&tally.said()).for_each(|l| out(l));
-    if let Some(t) = term.as_mut() {
-        for l in brief.flush() {
-            _ = writeln!(t, "{l}");
+        repeats.next(line).iter().for_each(|l| out(Some(l)));
+        // Nothing more written yet: the app is quiet (a boot report, said in
+        // one write by `boot::say`, has all its rows here).
+        if r.buffer().is_empty() {
+            out(None);
         }
     }
+    repeats.end().iter().chain(&tally.said()).for_each(|l| out(Some(l)));
+    out(None);
 }
 
 /// Read past the rest of a line, its `\n` too: how many bytes it had.
@@ -422,6 +429,11 @@ fn skip_line(r: &mut impl BufRead) -> usize {
         }
     }
     n
+}
+
+/// Whether the terminal has the boot report in one line (`AIORT_BOOT=brief`, `ax dev`'s).
+fn brief() -> bool {
+    std::env::var("AIORT_BOOT").is_ok_and(|v| v == "brief")
 }
 
 /// `ax dev`'s terminal (`AIORT_BOOT=brief`): the boot report, a dozen rows
@@ -769,12 +781,13 @@ pub fn start(logs: &Path) -> io::Result<()> {
     let has_term = !term.is_null() && term != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     let term_at = term as usize;
     let env = (std::env::var_os("NO_COLOR"), std::env::var_os("FORCE_COLOR"));
+    let brief = brief();
     let copier = std::thread::Builder::new().name("aio-log".into()).spawn(move || {
         // Not ours to close: the process's original stderr.
         // SAFETY: a live handle; `Term` never closes it.
         let t = has_term.then(|| Term(std::mem::ManuallyDrop::new(unsafe { File::from_raw_handle(term_at as _) })));
         let paint = colour(t.as_ref().is_some_and(|t| io::IsTerminal::is_terminal(&*t.0)), env.0, env.1);
-        copy(pipe, t, paint, log)
+        copy(pipe, t, paint, log, brief)
     })?;
     *tee() = Some((copier, (term_at, w)));
     finish_at_exit();
@@ -882,7 +895,7 @@ mod tests {
         let logs = d.path().join("logs");
         std::fs::create_dir_all(&logs).unwrap();
         let sinks = super::Sinks::open(&logs).unwrap();
-        super::copy(std::fs::File::open(&input).unwrap(), None::<Vec<u8>>, false, sinks);
+        super::copy(std::fs::File::open(&input).unwrap(), None::<Vec<u8>>, false, sinks, false);
         let all: String = std::fs::read_dir(&logs)
             .unwrap()
             .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap_or_default())
@@ -903,12 +916,47 @@ mod tests {
         let logs = d.path().join("logs");
         std::fs::create_dir_all(&logs).unwrap();
         let sinks = super::Sinks::open(&logs).unwrap();
-        super::copy(std::fs::File::open(&input).unwrap(), None::<Vec<u8>>, false, sinks);
+        super::copy(std::fs::File::open(&input).unwrap(), None::<Vec<u8>>, false, sinks, false);
         let app = std::fs::read_to_string(logs.join("app.log")).unwrap();
         let first = app.lines().next().unwrap();
         assert!(first.len() < super::MAX_LINE + 100, "{}", first.len());
         assert!(first.ends_with(&format!(" … [truncated {} bytes]", 2 * super::MAX_LINE + 12)), "{}", &first[first.len() - 60..]);
         assert!(app.lines().nth(1).unwrap().ends_with("INFO  [app] after"), "{app:.200}");
+    }
+
+    /// `ax dev`'s boot line is said as the app goes quiet after its report,
+    /// not held until its next line (a hot patch's, the stop's).
+    #[cfg(unix)]
+    #[test]
+    fn ax_devs_boot_line_is_said_once_the_report_ends() {
+        use std::io::Write;
+        #[derive(Clone, Default)]
+        struct Term(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Term {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let d = tempfile::tempdir().unwrap();
+        let (r, mut w) = std::io::pipe().unwrap();
+        let (term, sinks) = (Term::default(), super::Sinks::open(d.path()).unwrap());
+        let t = term.clone();
+        let pipe = std::fs::File::from(std::os::fd::OwnedFd::from(r));
+        let copier = std::thread::spawn(move || super::copy(pipe, Some(t), false, sinks, true));
+        let row = |key, value: &str| crate::boot::Row { key, value: value.into(), from: "aio.toml" };
+        w.write_all(crate::boot::said(&[row("app", "notes"), row("mode", "standalone")]).as_bytes()).unwrap();
+        let shown = || String::from_utf8_lossy(&term.0.lock().unwrap()).into_owned();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !shown().contains("2 settings in the log") && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(shown(), "[aio] boot: standalone, 2 settings in the log (ax dev --verbose shows each)\n");
+        drop(w);
+        copier.join().unwrap();
     }
 
     #[test]

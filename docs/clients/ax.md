@@ -617,7 +617,9 @@ One line an app, from its lock and `health.json`:
 | `stopped` | 1 | not running; `crashed or killed, last seen …` when it didn't stop cleanly |
 
 For several apps: 0 when all are started, else 1 when any is stopped,
-else 2.
+else 2. With `--json`, ax's one object: each app's `{"status","said"}`
+as `value`; `ok` when all are started, else `error` (the others' lines)
+and `exit`.
 
 ```sh
 until ax status notes; do test $? -eq 2 || exit 1; sleep 1; done   # wait out a start

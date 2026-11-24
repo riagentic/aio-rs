@@ -57,17 +57,26 @@ pub fn held<R>(data: &Path, id: &str, op: &str, f: impl FnOnce() -> R) -> std::i
     Ok(r)
 }
 
-/// `ax status <app>…`: each app's line (or `--json`), and the exit code.
-pub fn main(names: &[&str], ask: &aio::paths::Ask, json: bool) -> std::process::ExitCode {
+/// `ax status <app>…`: each app's line (or `--json`), and the exit code;
+/// `ask` refused (bad usage) is exit 2.
+pub fn main(names: &[&str], ask: Result<aio::paths::Ask, String>, json: bool) -> std::process::ExitCode {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+    let fail = |code: u8, e: String| {
+        match json {
+            true => println!("{}", json!({ "ok": false, "error": e, "exit": code })),
+            false => eprintln!("ax: {e}"),
+        }
+        std::process::ExitCode::from(code)
+    };
+    let ask = match ask {
+        Ok(a) => a,
+        Err(e) => return fail(2, e),
+    };
     let mut all = Vec::new();
     for name in names {
-        let (data, logs) = match crate::target::of(name, ask) {
+        let (data, logs) = match crate::target::of(name, &ask) {
             Ok(t) => (t.plan.data, t.plan.logs),
-            Err(e) => {
-                eprintln!("ax: {name}: {e}");
-                return std::process::ExitCode::FAILURE;
-            }
+            Err(e) => return fail(1, format!("{name}: {e}")),
         };
         let doc = std::fs::read(data.join("health.json")).ok().and_then(|b| aio::serde_json::from_slice(&b).ok());
         let mut said = of(name, doc.as_ref(), aio::paths::running(&data), now);
@@ -101,11 +110,18 @@ pub fn code(all: &[Said]) -> u8 {
     }
 }
 
-/// The lines (or a JSON list) to print.
+/// The lines to print, or with `json` ax's one object: the list as
+/// `value`, `ok` when all are started, else the others' lines as `error`
+/// with the exit code.
 pub fn show(all: &[Said], json: bool) -> String {
     if json {
         let v: Vec<Value> = all.iter().map(|s| json!({ "status": s.status, "said": s.line })).collect();
-        return Value::Array(v).to_string();
+        let not: Vec<&str> = all.iter().filter(|s| s.code != 0).map(|s| s.line.as_str()).collect();
+        return match code(all) {
+            0 => json!({ "ok": true, "value": v }),
+            n => json!({ "ok": false, "error": not.join("; "), "exit": n, "value": v }),
+        }
+        .to_string();
     }
     all.iter().map(|s| s.line.as_str()).collect::<Vec<_>>().join("\n")
 }
@@ -174,6 +190,14 @@ mod tests {
         assert_eq!(code(&[s(0), s(2)]), 2);
         assert_eq!(code(&[s(2), s(1), s(0)]), 1);
         let j: Value = aio::serde_json::from_str(&show(&[of("notes", None, false, 0)], true)).unwrap();
-        assert_eq!(j, json!([{ "status": "stopped", "said": "notes: stopped" }]));
+        let stopped = json!({ "status": "stopped", "said": "notes: stopped" });
+        assert_eq!(
+            j,
+            json!({ "ok": false, "error": "notes: stopped", "exit": 1, "value": [stopped] }),
+            "ax's one object"
+        );
+        let up = Said { status: "started", line: "a: started".into(), code: 0 };
+        let j: Value = aio::serde_json::from_str(&show(&[up], true)).unwrap();
+        assert_eq!(j, json!({ "ok": true, "value": [{ "status": "started", "said": "a: started" }] }));
     }
 }

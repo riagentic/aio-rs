@@ -490,6 +490,7 @@ aio::boot::begin: fn begin(cfg: &crate::config::Config, version: &str, dirs: &cr
 aio::boot::log_level: fn log_level(cfg: crate::log::Level, env: Option<&str>) -> (crate::log::Level, &'static str)
 aio::boot::no_config_file: fn no_config_file(env: &dyn Fn(&str) -> Option<String>) -> std::io::Result<()>
 aio::boot::rows: fn rows(cfg: &crate::config::Config, version: &str, dirs: &crate::paths::AppDirs, env: &dyn Fn(&str) -> Option<String>, exists: &dyn Fn(&std::path::Path) -> bool) -> Vec<Row>
+aio::boot::said: fn said(rows: &[Row]) -> String
 aio::boot::say: fn say(rows: &[Row])
 aio::boot::up_rows: fn up_rows(cells: &std::collections::BTreeMap<String, u32>, served: Option<&(usize, Vec<String>)>) -> Vec<Row>
 aio::budgets::Breach.detail: String
