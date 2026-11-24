@@ -82,8 +82,9 @@ impl Plain {
 }
 
 /// A closure the method runs (an iterator's, one it keeps and calls) is
-/// the method's own code; one handed to `Effect::new` runs after the
-/// commit, and an async block is a future: those two are effects.
+/// the method's own code; one handed to `Effect::new`, there or kept in a
+/// name only ever handed to it, runs after the commit, and an async block
+/// is a future: those are effects.
 #[test]
 fn closures_a_method_runs_are_checked_and_an_effects_are_not() {
     let d = project(&[(
@@ -100,13 +101,25 @@ impl Dice {
             async move { std::fs::write("a", "b").unwrap(); }
         }));
         let later = async { std::fs::read("a") };
+        let kept = move |h| {
+            let started = std::time::Instant::now();
+            async move { std::fs::write("b", "c").unwrap(); }
+        };
+        cx.then(Effect::new("keep", kept));
+        let called = || std::time::SystemTime::now();
+        cx.run(Effect::new("twice", called));
+        self.at = called();
     }
 }
 "#,
     )]);
     let cells: Vec<_> =
         lint(d.path()).issues.into_iter().filter(|i| i.area == "cells").map(|i| (i.line.unwrap(), i.message)).collect();
-    assert_eq!(cells.iter().map(|c| c.0).collect::<Vec<_>>(), [5, 6], "{cells:?}");
+    assert_eq!(
+        cells.iter().map(|c| c.0).collect::<Vec<_>>(),
+        [5, 6, 18],
+        "kept for an effect and called too: {cells:?}"
+    );
     assert!(cells[0].1.contains("`Dice::roll` uses randomness (`rand::random`)"), "{}", cells[0].1);
     assert!(cells[1].1.contains("uses the clock (`std::time::SystemTime::now`)"), "{}", cells[1].1);
 }

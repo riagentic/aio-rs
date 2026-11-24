@@ -96,6 +96,10 @@ fn flags(os: &str) -> Vec<&'static str> {
         "--disable-gpu-compositing",
         "--disable-gpu-vsync",
         "--disable-frame-rate-limit",
+        // Hidden test windows keep their process's priority and timers.
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
         "--force-device-scale-factor=1",
     ];
     if os != "macos" {
@@ -468,6 +472,7 @@ mod tests {
     fn linux_runs_with_no_display_and_none_in_a_sandbox() {
         assert_eq!(flags("linux").last(), Some(&"--ozone-platform=headless"));
         assert!(!flags("macos").contains(&"--ozone-platform=headless"));
+        assert!(flags("macos").contains(&"--disable-renderer-backgrounding"), "a hidden window keeps its priority");
         assert!(flags("windows").contains(&"--disable-frame-rate-limit"));
         for os in ["linux", "windows", "macos"] {
             let f = flags(os);

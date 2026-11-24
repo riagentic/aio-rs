@@ -23,7 +23,8 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 /// The test page's `window.__aioWire` (where the window's preload puts its
 /// own): frames in by `__aioStep(frames)`, which hands back the frames the
 /// page sent and the form submits the browser refused; `__aioFrame()` the
-/// same once the page's queued work and the app's queries ran, and when one
+/// same once the page's queued work and the app's queries ran and the files
+/// its events read were read, and when one
 /// ran or anything watches its size or visibility, once it has drawn twice
 /// (its scroll events and observers have run).
 pub(crate) const BRIDGE: &str = r#"window.__aioWire = (() => {
@@ -47,9 +48,10 @@ pub(crate) const BRIDGE: &str = r#"window.__aioWire = (() => {
   window.__aioFrame = () => new Promise((r) => {
     const it = window.interpreter, done = () => r(take());
     // The app's queries (`__aioRun`) load as scripts: each has run first,
-    // and what one did (a scroll, a focus) has drawn and told its events.
+    // and what one did (a scroll, a focus) has drawn and told its events;
+    // an event that reads its files (a submit's, a pick's) has read them.
     const ran = () => {
-      if (window.__aioRunning) return setTimeout(ran);
+      if (window.__aioRunning || window.__airReading?.()) return setTimeout(ran);
       const drawn = window.__aioRan;
       window.__aioRan = false;
       if (drawn || (it && (it.resizeObserver || it.intersectionObserver))) requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(done)));
@@ -1256,7 +1258,6 @@ impl TestUi {
         let files: Vec<Value> =
             files.iter().map(|(name, ty, b)| json!({ "name": name, "type": ty, "b64": B64.encode(b) })).collect();
         self.must("files", json!({ "path": t, "files": files }));
-        self.page.eval("(async () => { while (window.__airReading?.()) await new Promise((r) => setTimeout(r, 1)) })()");
         self.settle();
     }
 
