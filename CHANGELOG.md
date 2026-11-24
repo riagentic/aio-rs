@@ -209,6 +209,10 @@ version may break things.
 
 ### Fixed
 
+- `ax` exits 2 for a wrong command line also when the verb finds it as it
+  runs (`--last abc`, `--css sass`, an unknown `--template`, a bad
+  `--wait`, `--window`, `--port`, flags that don't go together): it
+  exited 1, as for a failure, where the docs say 2.
 - A failed `TestUi` step (`click`, `text`, `press`, `eval`, a wait, …),
   `TestCells::settle`, `settle_for`, `advance`, `reset` and
   `aio::testing::expect` point at the test's line: the panic named a line
