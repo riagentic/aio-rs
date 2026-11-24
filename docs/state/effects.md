@@ -477,6 +477,7 @@ retries, session timeouts); in short:
 ```rust
 use aio::prelude::*;
 use aio::testing::TestCells;
+use std::time::Duration;
 
 #[cell(persist)]
 pub struct Feed {
@@ -506,7 +507,7 @@ impl Feed {
 let mut t = TestCells::new();
 let h = t.cell::<Feed>();
 h.remind_later().unwrap();
-t.advance(60_000); // the virtual clock: schedules fire, effects settle
+t.advance(Duration::from_secs(60)); // the virtual clock: schedules fire, effects settle
 assert_eq!((h.state().ticks, h.state().reminders), (1, 1));
 # }
 ```
@@ -632,7 +633,7 @@ until the test lets them run, and their sleeps and timeouts pass at once.
 |---|---|
 | `t.effects()` | the effects asked for that haven't started (`Cell.key`), in order |
 | `t.settle()` | start them and wait until they, and all they lead to, are done (5 s at most, then it panics naming those still running) |
-| `t.advance(ms)` | move the clock: schedules fire, then everything settles |
+| `t.advance(d)` | move the clock: schedules fire, then everything settles |
 | `t.failures()` | take the failed effect and schedule calls, so the test's end doesn't fail on them |
 
 ```rust

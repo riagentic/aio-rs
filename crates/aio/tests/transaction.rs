@@ -138,7 +138,7 @@ fn a_refusal_drops_what_it_wrote_and_asked_for() {
     let mut a = h.fail().unwrap();
     t.settle();
     assert!(a.now().unwrap().unwrap_err().why.contains("refused after the await"));
-    t.advance(2_000);
+    t.advance(std::time::Duration::from_secs(2));
     let s = h.state();
     assert_eq!(s.status, "");
     assert!(s.log.is_empty(), "neither its effect nor its schedule ran: {:?}", s.log);

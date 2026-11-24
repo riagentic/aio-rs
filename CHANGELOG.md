@@ -153,6 +153,10 @@ version may break things.
   `Duration::from_millis(n)` where a number was. A span under a second is
   refused where a second was the least before (`[history] keep`,
   `[data] backup_every`, `[updates] every`…).
+- **Breaking: `TestCells` takes `Duration`s**, as `TestUi` does:
+  `advance(d)`, `settle_for(d)` and `budget::<C>(method, d)` (were ms):
+  `t.advance(Duration::from_secs(60))`. A step back is `rewind(d)`
+  (was `advance(-ms)`).
 - **Breaking:** `[build] budget_mb` takes a fraction (`14.5`) or a size
   as `[budgets]` writes one (`"14.5MB"`): `Build::budget_mb` is
   `Option<f64>`.

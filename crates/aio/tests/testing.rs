@@ -175,9 +175,9 @@ fn advance_fires_due_schedules_only() {
     feed.notify("saved".into()).unwrap();
     // Real time passing changes nothing: only `advance` moves the clock.
     std::thread::sleep(std::time::Duration::from_millis(20));
-    t.advance(2999);
+    t.advance(Duration::from_millis(2999));
     expect(&feed, "not due yet", |s| s.toast.is_some());
-    t.advance(1);
+    t.advance(Duration::from_millis(1));
     expect(&feed, "dismissed on time", |s| s.toast.is_none());
     assert_eq!(feed.store(|s| s.events().unwrap().last().unwrap().by.clone()), By::Schedule("dismiss".into()));
 }
@@ -207,7 +207,7 @@ fn calls_see_the_test_clock() {
     std::thread::sleep(Duration::from_millis(20));
     stats.stamp().unwrap();
     assert_eq!(stats.state().at, t0, "real time passing moves nothing");
-    t.advance(5000);
+    t.advance(Duration::from_secs(5));
     stats.stamp().unwrap();
     assert_eq!(stats.state().at, t0 + 5000);
 }
@@ -221,9 +221,9 @@ fn the_apps_list_boots_in_dependency_order_on_the_test_clock() {
     // The started schedulers fire on this clock, not the wall's.
     feed.notify("saved".into()).unwrap();
     std::thread::sleep(Duration::from_millis(20));
-    t.advance(2999);
+    t.advance(Duration::from_millis(2999));
     expect(&feed, "not due yet", |s| s.toast.is_some());
-    t.advance(1);
+    t.advance(Duration::from_millis(1));
     expect(&feed, "dismissed on time", |s| s.toast.is_none());
     cells.disable(Feed::ID).unwrap();
     assert_eq!(
@@ -280,7 +280,7 @@ fn failures_taken_are_looked_at_and_a_refused_test_call_is_an_answer() {
     assert!(feed.refresh().is_err(), "the test sees this one");
     feed.retry().unwrap();
     feed.later().unwrap();
-    t.advance(10);
+    t.advance(Duration::from_millis(10));
     // `advance` fires the schedule, then settles the waiting effect.
     assert_eq!(t.failures(), ["Feed.refresh: no url (schedule `again`)", "Feed.refresh: no url (effect `retry`)"]);
     assert!(t.failures().is_empty(), "taken");
@@ -380,7 +380,7 @@ fn real_io_under_a_timeout_needs_real_time() {
     t.settle();
     expect(&nap, "the device answered in time", |s| s.woke == ["answered"]);
     // Schedules still move only with `advance`.
-    t.advance(60_000);
+    t.advance(Duration::from_secs(60));
 }
 
 #[test]
@@ -390,7 +390,7 @@ fn settle_for_waits_for_work_an_effect_left_running() {
     nap.later_on_a_thread().unwrap();
     t.settle();
     expect(&nap, "settle sees no running effect", |s| s.woke.is_empty());
-    t.settle_for(500);
+    t.settle_for(Duration::from_millis(500));
     expect(&nap, "the thread called back", |s| s.woke == ["from the thread"]);
 }
 
@@ -400,13 +400,13 @@ fn advance_moves_the_effects_clock_too() {
     let nap = t.cell::<Nap>();
     nap.mark().unwrap();
     t.settle();
-    t.advance(60_000);
+    t.advance(Duration::from_secs(60));
     nap.mark().unwrap();
     t.settle();
     let marks = MARKS.with(|m| m.borrow().clone());
     assert!(marks[1] - marks[0] >= Duration::from_secs(60), "{:?}", marks[1] - marks[0]);
     // A step back moves the schedule clock only: tokio's never runs backwards.
-    t.advance(-1000);
+    t.rewind(Duration::from_secs(1));
 }
 
 #[test]
@@ -794,13 +794,13 @@ impl Slow {
 fn a_call_over_the_test_s_budget_is_a_failure() {
     let mut t = TestCells::new();
     let slow = t.cell::<Slow>();
-    t.budget::<Slow>("crawl", 15);
+    t.budget::<Slow>("crawl", Duration::from_millis(15));
     slow.crawl(0).unwrap();
     assert!(t.failures().is_empty(), "within it");
     slow.crawl(40).unwrap();
     let f = t.failures();
     assert!(f.len() == 1 && f[0].contains("crawl") && f[0].contains("> 15ms"), "{f:?}");
-    assert!(aio::testing::fails(|| t.budget::<Slow>("craw1", 5)).contains("its methods: crawl"));
+    assert!(aio::testing::fails(|| t.budget::<Slow>("craw1", Duration::from_millis(5))).contains("its methods: crawl"));
 }
 
 /// aio's `expect.effects`: what the last call asked for, apart from the
@@ -989,27 +989,27 @@ fn a_schedule_fires_another_cells_method() {
     let (d, a) = (t.cell::<Drafts>(), t.cell::<Archive>());
     d.edit("one".into()).unwrap();
     d.edit("two".into()).unwrap(); // the same key replaces: a debounce
-    t.advance(2_999);
+    t.advance(Duration::from_millis(2_999));
     assert!(a.state().saved.is_empty());
-    t.advance(1);
+    t.advance(Duration::from_millis(1));
     assert_eq!(a.state().saved, ["two"]);
-    t.advance(10_000);
+    t.advance(Duration::from_secs(10));
     assert_eq!(a.state().saved, ["two"], "once");
     // Cancelled with the cell's own schedules.
     d.edit("three".into()).unwrap();
     d.stop().unwrap();
-    t.advance(5_000);
+    t.advance(Duration::from_secs(5));
     assert_eq!(a.state().saved, ["two"]);
     // A repeat, re-armed each time.
     d.hourly().unwrap();
-    t.advance(1_000);
-    t.advance(1_000);
+    t.advance(Duration::from_secs(1));
+    t.advance(Duration::from_secs(1));
     assert_eq!(a.state().ticks, 2);
     // A typo refuses the call that sets it; a refusal where it fires is the schedule's failure.
     let e = d.typo().unwrap_err();
     assert!(e.why.contains("archive has no method `sav`"), "{e}");
     d.edit(String::new()).unwrap();
-    t.advance(3_000);
+    t.advance(Duration::from_secs(3));
     let f = t.failures();
     assert_eq!(f, ["Archive.save: nothing to save (schedule `autosave`)"], "the cell that refused it");
 }
@@ -1019,7 +1019,7 @@ fn a_schedule_on_a_cell_the_app_doesnt_hold_is_a_failure() {
     let mut t = TestCells::new();
     let d = t.cell::<Drafts>();
     d.edit("x".into()).unwrap();
-    t.advance(3_000);
+    t.advance(Duration::from_secs(3));
     let f = t.failures();
     assert!(f.iter().any(|f| f.contains("archive is not one of the app's cells")), "{f:?}");
 }

@@ -26,6 +26,7 @@ or when an `aio::Cells` list starts it.
 use aio::prelude::*;
 use aio::Cells;
 use aio::testing::TestCells;
+use std::time::Duration;
 
 #[cell(persist, restore = idle)]
 pub struct Feed {
@@ -65,7 +66,7 @@ let mut t = TestCells::new();
 let feed = t.cell::<Feed>(); // live, as the app boots it: `up` ran
 let cells = t.start(Cells::default().with(feed.clone(), &[])).unwrap();
 assert_eq!(feed.state().starts, 1);
-t.advance(1_000);
+t.advance(Duration::from_secs(1));
 assert_eq!(feed.state().fetched, 1, "the sync up asked for");
 
 cells.disable(Feed::ID).unwrap(); // `down` runs

@@ -399,7 +399,7 @@ happens to its effects differ:
 | the app (or its server) | every method, effects, schedules, routes, server functions | the whole state | run, once |
 | a synced copy (`Remote`, `client` mode, a page) | `#[client]` methods, predicted | the viewer's view | dropped; the server runs them |
 | replay (boot, `ax replay`, time travel) | the logged calls again | the whole state | dropped: their results are in the log |
-| `TestCells`, `Handle::memory()` | every method, in-process | the whole state | held until `t.settle()` or `t.advance(ms)` |
+| `TestCells`, `Handle::memory()` | every method, in-process | the whole state | held until `t.settle()` or `t.advance(d)` |
 | `t.as_client(&h, who)` | calls as network caller `who` | the whole state | as in the app |
 | the local door (`ax call`, `ax state`) | debug: any method; release: `#[client]` ones | the door's view | as in the app |
 | a peer (`aio::peer::Peer`) | `#[client]` methods | the peer's view | as in the app |

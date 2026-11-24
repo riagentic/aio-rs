@@ -308,7 +308,7 @@ Rename it (`begin`) when porting.
 |---|---|
 | `testCell(cell, name, t => t.send.add(..))` | `#[test]` + `Handle::<C>::memory()`, `h.add(..)` |
 | `t.expect.state(s => ..)` | `assert!(..h.state()..)` |
-| `bootCells`, `advance(ms)` | `TestCells::new()`, `t.advance(ms)`, `t.settle()` |
+| `bootCells`, `advance(ms)` | `TestCells::new()`, `t.advance(Duration::from_millis(ms))`, `t.settle()` |
 | `testUI(App, ..)`, `ui.SaveButton.click()` | `TestUi::new(App)`, `ui.click("SaveButton")` |
 | `ui.expectCell(todo, ..)` | `HANDLE.read_untracked().state()` or `ui.expect_cell(&todo::Ui, ..)` |
 | `testServer`, `testMultiClient` | `TestServer`, `Sim` |

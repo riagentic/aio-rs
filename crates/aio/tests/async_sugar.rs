@@ -220,10 +220,10 @@ mod ttl {
         h.load(2).unwrap();
         t.settle();
         assert_eq!(runs(&h), 2, "other arguments are another call");
-        t.advance(59_999);
+        t.advance(std::time::Duration::from_millis(59_999));
         h.load(1).unwrap();
         assert_eq!(runs(&h), 2, "still within the ttl");
-        t.advance(1);
+        t.advance(std::time::Duration::from_millis(1));
         h.load(1).unwrap();
         t.settle();
         assert_eq!(runs(&h), 3, "expired: it runs again");
@@ -303,7 +303,7 @@ mod ttl {
         let h = t.cell::<Users>();
         h.load(1).unwrap();
         t.settle();
-        t.advance(-1000);
+        t.rewind(std::time::Duration::from_secs(1));
         h.load(1).unwrap();
         t.settle();
         assert_eq!(runs(&h), 2);

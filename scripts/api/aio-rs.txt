@@ -2281,9 +2281,9 @@ aio::testing::TestBrowser::launch: fn launch(bin: &str, args: &[&str]) -> Result
 aio::testing::TestBrowser::open: fn open(url: &str) -> Result<Self, String>
 aio::testing::TestBrowser::port: fn port(&self) -> u16
 aio::testing::TestBrowser::profile: fn profile(&self) -> &Path
-aio::testing::TestCells::advance: fn advance(&mut self, ms: i64)
+aio::testing::TestCells::advance: fn advance(&mut self, by: Duration)
 aio::testing::TestCells::as_client: fn as_client<T: Cell>(&self, h: &Handle<T>, who: crate::Caller) -> AsClient<T>
-aio::testing::TestCells::budget: fn budget<T: Cell>(&mut self, method: &str, ms: u64)
+aio::testing::TestCells::budget: fn budget<T: Cell>(&mut self, method: &str, most: Duration)
 aio::testing::TestCells::cell: fn cell<T: Cell>(&mut self) -> Handle<T>
 aio::testing::TestCells::effects: fn effects(&self) -> Vec<String>
 aio::testing::TestCells::failures: fn failures(&mut self) -> Vec<String>
@@ -2296,10 +2296,11 @@ aio::testing::TestCells::new: fn new() -> Self
 aio::testing::TestCells::random_calls: fn random_calls<T: Cell>(&mut self, h: &Handle<T>, n: usize) -> (u64, Vec<String>)
 aio::testing::TestCells::real_time: fn real_time() -> Self
 aio::testing::TestCells::reset: fn reset<T: Cell>(&mut self, h: &Handle<T>, seed: Value)
+aio::testing::TestCells::rewind: fn rewind(&mut self, by: Duration)
 aio::testing::TestCells::saved: fn saved<T: Cell>(&mut self, v: u32, data: Value) -> Result<Handle<T>, Error>
 aio::testing::TestCells::seeded: fn seeded<T: Cell>(&mut self, seed: Value) -> Handle<T>
 aio::testing::TestCells::settle: fn settle(&mut self)
-aio::testing::TestCells::settle_for: fn settle_for(&mut self, ms: u64)
+aio::testing::TestCells::settle_for: fn settle_for(&mut self, d: Duration)
 aio::testing::TestCells::start: fn start(&mut self, cells: Cells) -> Result<Cells, Error>
 aio::testing::TestIo.prompt: crate::cli::Prompt<std::io::Cursor<Vec<u8>>, Captured>
 aio::testing::TestIo.style: crate::cli::Style

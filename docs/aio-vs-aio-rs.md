@@ -573,7 +573,7 @@ row is missing; what aio still has is [above](#what-aio-has-that-aio-rs-doesnt).
 |---|---|---|---|
 | Cell tests | `testCell`, `bootCells`, `t.getEffects()` | `TestCells` (virtual time, seeded fuzz, `fuzz_methods`, `reset`, `last_effects`, `budget`); `t.last_asked()`: the last call's effects, schedules, tells and aborts as values (`is_schedule`, `is_tell`, ...) | ✅ |
 | Unseeded fuzz | `t.randomActions(n)` | `random_calls(&h, n)`: a fresh seed each run, printed and named by a failure, so `fuzz_methods` replays it (aio's can't be replayed) | ➕ |
-| Real timers | `t.settle(ms)` | `TestCells::real_time()`, `settle_for(ms)` (virtual time stays the default) | ✅ |
+| Real timers | `t.settle(ms)` | `TestCells::real_time()`, `settle_for(d)` (virtual time stays the default) | ✅ |
 | UI tests | `testUI` on happy-dom | `TestUi` on the real engine | ➕ |
 | Virtual clock under the page | `ui.advance` | `TestUi::advance` (the views' timers; schedules: `TestCells::advance`) | ✅ |
 | Components by name and key | `ui.find(c, key)`, `surface()` tree | `ui.find(c, key)`, `within`, `surface_tree()` | ✅ |
