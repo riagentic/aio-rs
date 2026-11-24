@@ -37,7 +37,7 @@ pub fn files(dir: &Path, license_file: Option<&str>) -> Vec<(String, String)> {
 /// and version, its licence, repository and licence texts (`texts`: of a
 /// crate's folder and `license_file`); a text met before is named, not
 /// repeated. The same lock, platform and features give the same bytes.
-pub fn text(meta: &Value, tree: &str, texts: &dyn Fn(&Path, Option<&str>) -> Vec<(String, String)>) -> String {
+pub fn text(meta: &Value, tree: &str, texts: impl Fn(&Path, Option<&str>) -> Vec<(String, String)>) -> String {
     let own: HashSet<&str> =
         meta["workspace_members"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     let packages: HashMap<(&str, &str), &Value> = meta["packages"]
@@ -119,7 +119,7 @@ pub fn stamp(
     let tree = String::from_utf8_lossy(&run(&args)?).into_owned();
     let meta = run(&["metadata", "--format-version", "1", "--filter-platform", triple])?;
     let meta: Value = serde_json::from_slice(&meta).map_err(|e| format!("credits: cargo metadata: {e}"))?;
-    let credits = text(&meta, &tree, &files);
+    let credits = text(&meta, &tree, files);
     let at = target.join("aio").join(format!("{pkg}-{triple}-credits.md"));
     if std::fs::read_to_string(&at).ok().as_deref() != Some(&credits) {
         std::fs::create_dir_all(target.join("aio")).map_err(|e| e.to_string())?;
@@ -162,7 +162,7 @@ mod tests {
                 _ => vec![],
             }
         };
-        let t = text(&meta, tree, &texts);
+        let t = text(&meta, tree, texts);
         assert_eq!(
             t,
             "# Credits\n\nThe 3 open-source crates this app is built with, their licences and licence texts.\n\
@@ -171,7 +171,7 @@ mod tests {
              \n## zeta 2.0.0 (MIT OR Apache-2.0)\nhttps://example.org/zeta\n\
              \n### LICENSE-APACHE: as alpha 1.0.0\n\n### LICENSE-MIT\n\n````text\n## MIT\n``` (c) zeta\n````\n"
         );
-        assert_eq!(text(&meta, tree, &texts), t, "the same bytes each time");
+        assert_eq!(text(&meta, tree, texts), t, "the same bytes each time");
     }
 
     #[test]
