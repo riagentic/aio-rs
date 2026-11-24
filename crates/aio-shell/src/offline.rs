@@ -114,19 +114,25 @@ async fn the_window_reaches_no_other_host_on_launch_or_while_typing() {
     }
     let typed = cdp("Runtime.evaluate", eval("document.querySelector('textarea').value")).await;
     assert_eq!(typed["result"]["value"], "teh quikc brwon fox ");
-    // The dictionary's fetch ends, from no host, said once; or it reached the proxy.
+    // Linux: the dictionary's fetch ends, from no host, said once (or it
+    // reached the proxy). macOS and Windows check en-US natively: no fetch
+    // to wait for, so a while for any other to show.
     let unchecked = "[aio-shell] spellcheck: no en-US dictionary on this machine, and [capabilities] network \
                      does not reach Google's (*.gvt1.com): en-US words go unchecked";
-    let end = std::time::Instant::now() + PATIENCE;
+    let linux = cfg!(target_os = "linux");
+    let end = std::time::Instant::now() + if linux { PATIENCE } else { Duration::from_secs(2) };
     while !said.lock().unwrap().iter().any(|l| l == unchecked) && asked.lock().unwrap().is_empty() {
-        assert!(std::time::Instant::now() < end, "never said: {:?}", said.lock().unwrap());
+        if std::time::Instant::now() >= end {
+            assert!(!linux, "never said: {:?}", said.lock().unwrap());
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     _ = child.kill().await;
     assert_eq!(*asked.lock().unwrap(), Vec::<String>::new(), "requests off this machine");
     assert_eq!(
         said.lock().unwrap().iter().filter(|l| l.contains("spellcheck")).count(),
-        1,
+        usize::from(linux),
         "{:?}",
         said.lock().unwrap()
     );
