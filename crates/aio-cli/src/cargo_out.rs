@@ -751,14 +751,16 @@ mod tests {
         let stop = Stop::default();
         let (s, written) = (stop.clone(), pid_file.clone());
         // The save comes once the grandchild runs and its pid is written
-        // (PowerShell starts slowly on a CI runner).
+        // (PowerShell starts slowly on a CI runner: timed from the save).
+        let saved = std::sync::Arc::new(std::sync::OnceLock::new());
+        let at = saved.clone();
         std::thread::spawn(move || {
             while std::fs::read_to_string(&written).unwrap_or_default().trim().is_empty() {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
+            _ = at.set(std::time::Instant::now());
             s.stale();
         });
-        let started = std::time::Instant::now();
         // cargo's rustc calls stand in: a child of the child, its pid written down.
         let script = format!(
             "$p = Start-Process -PassThru -NoNewWindow ping -ArgumentList '-n','60','127.0.0.1'; \
@@ -769,7 +771,9 @@ mod tests {
         cmd.args(["-NoProfile", "-Command", &script]);
         let ran = run(&mut cmd, true, &stop).unwrap();
         assert!(ran.stopped && !ran.status.success());
-        assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+        // The grandchild pings for 60 s: ended by the save, not by itself.
+        let took = saved.get().expect("saved").elapsed();
+        assert!(took < std::time::Duration::from_secs(20), "{took:?} from the save");
         let pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_string();
         let alive = || {
             let out = Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().unwrap();
