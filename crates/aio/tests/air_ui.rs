@@ -460,27 +460,20 @@ fn a_file_input_hands_its_files_to_change_and_to_the_forms_submit() {
 #[test]
 fn a_canvas_gets_webgl() {
     let mut ui = TestUi::new(|| rsx! { canvas { "data-t": "c" } });
-    let gl = "const c = document.querySelector('[data-t=c]'); [!!c.getContext('webgl2'), !!document.createElement('canvas').getContext('webgl')]";
-    assert_eq!(ui.eval(gl), serde_json::json!([true, true]), "WebGL 2 and 1, drawn by SwiftShader");
+    // Each context, or why the page has none (its creation error).
+    let gl = "const why = (c, kind) => { let e = 'no context'; c.addEventListener('webglcontextcreationerror', (x) => e = x.statusMessage || e); return c.getContext(kind) ? 'ok' : e; }; \
+              [why(document.querySelector('[data-t=c]'), 'webgl2'), why(document.createElement('canvas'), 'webgl')]";
+    assert_eq!(ui.eval(gl), serde_json::json!(["ok", "ok"]), "WebGL 2 and 1, drawn by SwiftShader");
 }
 
 #[test]
 fn a_wait_that_times_out_names_the_component_still_rendering() {
     static DONE: Global<u32> = Global::new(|| 0);
-    // Remounts on its own success, through the page: drawn, it takes the
-    // focus, and the page's focus event gives it a new key.
+    // Remounts on its own success, through the page: drawn, its size is
+    // told (`onresize`), which gives it a new key.
     #[component]
     fn Field(n: u32) -> View {
-        rsx! {
-            input {
-                aria_label: "field",
-                onmounted: move |e| {
-                    let el = e.data();
-                    spawn(async move { _ = el.set_focus(true).await });
-                },
-                onfocus: move |_| DONE.set(n + 1),
-            }
-        }
+        rsx! { p { onresize: move |_| DONE.set(n + 1), "field" } }
     }
     fn app() -> View {
         rsx! {
@@ -488,9 +481,14 @@ fn a_wait_that_times_out_names_the_component_still_rendering() {
             for n in [DONE.get()] { Field { key: n, n } }
         }
     }
-    let mut ui = TestUi::new(app);
-    let got = fails(|| ui.until_within(std::time::Duration::from_secs(1), "the field to settle", || false));
-    assert!(got.contains("waiting for: the field to settle\n  still rendering: Field\n"), "{got}");
+    let got = fails(|| {
+        let mut ui = TestUi::new(app);
+        ui.until_within(std::time::Duration::from_secs(1), "the field to settle", || false);
+    });
+    // Where the page tells the size within the edits' own step, the
+    // mount's settle fails first; else the wait times out.
+    let failed = got.contains("never settle") || got.contains("waiting for: the field to settle\n");
+    assert!(failed && got.contains("still rendering: Field"), "{got}");
     let mut ui = TestUi::new(counter);
     let got = fails(|| ui.until_within(std::time::Duration::from_secs(1), "nothing", || false));
     assert!(!got.contains("still rendering"), "a still page names none: {got}");
