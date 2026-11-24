@@ -122,8 +122,8 @@ fn deeper(line: &str) -> String {
     }
 }
 
-/// `lib` with `pub mod <snake>;` after its last top-level `mod x;`, else after
-/// its crate docs (pure); `native`: on native builds only (a browser build
+/// `lib` with `pub mod <snake>;` among its top-level `mod x;` lines in
+/// rustfmt's order, else after its crate docs (pure); `native`: on native builds only (a browser build
 /// serves nothing). None: it has the module already.
 pub fn with_mod(lib: &str, snake: &str, native: bool) -> Option<String> {
     let has = |l: &str| {
@@ -134,10 +134,18 @@ pub fn with_mod(lib: &str, snake: &str, native: bool) -> Option<String> {
         return None;
     }
     let lines: Vec<&str> = lib.lines().collect();
-    let at = match lines.iter().rposition(|l| (l.starts_with("mod ") || l.starts_with("pub mod ")) && l.ends_with(';'))
-    {
-        Some(i) => i + 1,
-        None => lines.iter().take_while(|l| l.starts_with("//!")).count(),
+    fn name(l: &str) -> Option<&str> {
+        l.strip_prefix("pub ").unwrap_or(l).strip_prefix("mod ")?.strip_suffix(';')
+    }
+    // rustfmt's order: before the first one named after it (and its attributes), else after the last.
+    let after = lines
+        .iter()
+        .position(|l| name(l).is_some_and(|n| n > snake))
+        .map(|i| i - lines[..i].iter().rev().take_while(|l| l.starts_with("#[")).count());
+    let at = match (after, lines.iter().rposition(|l| name(l).is_some())) {
+        (Some(i), _) => i,
+        (None, Some(i)) => i + 1,
+        (None, None) => lines.iter().take_while(|l| l.starts_with("//!")).count(),
     };
     let cfg = if native { "#[cfg(not(target_arch = \"wasm32\"))]\n" } else { "" };
     let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
@@ -445,6 +453,12 @@ mod tests {
         );
         assert_eq!(with_mod(lib, "a", false), None);
         assert_eq!(with_mod("pub(crate) mod a {\n}\n", "a", false), None);
+        // In rustfmt's order (cargo fmt --check, ax check, passes), its attributes going with it.
+        let lib = "//! A.\npub mod tasks;\n";
+        let cfg = "#[cfg(not(target_arch = \"wasm32\"))]\n";
+        assert_eq!(with_mod(lib, "api", true).unwrap(), format!("//! A.\n{cfg}pub mod api;\npub mod tasks;\n"));
+        let lib = format!("//! A.\npub mod a;\n{cfg}pub mod c;\n");
+        assert_eq!(with_mod(&lib, "b", false).unwrap(), format!("//! A.\npub mod a;\npub mod b;\n{cfg}pub mod c;\n"));
     }
 
     #[test]

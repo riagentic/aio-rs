@@ -454,6 +454,9 @@ version may break things.
   first step: every template is written in aio-rs's style, which plain
   `cargo fmt` reflows. An `ax create` app has that style's
   `rustfmt.toml`.
+- `ax add` put each new `mod` line after the last one, so a second part
+  (`tasks`, then `api`) left them out of the order `cargo fmt` keeps and
+  `ax check` failed at its format step. They go in that order.
 
 ## [0.4.2] - 2026-11-11
 
