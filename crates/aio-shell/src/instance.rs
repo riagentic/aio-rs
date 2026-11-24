@@ -174,6 +174,18 @@ pub(crate) fn open_door(id: &str, data: &Path) {
     }
 }
 
+/// What a launch handed to a running app with no page to bring forward
+/// (served only) says (pure): where it serves (its `serving.json`), that it
+/// took the launch, and how to stop it or run another.
+fn handed_to_server(id: &str, serving: Option<String>) -> String {
+    let port = serving.and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()?["port"].as_u64());
+    let at = port.map_or(String::new(), |p| format!(" on port {p}"));
+    format!(
+        "[aio] {id} is already running, serving{at} with no window: it took this launch's arguments \
+         (ax stop {id} stops it; --instance <name> runs another copy)"
+    )
+}
+
 /// The app's args `ax dev` gives a debug build as JSON, when dx's own
 /// `--args` can't carry them (it splits them on spaces).
 pub const DEV_ARGS: &str = "AIORT_DEV_ARGS";
@@ -258,7 +270,12 @@ pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
         return quit_at(id, &plan.data).map(|()| Start::Done);
     }
     _ = SCHEMES.set(cfg.app.schemes.clone());
-    let Some(d) = claim_or_hand(id, &plan, ask.takeover, &args)? else { return Ok(Start::HandedOver) };
+    let Some(d) = claim_or_hand(id, &plan, ask.takeover, &args)? else {
+        if shows.is_none() || cfg.app.mode == aio::config::Mode::Server {
+            eprintln!("{}", handed_to_server(id, std::fs::read_to_string(plan.data.join("serving.json")).ok()));
+        }
+        return Ok(Start::HandedOver);
+    };
     // Started by a link (`myapp://…`): the app hears it once it listens.
     open_links(&args);
     // macOS hands links as Apple events to the running `.app`.
@@ -456,6 +473,17 @@ mod tests {
             .into();
         assert_eq!(links_in(&args, &["lnk".into()]), ["lnk://a?b=c", "LNK:b", "lnk:"]);
         assert!(links_in(&args, &[]).is_empty(), "no schemes, no links");
+    }
+
+    #[test]
+    fn a_launch_handed_to_a_server_says_where_it_serves_and_how_to_stop_it() {
+        let said = handed_to_server("relay", Some(r#"{"port":8100,"host":"0.0.0.0"}"#.into()));
+        assert_eq!(
+            said,
+            "[aio] relay is already running, serving on port 8100 with no window: it took this launch's arguments \
+             (ax stop relay stops it; --instance <name> runs another copy)"
+        );
+        assert!(handed_to_server("relay", None).starts_with("[aio] relay is already running, serving with no window"));
     }
 
     #[test]

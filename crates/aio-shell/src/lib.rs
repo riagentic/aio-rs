@@ -955,8 +955,14 @@ fn in_browser(dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
             eprintln!("[aio] {}: open {at} in a browser ({e})", dirs.id);
         }
     });
+    // A later launch opens it again (`take_launch`).
+    _ = BROWSER_PAGE.set(url);
     serve(dirs)
 }
+
+/// The page an app shown in the browser opens (its link with the key), for
+/// a later launch to open again: a browser can't be asked to bring a tab forward.
+static BROWSER_PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// The link that opens the served app's page with `key` (pure): this
 /// machine's address for one that listens on every interface.
@@ -1190,8 +1196,20 @@ async fn take_launch(s: aio::ipc::Stream, ctl: Ctl, stop: fn(), ending: fn() -> 
     eprintln!("[aio] handed a launch: {:?}", launch.args);
     instance::open_links(&launch.args);
     instance::deliver(launch);
-    if let Some(c) = ctl.lock().await.as_mut() {
-        _ = c.write_all(b"focus\n").await;
+    // The window comes forward; an app shown in the browser opens its page
+    // again, the launch not kept waiting for the browser.
+    match (ctl.lock().await.as_mut(), BROWSER_PAGE.get()) {
+        (Some(c), _) => _ = c.write_all(b"focus\n").await,
+        (None, Some(url)) => {
+            _ = tokio::spawn(async move {
+                if let Err(e) = os::open_url(url).await {
+                    // The key stays out of the log.
+                    let at = url.split_once("?token=").map_or(&**url, |(u, _)| u);
+                    eprintln!("[aio] open {at} in a browser ({})", e.to_string().replace(url.as_str(), at));
+                }
+            })
+        }
+        (None, None) => {}
     }
     _ = w.write_all(b"ok\n").await;
 }

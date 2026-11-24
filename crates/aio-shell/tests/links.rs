@@ -96,7 +96,15 @@ fn a_link_reaches_the_app_whether_it_started_it_or_it_was_running() {
         let said = String::from_utf8_lossy(&second.stderr);
         assert!(second.status.success(), "{role}: {said}");
         assert_eq!(heard(d.path(), 2), ["lnk://cold/1?q=a%20b", "LNK://warm/2"], "{role}: its own scheme's only");
+        if role == "server" {
+            assert!(said.contains(&format!("[aio] {ID} is already running, serving")), "{said}");
+        }
         let first = stop(d.path(), first);
         assert!(first.contains("[aio] handed a launch"), "{role}: never a --quit or --takeover: {first}");
+        if role == "browser" {
+            // The page is opened again for the later launch (here: refused, said).
+            let opened = first.matches("open http://127.0.0.1:7420/ in a browser (not opened (AIORT_NO_OPEN").count();
+            assert_eq!(opened, 2, "{first}");
+        }
     }
 }

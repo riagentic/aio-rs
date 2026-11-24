@@ -226,6 +226,10 @@ version may break things.
 
 ### Fixed
 
+- A later launch of an app shown in the browser (`[app] ui = "browser"`)
+  opens its page again (it got "ok" and nothing showed); one of an app
+  served only (`mode = "server"`) says it is already running, where it
+  serves and how to stop it, where it ended silently.
 - A launch's text after a bare `--` is never one of aio's flags
   (`--takeover`, `--home`, `--quit`, `--route`…): `aio::paths::Ask`,
   `Ask::app_args` (it hands the rest over as given), `--route` and

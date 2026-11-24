@@ -57,6 +57,13 @@ they are). That is how "open this file with" reaches a running app.
 up to 30 s for its lock: a new build replacing an old one.
 `aio_shell::instance::quit(id)` asks the same from code.
 
+An app shown in the browser (`[app] ui = "browser"`, `--client=browser`)
+has no window to bring forward: a later launch opens its page again (a
+browser can't be asked to raise a tab). One served only (`mode =
+"server"`, `--client=server-only`) has nothing to show: the later launch
+says it is already running, where it serves and how to stop it, and its
+arguments still reach `aio_shell::launches()`.
+
 ### Deep links
 
 An app opens its own links (`notes://item/7`) when it declares their
