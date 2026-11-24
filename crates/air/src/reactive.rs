@@ -357,14 +357,20 @@ fn track(s: Key) {
             }
             return;
         };
-        let Some(n) = rt.node_mut(e) else { return };
-        if n.deps.contains(&s) {
+        let Some(runs) = rt.node(e).map(|n| n.runs) else { return };
+        // Read already in this run: the signal's last reader is this one (a
+        // look at the reader's reads was quadratic in a hole of many). One
+        // read since by another (a memo it pulled) only costs a duplicate.
+        let Some(sig) = rt.node_mut(s) else {
+            _ = rt.node_mut(e).map(|n| n.deps.push(s));
+            return;
+        };
+        if sig.subs.last() == Some(&(e, runs)) {
             return;
         }
-        n.deps.push(s);
-        let runs = n.runs;
-        let Some(sig) = rt.node_mut(s) else { return };
         sig.subs.push((e, runs));
+        _ = rt.node_mut(e).map(|n| n.deps.push(s));
+        let Some(sig) = rt.node_mut(s) else { return };
         // A signal never written keeps its readers' old runs: drop them as it doubles.
         let len = sig.subs.len();
         if len >= 64 && len.is_power_of_two() {
