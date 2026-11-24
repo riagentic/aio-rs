@@ -81,7 +81,7 @@ id = "notes"
 [ui]
 theme = "auto"   # tokens | auto | full | none
 hue = 210        # the accent's hue in degrees; unset: hashed from the id
-layout = true    # <main> as a centred page, and .card .row .stack .grid
+layout = true    # .container as a centred page, and .card .row .stack .grid
 ```
 
 | `theme` | The page gets |
@@ -92,7 +92,7 @@ layout = true    # <main> as a centred page, and .card .row .stack .grid
 | `none` | no aio CSS at all, not even its base rules: the app brings every rule, and the kit is bare |
 
 `layout = false` keeps how elements look and drops the page layout:
-`<main>` as a centred page and the classes `.card`, `.stack`, `.row`,
+the `.container` page shell and the classes `.card`, `.stack`, `.row`,
 `.grid`, `.muted`, `.badge`.
 
 ## What the look styles
@@ -109,13 +109,15 @@ finished:
   `fieldset`, `legend`, `progress`;
 - data: `table` (rows light up under the pointer), `img`, `video`,
   `canvas`, `svg` (never wider than their box), `dialog`, `details`;
-- the page: `<main>` is a centred page `--aio-page` (72rem) wide, padded;
-  a `<header>` or `<footer>` at the top level is a full-bleed bar whose
-  content lines up with `<main>`. An app that wants the full bleed (a
-  canvas, a map) doesn't write `<main>`.
+- the page, opt in: `class="container"` on `<main>` (or any box) makes it
+  a centred page `--aio-page` (72rem) wide, padded; on a `<header>` or
+  `<footer>`, a full-bleed bar whose content lines up with it. Without the
+  class, `<main>` and the bars are the app's to lay out (a sidebar grid, a
+  canvas, a map).
 
 | Class | Does |
 |---|---|
+| `.container` | the page shell: a centred, padded column; on a `header`/`footer`, a full-bleed bar lined up with it |
 | `.card` | surface, border, radius, soft shadow |
 | `.stack` | a column with a gap |
 | `.row` | a wrapping row, centred, with a gap |
@@ -161,7 +163,7 @@ change everything made from it.
 | `--aio-ok`, `--aio-warn`, `--aio-danger`, `--aio-on-danger` | status colours; the ink on danger is solved from the fill | green, amber, red |
 | `--aio-s-1` … `--aio-s-6` | spacing | .25, .5, .75, 1, 1.5, 2.5 rem |
 | `--aio-r-1` … `--aio-r-4` | radii | 6, 10, 14, 20 px |
-| `--aio-page` | `<main>`'s width | 72rem |
+| `--aio-page` | `.container`'s width | 72rem |
 | `--aio-font`, `--aio-mono` | type | the system's UI and mono fonts |
 | `--aio-shadow-1`, `--aio-shadow-2` | a hairline shadow, a raised one | tinted by the hue |
 

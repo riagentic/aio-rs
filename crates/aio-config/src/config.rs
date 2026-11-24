@@ -1547,7 +1547,7 @@ pub struct Ui {
     pub hue: Option<u16>,
     /// The page's greys: tinted with the hue, or near grey (aio's `"neutral": "soft"`).
     pub neutral: Neutral,
-    /// With the look, the page layout: `<main>` as a centred page and the
+    /// With the look, the page layout: `.container` as a centred page and the
     /// `.card`/`.row`/`.stack`/`.grid` classes. Off: only how elements look.
     pub layout: bool,
 }

@@ -96,7 +96,7 @@ pub fn App() -> View {
     let left = move || items.with(|i| i.iter().filter(|t| !t.done).count());
     rsx! {
         style { {aio::use_css!(aio::ui::scheme(), &theme; "assets/style.css")} }
-        main { style: "max-width:36rem",
+        main { class: "container", style: "max-width:36rem",
             h1 { "todos" }
             form { class: "row", onsubmit: add,
                 input { "data-t": "new", value: "{text}", placeholder: "What needs to be done?",

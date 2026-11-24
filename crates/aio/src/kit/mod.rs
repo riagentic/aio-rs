@@ -62,7 +62,8 @@ pub use island::{Island, WebIsland};
 #[cfg(not(target_arch = "wasm32"))]
 pub use js_client::{JsCell, use_js_client};
 pub use keys::{
-    Chord, ChordSpec, GlobalKeys, Hit, MOVE_MS, field_key, keycap_match, normalize_key, use_global_key, use_key_claim,
+    Chord, ChordSpec, GlobalKeys, Hit, MOVE_MS, field_key, keycap_match, normalize_key, use_global_key,
+    use_global_keys, use_key_claim,
 };
 pub use layout::*;
 pub use markdown::Markdown;

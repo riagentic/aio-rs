@@ -100,7 +100,7 @@ pub fn App() -> View {
     let theme = aio::kit::theme_css(aio::hue!());
     rsx! {
         style { {aio::use_css!(aio::ui::scheme(), &theme; "assets/style.css")} }
-        main {
+        main { class: "container",
             h1 { "Canvas" }
             canvas { "data-t": "canvas", width: "{width}", height: "{height}", style: "width:100%",
                 onmounted: move |e| *canvas.write() = Some(e.data()) }

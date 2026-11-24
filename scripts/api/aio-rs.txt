@@ -1592,9 +1592,10 @@ aio::kit::text: fn text() -> Rule<String, String>
 aio::kit::theme::sheet: fn sheet(ui: &crate::config::Ui, id: &str, ships_css: bool) -> String
 aio::kit::theme::tokens_css: fn tokens_css(hue: u16, soft: bool) -> String
 aio::kit::theme_css: fn theme_css(hue: u16) -> String
-aio::kit::toast: fn toast(message: impl Into<String>, tone: super::controls::Tone) -> Toast
-aio::kit::toast_for: fn toast_for(message: impl Into<String>, tone: super::controls::Tone, stay: Option<std::time::Duration>) -> Toast
-aio::kit::toast_view: fn toast_view(message: View, tone: super::controls::Tone, stay: Option<std::time::Duration>) -> Toast
+aio::kit::toast: fn toast(message: impl Into<String>, tone: super::controls::Tone)
+aio::kit::toast_for: fn toast_for(message: impl Into<String>, tone: super::controls::Tone, stay: Option<std::time::Duration>)
+aio::kit::toast_handle: fn toast_handle(message: impl Into<String>, tone: super::controls::Tone, stay: Option<std::time::Duration>) -> Toast
+aio::kit::toast_view: fn toast_view(message: View, tone: super::controls::Tone, stay: Option<std::time::Duration>)
 aio::kit::toasts: fn toasts() -> Vec<String>
 aio::kit::unstyled: fn unstyled(page: &str, cls: &str) -> Option<String>
 aio::kit::use_async_rule: fn use_async_rule<T, O, V, F>(form: Form<T, O>, field: &'static str, part: fn(&T) -> V, debounce: std::time::Duration, rule: impl Fn(V) -> F + 'static) where T: Clone + PartialEq + 'static, O: 'static, V: Clone + PartialEq + 'static, F: Future<Output = Option<String>> + 'static
@@ -1606,6 +1607,7 @@ aio::kit::use_form: fn use_form<T: Clone + PartialEq + 'static>(initial: impl Fn
 aio::kit::use_form_schema: fn use_form_schema<T: Clone + PartialEq + 'static, O: 'static>(initial: impl FnOnce() -> T, schema: Schema<T, O>) -> super::forms::Form<T, O>
 aio::kit::use_frame: fn use_frame(active: impl Into<Prop<bool>>, frame: impl FnMut(std::time::Duration, std::time::Duration) + 'static)
 aio::kit::use_global_key: fn use_global_key(chord: impl Into<ChordSpec>, f: impl FnMut(KeyboardEvent) + 'static)
+aio::kit::use_global_keys: fn use_global_keys<C: Into<ChordSpec>, F: FnMut(KeyboardEvent) + 'static>(list: impl IntoIterator<Item = (C, F)>)
 aio::kit::use_held: fn use_held<K, T>(pool: &crate::held::Held<K, T>, key: impl Into<Prop<Option<K>>>) -> Signal<Option<crate::held::State<T>>> where K: Clone + Eq + Hash + Debug + Send + Sync + 'static, T: Send + Sync + 'static
 aio::kit::use_id: fn use_id(prefix: &str) -> String
 aio::kit::use_interval: fn use_interval(every: std::time::Duration, active: impl Into<Prop<bool>>, tick: impl FnMut() + 'static)
@@ -3619,6 +3621,7 @@ impl From<&str> for ChordSpec
 impl From<&str> for Rejected
 impl From<Error> for Error
 impl From<Error> for UpdateError
+impl From<String> for ChordSpec
 impl From<String> for Rejected
 impl Hash for Code
 impl Hash for Encoding

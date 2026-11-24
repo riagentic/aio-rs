@@ -150,7 +150,7 @@ pub fn App() -> View {
     let theme = aio::kit::theme_css(aio::hue!());
     rsx! {
         style { {aio::use_css!(aio::ui::scheme(), &theme; "assets/style.css")} }
-        main {
+        main { class: "container",
             h1 { "data-t": "count", "{n}" }
             button { class: aio::ui::btn("primary"), onclick: move |_| _ = act!(add(1)), "Add" }
             button { class: aio::ui::btn("ghost"), onclick: move |_| _ = act!(add(-1)), "Subtract" }

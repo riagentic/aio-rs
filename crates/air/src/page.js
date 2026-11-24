@@ -58,6 +58,9 @@
   const s = (v) => ['s', enc.encode(v == null ? '' : String(v))]
   const f = (v) => ['f', +v || 0]
 
+  // The target takes typing (air::Raw::field; aio::kit's claims say the same).
+  const field = (t) => t instanceof HTMLInputElement ? !/^(checkbox|radio|button|submit|reset|range|color|file|image)$/.test(t.type)
+    : t instanceof Element && (t.matches('textarea, select') || t.isContentEditable)
   const send = (ids, e) => {
     const t = e.target || {}, form = e.type === 'submit' && t instanceof HTMLFormElement ? [...new FormData(t)] : []
     const sc = t instanceof Element ? t : document.scrollingElement || {}
@@ -66,8 +69,8 @@
     const ask = e.type === 'keydown' && !reading && window.__aioWire.ask
     const parts = [['u8', ask ? 3 : 1], ['u16', ids.length], ...ids.map((i) => ['u32', i]), s(e.type), s(e.key), s(e.code), ['u8', e.location || 0]]
     const flags = !!e.shiftKey | (!!e.ctrlKey << 1) | (!!e.altKey << 2) | (!!e.metaKey << 3) | (!!e.repeat << 4) |
-      (!!e.isComposing << 5) | ((t.checked === true) << 6) | (!!e.isPrimary << 7)
-    parts.push(['u8', flags], ['u8', typeof e.button === 'number' ? e.button : 255], ['u16', e.buttons || 0])
+      (!!e.isComposing << 5) | ((t.checked === true) << 6) | (!!e.isPrimary << 7) | (field(t) << 8)
+    parts.push(['u16', flags], ['u8', typeof e.button === 'number' ? e.button : 255], ['u16', e.buttons || 0])
     for (const v of [e.clientX, e.clientY, e.pageX, e.pageY, e.offsetX, e.offsetY, e.screenX, e.screenY, e.deltaX, e.deltaY, e.deltaZ]) parts.push(f(v))
     parts.push(['u8', e.deltaMode || 0], s(e.dataTransfer ? e.dataTransfer.getData('text/plain') : typeof t.value === 'string' ? t.value : ''))
     for (const v of [sc.scrollTop, sc.scrollLeft, sc.scrollWidth, sc.scrollHeight, sc.clientWidth, sc.clientHeight]) parts.push(f(v))

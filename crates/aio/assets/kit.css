@@ -25,29 +25,26 @@ body{
 }
 
 /* ── page shell ────────────────────────────────────────────────── */
-/* Writing <main> is the whole opt-in for a page shell: apps that want the
-   full bleed (a canvas, a map, a game) simply do not use it. */
-:where(main){
-  display:block; max-width:var(--aio-page); margin-inline:auto;
+/* class="container" is the whole opt-in for a page shell: on <main>, a
+   centred column; on a header or footer, a full-bleed bar whose CONTENT lines
+   up with it. Two elements sharing a max-width but not a parent otherwise
+   disagree by exactly the scrollbar, and a header that starts one pixel left
+   of the page under it is the first thing an eye catches. A bare <main> is
+   the app's own: a sidebar grid, a canvas, a map lay it out as they need. */
+:where(.container){
+  max-width:var(--aio-page); margin-inline:auto;
   padding:var(--aio-s-5) var(--aio-s-4);
 }
-/* A full-bleed bar whose CONTENT lines up with <main>. Two elements sharing a
-   max-width but not a parent otherwise disagree by exactly the scrollbar, and
-   a header that starts one pixel left of the page under it is the first thing
-   an eye catches. */
-/* #main as well as body: aio mounts the app into <div id="main">, so an app
-   whose top level is header/main/footer has none of them as a direct child of
-   body. Matching only body> styled the shell nobody writes and skipped the
-   one everybody does. */
-:where(body>header,body>footer,#main>header,#main>footer){
+:where(header.container,footer.container){
+  max-width:none; margin-inline:0;
   padding-block:var(--aio-s-4);
   padding-inline:max(
     var(--aio-s-4),
     calc((100% - var(--aio-page)) / 2 + var(--aio-s-4))
   );
 }
-:where(body>header,#main>header){border-bottom:1px solid var(--aio-border)}
-:where(body>footer,#main>footer){
+:where(header.container){border-bottom:1px solid var(--aio-border)}
+:where(footer.container){
   border-top:1px solid var(--aio-border); color:var(--aio-muted); font-size:.9em;
 }
 

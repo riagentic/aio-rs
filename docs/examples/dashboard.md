@@ -282,7 +282,7 @@ pub fn App() -> View {
     rsx! {
         style { {aio::ui::page_css(&[theme.as_str()], false)} }
         ConnectionStatus { status: use_status().get() }
-        main { Cards {} Chart {} }
+        main { class: "container", Cards {} Chart {} }
     }
 }
 

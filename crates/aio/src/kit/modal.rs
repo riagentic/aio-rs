@@ -215,7 +215,7 @@ thread_local! {
     static TIMERS: RefCell<Vec<(u64, Task)>> = const { RefCell::new(Vec::new()) };
 }
 
-/// A toast, to dismiss it early.
+/// A toast, to dismiss it early ([`toast_handle`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Toast(u64);
 
@@ -245,12 +245,18 @@ pub fn toasts() -> Vec<String> {
 
 /// Show a notice in the [`ToastHost`] for 4 seconds. Call it on the UI thread
 /// (a handler, a view's task).
-pub fn toast(message: impl Into<String>, tone: Tone) -> Toast {
+pub fn toast(message: impl Into<String>, tone: Tone) {
     toast_for(message, tone, Some(Duration::from_secs(4)))
 }
 
 /// Show a notice for `stay` (`None`: until dismissed).
-pub fn toast_for(message: impl Into<String>, tone: Tone, stay: Option<Duration>) -> Toast {
+pub fn toast_for(message: impl Into<String>, tone: Tone, stay: Option<Duration>) {
+    toast_handle(message, tone, stay);
+}
+
+/// [`toast_for`], giving the [`Toast`] to dismiss it early (a "Saving…"
+/// shown until the save ends).
+pub fn toast_handle(message: impl Into<String>, tone: Tone, stay: Option<Duration>) -> Toast {
     let text: String = message.into();
     let view = rsx! { "{text}" };
     show(view, Some(text), tone, stay)
@@ -258,8 +264,8 @@ pub fn toast_for(message: impl Into<String>, tone: Tone, stay: Option<Duration>)
 
 /// Show any view as a notice for `stay` (`None`: until dismissed): a link,
 /// a bold word, an icon.
-pub fn toast_view(message: View, tone: Tone, stay: Option<Duration>) -> Toast {
-    show(message, None, tone, stay)
+pub fn toast_view(message: View, tone: Tone, stay: Option<Duration>) {
+    show(message, None, tone, stay);
 }
 
 fn show(message: View, text: Option<String>, tone: Tone, stay: Option<Duration>) -> Toast {
