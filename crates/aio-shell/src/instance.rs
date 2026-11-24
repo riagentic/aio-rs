@@ -612,7 +612,7 @@ mod tests {
             }
         };
         let l = aio::rt().block_on(async { tokio::time::timeout(std::time::Duration::from_secs(5), early).await });
-        assert_eq!(l.expect("never heard").path("early.md"), Path::new("/w/early.md").to_string_lossy());
+        assert_eq!(l.expect("never heard").path("early.md"), Path::new("/w").join("early.md").to_string_lossy());
         // `start` opens it for every app but a CLI, before its window.
         assert!(
             include_str!("instance.rs")
