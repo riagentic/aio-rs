@@ -1707,6 +1707,12 @@ pub(crate) mod browser {
 
     /// What tab `t` shows: its items, calls waiting, link.
     const SHOWN: &str = "import('./app.js').then((m) => JSON.parse(m.shown()))";
+    /// A page's `storage` events dropped while `window.held` is true.
+    const HELD: &str = "const add = EventTarget.prototype.addEventListener; \
+        EventTarget.prototype.addEventListener = function (t, f, o) { \
+          const g = t === 'storage' && this === window \
+            ? function (e) { if (!(e.isTrusted && window.held)) return f.call(this, e); } : f; \
+          return add.call(this, t, g, o); };";
     const APP: &str = "import('./app.js')";
     /// The page's own cell.
     const TALLY: &str = "import('./app.js').then((m) => JSON.parse(m.tally()))";
@@ -1757,6 +1763,10 @@ pub(crate) mod browser {
         const VOTES: &str = "import('./app.js').then((m) => JSON.parse(m.votes()))";
         until(&mut b, VOTES, json!({ "n": 0, "online": true })).await;
         let before = sockets.load(Ordering::SeqCst);
+        // The twin's storage events, held back while `window.held` (one
+        // that comes late, made at will).
+        b.call("Page.enable", json!({})).await.unwrap();
+        b.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": HELD })).await.unwrap();
         b.eval("window.stale = true; location.reload()").await.ok();
         until(&mut b, "!window.stale && window.ready", json!("yes")).await;
         until(&mut b, VOTES, json!({ "n": 0, "online": true })).await;
@@ -1775,11 +1785,30 @@ pub(crate) mod browser {
         let html = "[document.documentElement.lang, document.documentElement.dir]";
         assert_eq!(a.eval(html).await.unwrap(), json!(["cs", "auto"]));
         // Online: a call reaches the server, and both tabs show it.
+        let board = "'aio.web-test:board'";
+        let keep = format!(
+            "window.writes = []; const set = Storage.prototype.setItem; \
+             Storage.prototype.setItem = function (k, v) {{ if (k === {board}) window.writes.push(v); return set.call(this, k, v); }}; true"
+        );
+        assert_eq!(a.eval(&keep).await.unwrap(), json!(true));
+        // The twin hears no write of the maker's for now (they come late).
+        assert_eq!(b.eval("window.held = true").await.unwrap(), json!(true));
         assert_eq!(a.eval("import('./app.js').then((m) => m.add('a'))").await.unwrap(), json!(true));
         served(&h, &["a"]).await;
         for t in [&mut a, &mut b] {
             until(t, SHOWN, json!({ "items": ["a"], "pending": 0, "online": true })).await;
         }
+        // The twin hears the maker's first write late (a storage event
+        // comes when it comes): long after the server applied the call.
+        // It never takes the call again: never shown twice, never queued.
+        let first = a.eval("window.writes.find((w) => JSON.parse(w).pending.length)").await.unwrap();
+        assert!(first.as_str().is_some_and(|w| w.contains("\"add\"")), "{first}");
+        let late = format!(
+            "{APP}.then((m) => {{ dispatchEvent(new StorageEvent('storage', {{ key: {board}, newValue: {first} }})); \
+             return JSON.parse(m.shown()); }})"
+        );
+        assert_eq!(b.eval(&late).await.unwrap(), json!({ "items": ["a"], "pending": 0, "online": true }));
+        assert_eq!(b.eval("window.held = false").await.unwrap(), json!(false));
         // The network goes: both tabs are offline.
         up.abort();
         _ = up.await;

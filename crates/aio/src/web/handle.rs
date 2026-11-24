@@ -293,6 +293,7 @@ impl<T: Cell> Handle<T> {
             pending: Vec::new(),
             sched: lock(&self.inner.sched).clone(),
             paths: Vec::new(),
+            done: Vec::new(),
         };
         if let Err(e) = storage::save(&super::Local, key, doc, &Default::default(), super::say) {
             super::say(&format!("{}: not saved in this browser ({e}); it lives on in this page", T::ID));

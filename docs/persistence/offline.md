@@ -158,8 +158,9 @@ rt.block_on(async {
   copy again.
 - A page built with `ax build --web` keeps the same thing in the
   browser's storage, so calls made offline survive a reload. Two tabs of
-  one app share it: neither drops the other's waiting calls, and a call
-  sent twice is applied once. A call is kept the moment it is made; the
+  one app share it: neither drops the other's waiting calls, a call
+  sent twice is applied once, and a call one tab saw applied is never
+  taken again by the other (never shown twice). A call is kept the moment it is made; the
   server's patches are kept at most every 250 ms (a burst is one write)
   and when the page hides or closes.
 

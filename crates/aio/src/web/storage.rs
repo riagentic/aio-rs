@@ -60,7 +60,14 @@ pub struct Doc {
     /// The parts a synced copy held (its view is of them; empty: all).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
+    /// Calls a tab saw answered lately, newest last (at most [`DONE_KEPT`]):
+    /// a twin tab never takes them again, nor keeps them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub done: Vec<String>,
 }
+
+/// The answered calls a document names, at most.
+pub const DONE_KEPT: usize = 64;
 
 /// A schedule a page's cell set (`cx.after`, `every`, `at`, `cron`, and its
 /// declared ones as `@<method>`), kept in its document: the native store's
@@ -205,27 +212,47 @@ pub fn adopt(mine: &[Queued], theirs: &Doc, user: &str, done: &HashSet<String>) 
     theirs.pending.iter().filter(|q| !have.contains(q.op.as_str()) && !done.contains(&q.op)).cloned().collect()
 }
 
+/// The calls of `mine` that a twin tab saw answered (`theirs.done`): this
+/// tab took them from it and lost its link before its own answer (pure).
+pub fn settled(mine: &[Queued], theirs: &Doc, user: &str) -> Vec<String> {
+    if theirs.user != user {
+        return Vec::new();
+    }
+    mine.iter().filter(|q| theirs.done.contains(&q.op)).map(|q| q.op.clone()).collect()
+}
+
 /// Write `doc` at `key`, keeping the calls another tab stored meanwhile
 /// (theirs, as by [`merge`]) and the newer server view of the two. Another
 /// user's document is replaced only once its calls are none. `Err` when the
 /// browser refused it: the copy goes on in memory.
 pub fn save(kv: &impl Kv, key: &str, mut doc: Doc, done: &HashSet<String>, say: impl Fn(&str)) -> Result<(), String> {
-    if let Some(theirs) = load(kv, key, &say) {
-        if theirs.user != doc.user && !theirs.pending.is_empty() {
+    let theirs = match load(kv, key, &say) {
+        Some(t) if t.user != doc.user && !t.pending.is_empty() => {
             return Err(format!(
                 "\"{key}\" holds {} unsent calls by {}: they are kept, and not sent as {}",
-                theirs.pending.len(),
-                theirs.user,
+                t.pending.len(),
+                t.user,
                 doc.user
             ));
         }
-        if theirs.user == doc.user {
-            doc.pending = merge(&doc.pending, &theirs.pending, done);
-            if theirs.seq > doc.seq && theirs.v == doc.v {
-                (doc.seq, doc.view) = (theirs.seq, theirs.view);
-            }
+        Some(t) if t.user == doc.user => Some(t),
+        _ => None,
+    };
+    let known = theirs.as_ref().map(|t| t.done.clone()).unwrap_or_default();
+    // What either tab saw answered is never kept again: theirs first, then
+    // this tab's, the newest [`DONE_KEPT`] said on.
+    let mut mine: Vec<&String> = done.iter().filter(|op| !known.contains(op)).collect();
+    mine.sort();
+    let all: Vec<String> = known.iter().chain(mine).cloned().collect();
+    doc.done = all[all.len().saturating_sub(DONE_KEPT)..].to_vec();
+    let gone: HashSet<String> = known.into_iter().chain(done.iter().cloned()).collect();
+    if let Some(theirs) = theirs {
+        doc.pending = merge(&doc.pending, &theirs.pending, &gone);
+        if theirs.seq > doc.seq && theirs.v == doc.v {
+            (doc.seq, doc.view) = (theirs.seq, theirs.view);
         }
     }
+    doc.pending.retain(|q| !gone.contains(&q.op));
     let text = serde_json::to_string(&doc).map_err(|e| e.to_string())?;
     kv.set(key, &text)
 }
@@ -256,8 +283,9 @@ pub fn orphans(kv: &impl Kv, app: &str, syncing: &[&str]) -> Vec<(String, usize)
 #[cfg(target_arch = "wasm32")]
 pub(crate) const SAVE_MS: u32 = 250;
 
-/// When a synced copy's document is written (pure): a change that queued a
-/// call at once (a crash must not lose it); any other (a patch of the
+/// When a synced copy's document is written (pure): a change to its calls
+/// (one queued: a crash must not lose it; one answered: a twin tab must
+/// not take it again) at once; any other (a patch of the
 /// server's) only marks it due, written by one timer the first arms
 /// ([`SAVE_MS`]), and on the page's hide or close. A burst of patches is
 /// one write, not one whole-view serialising and storage write each.
@@ -281,9 +309,9 @@ pub(crate) enum Save {
 
 #[cfg(any(target_arch = "wasm32", test))]
 impl Saves {
-    /// A change; `queued`: it queued a call.
-    pub(crate) fn changed(&mut self, queued: bool) -> Save {
-        match (queued, std::mem::replace(&mut self.due, !queued)) {
+    /// A change; `calls`: its calls changed.
+    pub(crate) fn changed(&mut self, calls: bool) -> Save {
+        match (calls, std::mem::replace(&mut self.due, !calls)) {
             (true, _) => Save::Now,
             (false, false) => Save::Arm,
             (false, true) => Save::Armed,
@@ -366,7 +394,28 @@ mod tests {
 
     fn doc(user: &str, seq: u64, pending: Vec<Queued>) -> Doc {
         let view = serde_json::json!({ "seq": seq });
-        Doc { cell: "todos".into(), v: 1, user: user.into(), seq, view, pending, sched: Vec::new(), paths: Vec::new() }
+        Doc { cell: "todos".into(), v: 1, user: user.into(), seq, view, pending, ..Doc::default() }
+    }
+
+    /// A twin tab took a call from a stale write of the tab that made it
+    /// (the server had applied it, the twin heard only the change), then
+    /// lost the network before its own send was answered. The tab that
+    /// made it saw it answered: its next write says so, and the twin's
+    /// writes never put it back beside a new call.
+    #[test]
+    fn a_call_one_tab_saw_answered_is_never_kept_again_by_its_twin() {
+        let kv = Map::default();
+        let set =
+            |d: Doc, done: &[&str]| save(&kv, K, d, &done.iter().map(|o| o.to_string()).collect(), |_| {}).unwrap();
+        set(doc("u", 1, vec![q("a", 1)]), &[]);
+        // The twin took it (its copy now holds it too).
+        let twin = vec![q("a", 1)];
+        // Its maker saw it answered: its queue is empty.
+        set(doc("u", 2, vec![]), &["a"]);
+        assert_eq!(ops(&kv, K), Vec::<String>::new());
+        // Offline, the twin keeps a new call (the maker's, taken again).
+        set(doc("u", 2, [twin, vec![q("b", 2)]].concat()), &[]);
+        assert_eq!(ops(&kv, K), ["b"], "the answered call is not kept again");
     }
 
     fn ops(kv: &Map, key: &str) -> Vec<String> {
