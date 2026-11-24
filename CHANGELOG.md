@@ -209,6 +209,9 @@ version may break things.
 
 ### Fixed
 
+- `ax status --json` prints ax's one object (`{"ok":…,"value":[…]}`,
+  with `error` and `exit` when an app isn't started), as every verb does:
+  it printed a bare list, and an unknown app as text on stderr.
 - `ax` exits 2 for a wrong command line also when the verb finds it as it
   runs (`--last abc`, `--css sass`, an unknown `--template`, a bad
   `--wait`, `--window`, `--port`, flags that don't go together): it

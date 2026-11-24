@@ -2293,13 +2293,7 @@ fn main() -> ExitCode {
     {
         let cut = a.iter().position(|w| w == "--").unwrap_or(a.len());
         let names: Vec<&str> = a[cut + 1..].iter().map(String::as_str).collect();
-        return match aio::paths::Ask::parse(&a[1..cut]) {
-            Ok(ask) => status::main(&names, &ask, json),
-            Err(e) => {
-                eprintln!("ax: {e}");
-                ExitCode::from(2)
-            }
-        };
+        return status::main(&names, aio::paths::Ask::parse(&a[1..cut]), json);
     }
     let (code, out) = outcome(asked);
     // aio's `--quiet`: the exit code says it; a failure still says why.
