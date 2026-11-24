@@ -75,10 +75,44 @@ impl Plain {
     let r = lint(d.path());
     let cells: Vec<_> =
         r.issues.iter().filter(|i| i.area == "cells").map(|i| (i.line.unwrap(), i.message.clone())).collect();
-    assert_eq!(cells.iter().map(|c| c.0).collect::<Vec<_>>(), [5, 6, 7, 8], "{cells:?}");
+    assert_eq!(cells.iter().map(|c| c.0).collect::<Vec<_>>(), [5, 6, 7, 8, 11], "a closure it keeps too: {cells:?}");
     assert!(cells[0].1.contains("`Notes::add` uses the clock (`std::time::SystemTime::now`)"), "{}", cells[0].1);
     assert!(r.issues.iter().filter(|i| i.area == "cells").all(|i| i.severity == Severity::Error));
     assert!(r.issues[0].fix.as_deref().unwrap().contains("cx.now()"));
+}
+
+/// A closure the method runs (an iterator's, one it keeps and calls) is
+/// the method's own code; one handed to `Effect::new` runs after the
+/// commit, and an async block is a future: those two are effects.
+#[test]
+fn closures_a_method_runs_are_checked_and_an_effects_are_not() {
+    let d = project(&[(
+        "src/cell.rs",
+        r#"
+#[methods]
+impl Dice {
+    pub fn roll(&mut self, cx: &Cx, n: usize) {
+        self.rolls = (0..n).map(|_| rand::random::<u8>()).collect();
+        let stamp = || std::time::SystemTime::now();
+        self.at = stamp();
+        cx.run(Effect::new("save", move |h| {
+            let started = std::time::Instant::now();
+            async move { std::fs::write("a", "b").unwrap(); }
+        }));
+        let later = async { std::fs::read("a") };
+    }
+}
+"#,
+    )]);
+    let cells: Vec<_> = lint(d.path())
+        .issues
+        .into_iter()
+        .filter(|i| i.area == "cells")
+        .map(|i| (i.line.unwrap(), i.message))
+        .collect();
+    assert_eq!(cells.iter().map(|c| c.0).collect::<Vec<_>>(), [5, 6], "{cells:?}");
+    assert!(cells[0].1.contains("`Dice::roll` uses randomness (`rand::random`)"), "{}", cells[0].1);
+    assert!(cells[1].1.contains("uses the clock (`std::time::SystemTime::now`)"), "{}", cells[1].1);
 }
 
 #[test]

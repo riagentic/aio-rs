@@ -142,7 +142,10 @@ Each finding has an area, in brackets in the report.
 
 A method runs again on replay, sync and time travel: whatever it reads
 from the world must come from the call ([Methods do no
-I/O](../state/cells.md#methods-do-no-io)).
+I/O](../state/cells.md#methods-do-no-io)). A closure it runs is its own
+code (`.map(|_| rand::random())`, one it keeps and calls); a closure
+handed to `Effect::new`, and an `async` block, are the effect's, run
+after the commit.
 
 ### `perf`
 
