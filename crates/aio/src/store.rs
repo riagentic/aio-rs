@@ -2837,6 +2837,33 @@ mod tests {
         }
     }
 
+    /// A call never waits for a checkpoint (the WAL copied into the file,
+    /// two disk syncs: one call in ~150 took 10-30 ms): the file's own
+    /// thread runs them, and the file gets the log all the same.
+    #[cfg(unix)]
+    #[test]
+    fn calls_leave_checkpoints_to_the_files_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let mut s = None;
+        // Opened through the counting VFS.
+        syncs::count(|| s = Some(Store::<Cursor>::open(&path).unwrap()));
+        let mut s = s.unwrap();
+        let born = std::fs::metadata(&path).unwrap().len();
+        let n = syncs::count(|| {
+            for i in 0..1200 {
+                s.call(&By::Test, "add", serde_json::json!([format!("row {i}")])).unwrap();
+            }
+        });
+        // 1: a WAL restarted (its header synced) after the thread's checkpoint.
+        assert!(n <= 1, "{n} disk syncs on the calls' thread");
+        let copied = (0..1000).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::fs::metadata(&path).unwrap().len() > 2 * born
+        });
+        assert!(copied, "the WAL reached the file while the store is open");
+    }
+
     #[test]
     fn a_new_store_file_comes_in_whole_and_never_over_one_already_there() {
         let dir = tempfile::tempdir().unwrap();
