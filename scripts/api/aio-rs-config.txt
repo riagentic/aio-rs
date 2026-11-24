@@ -170,6 +170,7 @@ aio_config::config::Mode::Client
 aio_config::config::Mode::ClientServer
 aio_config::config::Mode::Server
 aio_config::config::Mode::Standalone
+aio_config::config::Mode::has_window: const fn has_window(self) -> bool
 aio_config::config::Moved.files: Vec<String>
 aio_config::config::Moved.from: String
 aio_config::config::Neutral::Soft
@@ -327,6 +328,10 @@ aio_config::update::git_remote: fn git_remote(url: &str) -> Option<&str>
 aio_config::update::github_repo: fn github_repo(s: &str) -> Option<(&str, &str)>
 aio_config::update::raw_key: fn raw_key(k: &str) -> Result<Vec<u8>, String>
 aio_config::update::ssh_key: fn ssh_key(key: &str) -> Result<String, String>
+aio_config::version::Declared.base: (u64, u64)
+aio_config::version::Declared.pinned: Option<u64>
+aio_config::version::Declared.stage: Option<&'static str>
+aio_config::version::declared: fn declared(v: &str) -> Result<Declared, String>
 aio_config::vitals::Status::Degraded
 aio_config::vitals::Status::Frozen
 aio_config::vitals::Status::Healthy
@@ -345,6 +350,7 @@ aio_config::vitals::Vitals::check: fn check(&self) -> Result<(), String>
 const aio_config::auth::MAX_SESSIONS: u32
 const aio_config::auth::MAX_TTL_MS: i64
 const aio_config::report::KEEP: usize
+const aio_config::version::STAGES: [&str; 3]
 enum aio_config::config::Align
 enum aio_config::config::BarPosition
 enum aio_config::config::BarStyle
@@ -464,6 +470,7 @@ impl Debug for ColorScheme
 impl Debug for Config
 impl Debug for Css
 impl Debug for Data
+impl Debug for Declared
 impl Debug for Dev
 impl Debug for Dir
 impl Debug for Directive
@@ -674,6 +681,7 @@ impl PartialEq for ColorScheme
 impl PartialEq for Config
 impl PartialEq for Css
 impl PartialEq for Data
+impl PartialEq for Declared
 impl PartialEq for Dev
 impl PartialEq for Dir
 impl PartialEq for Directive
@@ -781,6 +789,7 @@ impl StructuralPartialEq for ColorScheme
 impl StructuralPartialEq for Config
 impl StructuralPartialEq for Css
 impl StructuralPartialEq for Data
+impl StructuralPartialEq for Declared
 impl StructuralPartialEq for Dev
 impl StructuralPartialEq for Dir
 impl StructuralPartialEq for Directive
@@ -886,6 +895,7 @@ mod aio_config::perf
 mod aio_config::report
 mod aio_config::security
 mod aio_config::update
+mod aio_config::version
 mod aio_config::vitals
 struct aio_config::auth::Policy
 struct aio_config::budgets::Budgets
@@ -917,6 +927,7 @@ struct aio_config::config::WindowsBuild
 struct aio_config::perf::Budgets
 struct aio_config::perf::Storm
 struct aio_config::security::Security
+struct aio_config::version::Declared
 struct aio_config::vitals::Tier
 struct aio_config::vitals::Vitals
 trait aio_config::config::Lit
