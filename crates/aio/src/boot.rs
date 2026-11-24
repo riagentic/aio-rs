@@ -175,11 +175,15 @@ fn on(b: bool) -> &'static str {
     if b { "on" } else { "off" }
 }
 
-/// Print rows as the log's boot report.
+/// Print rows as the log's boot report, in one write: the log's copier
+/// reads them together, and says `ax dev`'s line once they end.
 pub fn say(rows: &[Row]) {
-    for r in rows {
-        eprintln!("[aio] boot {:<10} {} ({})", r.key, r.value, r.from);
-    }
+    eprint!("{}", said(rows));
+}
+
+/// Rows as the boot report's lines (pure).
+pub fn said(rows: &[Row]) -> String {
+    rows.iter().map(|r| format!("[aio] boot {:<10} {} ({})\n", r.key, r.value, r.from)).collect()
 }
 
 /// `AIORT_CONFIG` (a whole-file config swap), refused, never ignored:

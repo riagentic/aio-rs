@@ -7,6 +7,7 @@ pub mod config;
 pub mod icon;
 pub mod perf;
 pub mod security;
+pub mod version;
 pub mod vitals;
 
 /// `aio::log`'s level.

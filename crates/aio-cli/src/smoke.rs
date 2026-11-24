@@ -44,9 +44,9 @@ pub enum Wait {
 impl Wait {
     pub fn of(mode: &aio::config::Mode) -> Wait {
         match mode {
+            m if m.has_window() => Wait::Window,
             aio::config::Mode::Server => Wait::Boot,
-            aio::config::Mode::Cli => Wait::Answer,
-            _ => Wait::Window,
+            _ => Wait::Answer,
         }
     }
 

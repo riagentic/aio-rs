@@ -133,6 +133,32 @@ fn a_failed_expectation_prints_the_state() {
     expect(&feed, "loaded", |s| !s.items.is_empty());
 }
 
+/// The file `f`'s failure points at (its panic's location).
+fn failed_in(f: impl FnOnce()) -> String {
+    thread_local!(static AT: std::cell::RefCell<String> = Default::default());
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let was = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |p| {
+            AT.set(p.location().map(|l| l.file().to_string()).unwrap_or_default());
+            was(p)
+        }));
+    });
+    aio::testing::fails(f);
+    AT.take()
+}
+
+/// A failed expectation, settle or reset points at the test's line, not into aio.
+#[test]
+fn a_failure_points_at_the_test() {
+    let mut t = TestCells::new();
+    let feed = t.cell::<Feed>();
+    assert_eq!(failed_in(|| expect(&feed, "loaded", |s| !s.items.is_empty())), file!(), "expect");
+    assert_eq!(failed_in(|| t.reset(&feed, json!({ "nope": 1 }))), file!(), "reset");
+    feed.hang().unwrap();
+    assert_eq!(failed_in(|| t.settle()), file!(), "settle");
+}
+
 #[test]
 fn an_abort_drops_a_held_effect_unstarted() {
     let mut t = TestCells::new();

@@ -20,6 +20,13 @@ pub enum Mode {
     Cli,
 }
 
+impl Mode {
+    /// Whether an app of this mode opens a window: a server or a CLI doesn't.
+    pub const fn has_window(self) -> bool {
+        !matches!(self, Mode::Server | Mode::Cli)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
 #[serde(deny_unknown_fields)]
 pub struct App {
@@ -1868,6 +1875,9 @@ impl Config {
                 "aio.toml: [app] ui = \"browser\" needs mode \"client-server\" (its server serves the page), not {:?}",
                 c.app.mode
             ));
+        }
+        if let Some(v) = &c.app.version {
+            crate::version::declared(v)?;
         }
         if c.app.lang.as_deref().is_some_and(|l| !lang_ok(l)) {
             return Err("aio.toml: [app] lang is a language tag: letters, digits and '-' (\"en\", \"pt-BR\")".into());
