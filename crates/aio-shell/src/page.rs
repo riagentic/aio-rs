@@ -219,6 +219,14 @@ pub(crate) fn picked(m: &aio::serde_json::Value) {
     }
 }
 
+/// The runtime is gone: every dialog still open fails, never waits on.
+pub(crate) fn gone() {
+    let open = std::mem::take(&mut *WAITING.lock().unwrap_or_else(|e| e.into_inner()));
+    for (_, tx) in open {
+        _ = tx.send(Err("the window closed before its dialog answered".into()));
+    }
+}
+
 fn reply(m: &aio::serde_json::Value) -> Reply {
     if let Some(e) = m["error"].as_str() {
         return Err(format!("the window's dialog failed: {e}"));

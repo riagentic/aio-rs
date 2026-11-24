@@ -1133,6 +1133,13 @@ async fn control(r: tokio::io::ReadHalf<aio::ipc::Stream>, ctl: Ctl, state: Opti
             _ => {}
         }
     }
+    // The runtime is gone (its window closed, a kept server serves on):
+    // what it was still to answer never comes, so it fails now.
+    *ctl.lock().await = None;
+    if CTL.get().is_some_and(|c| Arc::ptr_eq(c, &ctl)) {
+        page::gone();
+        guest::gone();
+    }
 }
 
 /// Take later launches' hand-overs: each is delivered to the app
@@ -1344,6 +1351,42 @@ mod tests {
         tokio::spawn(control(r, ctl, Some(d.path().join("window.json")), Window::default()));
         electron.write_all(b"{\"t\":\"back\"}\n").await.unwrap();
         views.recv().await.expect("Back asked").send(true).unwrap();
+    }
+
+    /// A dialog or a child window the runtime had still to answer when it
+    /// went (its window closed, a kept server serving on) fails, never
+    /// waits for ever; the next one is told there is no window.
+    #[tokio::test]
+    async fn what_the_runtime_had_still_to_answer_fails_when_it_goes() {
+        use tokio::io::AsyncBufReadExt;
+        let _turn = WINDOW_TURN.lock().await;
+        let (ours, electron) = pair();
+        let (r, w) = tokio::io::split(ours);
+        let ctl = CTL.get_or_init(|| Arc::new(tokio::sync::Mutex::new(None))).clone();
+        *ctl.lock().await = Some(w);
+        tokio::spawn(control(r, ctl, None, Window::default()));
+        let (child, pick) = (Child { url: "https://x.example".into(), ..Default::default() }, page::Pick::default());
+        // The runtime reads both asks, then goes without answering.
+        let runtime = async {
+            let mut asked = tokio::io::BufReader::new(electron).lines();
+            let mut kinds = vec![];
+            for _ in 0..2 {
+                let l = asked.next_line().await.unwrap().unwrap();
+                kinds.push(
+                    aio::serde_json::from_str::<aio::serde_json::Value>(&l).unwrap()["t"].as_str().unwrap().to_string(),
+                );
+            }
+            kinds.sort();
+            kinds
+        };
+        let all = async { tokio::join!(runtime, page::pick(&pick), open_window(&child)) };
+        let (kinds, pick, opened) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), all).await.expect("an ask still waits");
+        assert_eq!(kinds, ["child", "pick"]);
+        assert!(pick.unwrap_err().to_string().contains("the window closed"));
+        assert!(opened.unwrap_err().to_string().contains("the window closed"));
+        let e = clear_partition("persist:x").await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::NotConnected);
     }
 
     /// A syntax error in the shell is a window that never opens (aio tests

@@ -427,6 +427,8 @@ mod tests {
 
     #[tokio::test]
     async fn without_a_window_a_notice_is_an_error_never_silence() {
+        // No window while it runs (a test that stands in for one takes the turn).
+        let _turn = crate::WINDOW_TURN.lock().await;
         let e = notify(&Notice { title: "x".into(), ..Default::default() }).await.unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotConnected);
     }

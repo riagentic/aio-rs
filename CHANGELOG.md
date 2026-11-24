@@ -163,6 +163,11 @@ version may break things.
 
 ### Fixed
 
+- A dialog (`page::pick`, `pick_many`, `save`), `open_window` or
+  `clear_partition` still open when the window's runtime went (a
+  `keep_server` app's window closed or crashed) waited for ever, and a
+  dialog held the clocks of the server fn calls in flight for ever: each
+  fails now, `the window closed before …`.
 - Each published aio-rs crate carries its MIT licence text (`LICENSE`),
   so an app's credits (`aio::credits!()`) and the crates' packages
   include it, not only the licence's name.
