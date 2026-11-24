@@ -97,7 +97,7 @@ only path, decided at compile time. Copied as is:
 | an effect's re-run disposes what its last run made | `_effectCollectStart` `signal.ts:1068` (as an owner tree) |
 | `on_cleanup` | `air/renderer-lifecycle.ts:116` |
 | keyed list: the longest increasing run of old places stays, the rest move | `air/vdom-diff-children.ts:296` `_longestIncreasing`, :321 `diffKeyed` |
-| one listener per event type on the document | `air/vdom-events.ts:97` `_ensureDelegation` |
+| one listener per event type on the document (and one in the capture phase for an event that doesn't bubble) | `air/vdom-events.ts:97` `_ensureDelegation` |
 | a handled `submit` never navigates | `vdom-events.ts` (the SPA default) |
 | `show(cond, then, else)` | `air/show.ts:9` `Show` |
 | `memo` | `signal.ts:971` `computed` |
@@ -114,7 +114,9 @@ rows re-runs two holes, not 1000.
 Not AIR's, on purpose: an event goes to Rust with every node on its path
 that listens for it, innermost first, and the handlers run in that order
 until one calls `stop_propagation` (AIR's innermost handler alone wins;
-the views were written against Dioxus's bubbling). Two rows of a list
+the views were written against Dioxus's bubbling); an event that doesn't
+bubble (`focus`, `mouseenter`, a media element's `loadeddata`, told by
+the event itself, never by a list) reaches its target's handlers alone. Two rows of a list
 with one key fail in every build (aio's tripwire), where AIR made the
 second fresh.
 
@@ -260,6 +262,14 @@ nothing behind (`air::live()`, the test page's `named`: gate 1).
   (`img { width }`, `canvas { height }`, `input { size }`), and so do SVG's
   and a quoted name (`"display": "x"`). A `style` string keeps the
   properties set before it that it doesn't set.
+- A property no attribute sets on an element a script made (`muted`, whose
+  attribute is `defaultMuted` alone; `volume`, `current_time`,
+  `playback_rate`, `indeterminate`) is set as the property, as a control's
+  `value`, `checked` and `selected` are; an element without it (a custom
+  one's `volume`) takes the attribute. The server's paint writes `muted`
+  as its attribute (it mutes the parser's element), and hydration hands
+  the rest to the painted node. `ax lint` warns on the ones air can't set
+  (`src_object`, `text_content`, …).
 - `for pat in expr { row }` is a keyed list: `key:` on the row is required.
   Items must be `Clone + PartialEq`: a key whose item changed gets a new row.
 - `if cond { … } else { … }` swaps only when `cond` flips (`memo`).

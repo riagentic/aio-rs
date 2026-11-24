@@ -591,15 +591,18 @@ macro_rules! num_attr {
 }
 num_attr!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64, char);
 
-/// The attributes the page sets as properties (what a control shows now).
+/// The attributes the page sets as properties: what a control shows now,
+/// and a media element's state (the `muted` attribute of an element a
+/// script made is its `defaultMuted` alone). An element without the
+/// property (a custom one's `volume`) takes the attribute.
 fn is_prop(name: &str) -> bool {
-    matches!(name, "value" | "innerHTML") || is_flag_prop(name)
+    matches!(name, "value" | "innerHTML" | "volume" | "currentTime" | "playbackRate") || is_flag_prop(name)
 }
 
 /// The properties that are on or off: `false` sets them off (a value's
 /// `false`, an `Option`'s `None`, removes it).
 fn is_flag_prop(name: &str) -> bool {
-    matches!(name, "checked" | "selected" | "indeterminate")
+    matches!(name, "checked" | "selected" | "indeterminate" | "muted")
 }
 
 /// The attributes whose `true`/`false` is text, not presence (`aria-*`,

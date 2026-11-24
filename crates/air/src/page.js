@@ -3,15 +3,17 @@
 // app names are kept by id; a template is built once with the DOM's own
 // calls and cloned per use (cloneNode keeps its empty text holes), its
 // roots in a fragment until placed. A view is a range of siblings, first
-// to last. One listener per event type on the document (AIR
-// `_ensureDelegation`); an event goes to the app with every node on its
-// path that listens for it, innermost first: the app's handlers bubble it.
+// to last. Listeners per event type on the document (AIR
+// `_ensureDelegation`): in the bubble phase, and in the capture phase for
+// an event that doesn't bubble (`focus`, a media element's `loadeddata`),
+// told by the event itself, so no list can miss one. An event goes to the
+// app with every node on its path that listens for it, innermost first
+// (the target alone if it doesn't bubble): the app's handlers bubble it.
 (() => {
   const nodes = new Map([[0, document.getElementById('main')]])
   const tpls = new Map()
   const evals = new Map()
   const dec = new TextDecoder(), enc = new TextEncoder()
-  const NO_BUBBLE = new Set(['focus', 'blur', 'mouseenter', 'mouseleave', 'pointerenter', 'pointerleave', 'load', 'error', 'scroll', 'resize', 'visible'])
   // `onresize` and `onvisible` of an element: observed, told as an event of
   // its own (the box, or 1/0 for in view, in its client point).
   const tell = (n, type, x, y) => {
@@ -100,13 +102,14 @@
     for (const n of e.composedPath()) {
       if (n === document || n === window) break
       if (n.__airOn && n.__airOn.has(e.type)) ids.push(n.__airId)
-      if (NO_BUBBLE.has(e.type) && n === e.target) break
+      if (!e.bubbles && n === e.target) break
     }
     if (!ids.length) return
     // AIR's SPA defaults: a handled submit never navigates, nor a handled link.
     if (e.type === 'submit' || (e.type === 'click' && e.target.closest && e.target.closest('a[href]'))) e.preventDefault()
     send(ids, e)
   }
+  const unbubbled = (e) => e.bubbles || handle(e)
   const reply = (id, kind, v) => window.__aioWire.send(frame([['u8', 2], ['u32', id], ['u8', kind], s(v)]))
   let execs = 0
   const run = (id, js) => {
@@ -146,7 +149,11 @@
     }
     return a
   }
+  // A property the view set: hydration hands it to the page's node.
+  const own = (n, k) => (n.__airProps ||= new Set()).add(k)
   const prop = (n, k, v) => {
+    if (!(k in n)) return n.setAttribute(k, v)
+    own(n, k)
     const past = k === 'value' ? sent.get(n) : undefined
     if (past) {
       if (v === n.value) return void sent.delete(n)
@@ -194,6 +201,7 @@
     else if ('value' in v && r.value !== v.value) r.value = v.value
     if (ticked) told.push([r, 'change'])
     else if ('checked' in v && r.checked !== v.checked) r.checked = v.checked
+    for (const k of v.__airProps || []) if (!['value', 'checked', 'innerHTML'].includes(k) && r[k] !== v[k]) r[k] = v[k]
     if (r.tagName !== 'TEXTAREA') kids(v, r, told)
   }
   const kids = (v, r, told) => {
@@ -283,12 +291,21 @@
         case 4: { const n = node(), was = n.style?.animation; attr(n, str(), str()); if (n.style) animating(n, was); break }
         case 5: { const n = node(), k = str(); k.startsWith('style:') ? n.style.removeProperty(k.slice(6)) : n.removeAttribute(k); break }
         case 6: { const n = node(); prop(n, str(), str()); break }
-        case 7: { const n = node(); n[str()] = u8() !== 0; break }
+        case 7: {
+          const n = node(), k = str(), on = u8() !== 0
+          if (k in n) own(n, k), (n[k] = on)
+          else on ? n.setAttribute(k, '') : n.removeAttribute(k)
+          break
+        }
         case 8: {
           const n = node(), name = str()
           ;(n.__airOn ||= new Set()).add(name)
           observe(n, name)
-          if (!delegated.has(name)) delegated.add(name), document.addEventListener(name, handle, NO_BUBBLE.has(name))
+          if (!delegated.has(name)) {
+            delegated.add(name)
+            document.addEventListener(name, handle)
+            document.addEventListener(name, unbubbled, true)
+          }
           break
         }
         case 9: {

@@ -290,6 +290,7 @@ assert_eq!(ui.text("hello"), "Hello Ada");
 | `text(t)` | its text, all descendants joined |
 | `value(t)` | a field's value; a `<select>`'s chosen option's |
 | `attr(t, "href")` | an attribute (`None`: not set) |
+| `prop(t, "muted")` | a property as a script reads it (`muted`, `volume`, `indeterminate`: what the person gets); `Null`: unset, or no string, number or bool |
 | `style(t, "color")` | a computed CSS property, custom ones too (`--gap`) |
 | `rect(t)` | its box in the window, CSS px (`x`, `y`, `width`, `height`) |
 | `checked(t)` | a checkbox, radio, or `role` with `aria-checked`, as last left |

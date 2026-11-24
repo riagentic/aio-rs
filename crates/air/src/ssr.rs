@@ -277,14 +277,15 @@ impl Out {
 }
 
 /// An element's start tag: its attributes, and the properties that show
-/// before any script (an input's `value`, `checked`, `selected`).
+/// before any script (an input's `value`, `checked`, `selected`, a media
+/// element's `muted`: its attribute mutes the parser's element).
 fn start_tag(out: &mut String, tag: &str, attrs: &[(String, String)], props: &[(String, String)]) {
     let prop = |k: &str| props.iter().find(|(x, _)| x == k).map(|(_, v)| v.as_str());
     out.push('<');
     out.push_str(tag);
     let shown = |k: &str| match k {
         "value" => tag != "textarea" && !(tag == "input" && prop("value").is_some()),
-        "checked" | "selected" => prop(k).is_none(),
+        "checked" | "selected" | "muted" => prop(k).is_none(),
         _ => true,
     };
     let mut attr = |k: &str, v: &str| {
@@ -300,7 +301,7 @@ fn start_tag(out: &mut String, tag: &str, attrs: &[(String, String)], props: &[(
     if let (Some(v), "input") = (prop("value"), tag) {
         attr("value", v);
     }
-    for k in ["checked", "selected"] {
+    for k in ["checked", "selected", "muted"] {
         if prop(k) == Some("true") {
             out.push(' ');
             out.push_str(k);

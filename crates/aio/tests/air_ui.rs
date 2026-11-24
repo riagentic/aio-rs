@@ -456,3 +456,80 @@ fn a_file_input_hands_its_files_to_change_and_to_the_forms_submit() {
         "the form's submit carries them by field, its values by name"
     );
 }
+
+// Every event a handler takes (`rsx!`'s own list).
+include!("../../air-macro/src/events.rs");
+
+#[test]
+fn every_event_a_handler_takes_reaches_it_bubbling_or_not() {
+    thread_local! {
+        static HEARD: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    fn listening(tag: &'static str, t: &'static str) -> H {
+        let names = EVENTS.iter().map(|&(n, _)| n).filter(|n| !matches!(*n, "mounted" | "doubleclick"));
+        names.fold(h(tag).attr("data-t", t), |el, n| {
+            el.on(n, move |_: Event<PlainData>| HEARD.with(|h| h.borrow_mut().push(format!("{t} {n}"))))
+        })
+    }
+    fn app() -> View {
+        listening("div", "outer").child(listening("span", "inner").child("in")).view()
+    }
+    let mut ui = TestUi::new(app);
+    // What the observers tell once they start (`onresize`, `onvisible`).
+    ui.until("the observers' first word", || HEARD.with(|h| h.borrow().len()) == 4);
+    HEARD.with(|h| h.borrow_mut().clear());
+    let names: Vec<&str> =
+        EVENTS.iter().map(|&(n, _)| n).filter(|n| !matches!(*n, "mounted" | "doubleclick")).collect();
+    // Each as the DOM sends it, then as the other kind: a handler hears
+    // both; an outer one only what bubbles.
+    ui.eval(&format!(
+        "for (const n of {names:?}) for (const bubbles of [false, true])
+           document.querySelector('[data-t=inner]').dispatchEvent(new Event(n, {{ bubbles, cancelable: true }}))"
+    ));
+    ui.until("every event to reach its views", || HEARD.with(|h| h.borrow().len()) >= names.len() * 3);
+    let want: Vec<String> =
+        names.iter().flat_map(|n| [format!("inner {n}"), format!("inner {n}"), format!("outer {n}")]).collect();
+    assert_eq!(HEARD.with(|h| h.take()), want);
+}
+
+/// A tenth of a second of silence, as a WAV (8 kHz, 8 bits, mono).
+fn silence() -> String {
+    use base64::Engine;
+    let n = 800u32;
+    let mut b = b"RIFF".to_vec();
+    b.extend((36 + n).to_le_bytes());
+    b.extend(b"WAVEfmt ");
+    for v in [16u32, 1 | 1 << 16, 8000, 8000, 1 | 8 << 16] {
+        b.extend(v.to_le_bytes());
+    }
+    b.extend(b"data");
+    b.extend(n.to_le_bytes());
+    b.extend(std::iter::repeat_n(128u8, n as usize));
+    format!("data:audio/wav;base64,{}", base64::engine::general_purpose::STANDARD.encode(b))
+}
+
+#[test]
+fn a_media_element_tells_its_load_and_takes_its_properties() {
+    fn app() -> View {
+        let loaded = signal(|| false);
+        let muted = signal(|| true);
+        rsx! {
+            audio { "data-t": "clip", src: silence(), preload: "auto", muted: true, volume: 0.5, onloadeddata: move |_| loaded.set(true) }
+            video { "data-t": "film", muted: muted, playback_rate: 2 }
+            span { "data-t": "plain", muted: muted }
+            button { "data-t": "loud", onclick: move |_| muted.set(false), "Loud" }
+            p { "data-t": "loaded", "{loaded}" }
+        }
+    }
+    let mut ui = TestUi::new(app);
+    ui.until_text("loaded", "true");
+    assert_eq!(ui.prop("film", "muted"), true, "muted mutes, not only by default");
+    assert_eq!(ui.prop("clip", "muted"), true);
+    assert_eq!(ui.prop("clip", "volume"), 0.5);
+    assert_eq!(ui.prop("film", "playbackRate"), 2);
+    assert!(ui.prop("film", "nothing").is_null());
+    assert_eq!(ui.attr("plain", "muted").as_deref(), Some(""), "an element without the property takes the attribute");
+    ui.click("loud");
+    assert_eq!(ui.prop("film", "muted"), false, "a signal's muted follows it");
+    assert_eq!(ui.attr("plain", "muted"), None);
+}

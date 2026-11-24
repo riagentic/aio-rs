@@ -250,6 +250,7 @@ fn shown(painted: bool) -> View {
         p { "a" {typed.get()} }
         if painted { p { id: "differs", "server" } } else { div { id: "differs", "client" } }
         div { id: "moves", style: "{motion}" }
+        video { id: "clip", muted: true, volume: 0.5 }
     }
 }
 
@@ -291,7 +292,10 @@ async fn a_painted_page_is_hydrated_in_place_its_nodes_kept_and_wired() {
         apply(&mut p, &root.take_edits()).await;
         // Every element kept, but the one of another kind; its text written.
         let kept = "[...document.querySelectorAll('#main *')].map((n, i) => n === window.before[i])";
-        assert_eq!(p.eval(kept).await, json!([true, true, true, true, true, false, true]));
+        assert_eq!(p.eval(kept).await, json!([true, true, true, true, true, false, true, true]));
+        // A property no attribute sets is handed on (the paint's `muted` attribute muted it).
+        let clip = "[document.getElementById('clip').muted, document.getElementById('clip').volume]";
+        assert_eq!(p.eval(clip).await, json!([true, 0.5]));
         // A motion on a kept node is measured there, before its first frame.
         let measured = "[document.getElementById('moves') === window.before[6], \
                         document.getElementById('moves').style.getPropertyValue('--aio-w')]";
@@ -344,7 +348,7 @@ async fn a_dev_builds_page_hydrates_with_no_node_replaced_its_tooling_beside_the
         root.show(|| shown(true));
         root.beside(|| rsx! { aio::kit::ReduxDevTools {} });
         apply(&mut p, &root.take_edits()).await;
-        assert_eq!(p.eval("window.__airHydrated").await, json!({ "kept": 17, "replaced": 0 }));
+        assert_eq!(p.eval("window.__airHydrated").await, json!({ "kept": 18, "replaced": 0 }));
         // The tooling in the view's own markup (its old place) replaced nodes.
         p.eval("location.reload(); true").await;
         p.until("typeof window.__airApply", json!("function")).await;
