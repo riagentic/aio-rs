@@ -298,6 +298,11 @@ version may break things.
   one step of the wait took longer than its last half second (a slow
   machine): the components are now taken as each step begins, so the
   last step is always in what it names.
+- A saved copy that was online, its last handle dropped, wrote its last
+  save only once its link had closed (up to half a second later, in the
+  background): a reopen or a read of the file right after could miss it.
+  The drop writes it before it ends, as an offline copy's did.
+
 - A second launch's arguments reach the app however long its start
   takes: the running instance takes launches from `aio_shell::start` on
   (it did from its window's start, after the app's own setup: past a
