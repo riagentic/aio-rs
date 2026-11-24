@@ -257,9 +257,7 @@ pub(crate) fn unlinked(id: u64) {
 /// render` line, heard in the log): the paint layer, with the call made
 /// last and the freezes of the last 30 s.
 pub fn rendered(status: Status, ms: u64, at: i64) -> Snapshot {
-    let last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-    let last_call = (!last.0.is_empty()).then(|| format!("{}.{}", last.0, last.1));
-    drop(last);
+    let last_call = last(|l| (!l.0.is_empty()).then(|| format!("{}.{}", l.0, l.1)));
     now(|n| {
         n.freezes.retain(|t| at - t < 30_000);
         if status == Status::Frozen {
@@ -409,7 +407,21 @@ static QUEUED: AtomicU64 = AtomicU64::new(0);
 static DRAINED: AtomicU64 = AtomicU64::new(0);
 static PROBED: AtomicU64 = AtomicU64::new(0);
 /// The newest call: its cell, method and own time (ms), kept in place.
-static LAST: Mutex<(&str, String, u64)> = Mutex::new(("", String::new(), 0));
+type Last = (&'static str, String, u64);
+/// One for the process (a call on any thread is the app's last); in a unit
+/// test its thread's own, so tests running beside it, which make real
+/// calls, never change what it reads.
+#[cfg(not(test))]
+static LAST: Mutex<Last> = Mutex::new(("", String::new(), 0));
+#[cfg(test)]
+thread_local!(static LAST: std::cell::RefCell<Last> = const { std::cell::RefCell::new(("", String::new(), 0)) });
+
+fn last<R>(f: impl FnOnce(&mut Last) -> R) -> R {
+    #[cfg(not(test))]
+    return f(&mut LAST.lock().unwrap_or_else(|e| e.into_inner()));
+    #[cfg(test)]
+    return LAST.with_borrow_mut(f);
+}
 
 /// The app's `[vitals]` (at boot).
 pub fn set(v: Vitals) {
@@ -440,11 +452,12 @@ impl Drop for Waiting {
 
 /// A call ran: its cell, method and own time.
 pub(crate) fn ran(cell: &'static str, method: &str, took: std::time::Duration) {
-    let mut l = LAST.lock().unwrap_or_else(|e| e.into_inner());
-    l.0 = cell;
-    l.1.clear();
-    l.1.push_str(method);
-    l.2 = took.as_millis() as u64;
+    last(|l| {
+        l.0 = cell;
+        l.1.clear();
+        l.1.push_str(method);
+        l.2 = took.as_millis() as u64;
+    });
 }
 
 /// The server's loop and queue as they are, `late` ms behind, and the
@@ -454,10 +467,7 @@ pub fn probe(late: u64, since: Option<i64>, t: &Vitals) -> Loop {
     let total = DRAINED.load(Ordering::Relaxed);
     let drained = total.saturating_sub(PROBED.swap(total, Ordering::Relaxed));
     let status = t.event_loop.grade(late).max(t.queue.grade(queue));
-    let last = {
-        let l = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        (!l.0.is_empty()).then(|| (format!("{}.{}", l.0, l.1), l.2))
-    };
+    let last = last(|l| (!l.0.is_empty()).then(|| (format!("{}.{}", l.0, l.1), l.2)));
     Loop { layer: Layer { status, measured: late, since }, queue, drained, last }
 }
 
