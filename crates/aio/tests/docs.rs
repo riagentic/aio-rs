@@ -48,6 +48,9 @@ fn every_aio_toml_in_the_guide_parses() {
     let mut checked = 0;
     for page in all {
         for b in toml_blocks(&std::fs::read_to_string(&page).unwrap()).iter().filter(|b| b.contains("[app]")) {
+            // The guide's stand-in for the key `ax keygen` prints: as written, a build refuses it.
+            let key = "ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+            let b = &b.replace("ed25519:REPLACE_WITH_THE_KEY_AX_KEYGEN_PRINTS", key);
             if let Err(e) = aio::config::Config::parse(b) {
                 panic!("{}: an aio.toml example doesn't parse: {e}\n{b}", page.display());
             }
