@@ -442,6 +442,16 @@
       },
     };
   }
+  // What the island element's script would emit (`TestUi::emit`), to its view.
+  if (op === "emit") {
+    const el = find(arg.path);
+    if (!el) return missing(arg.path);
+    const box = el.closest && el.closest("[data-aio-island]"), I = window.__aioIslands;
+    const out = box && I && I.out[box.getAttribute("data-aio-island")];
+    if (!out) return { error: `data-t="${arg.path}" is in no mounted island: nothing hears what it emits` };
+    out({ t: "event", v: arg.v });
+    return { ok: null };
+  }
   // The window: nothing focused, so a key goes to the document.
   if (op === "focus" && arg.path === "window") {
     if (document.activeElement) document.activeElement.blur();

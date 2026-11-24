@@ -180,13 +180,15 @@ preload the app declared. The window must allow it:
 | `referrer` | the `Referer` its loads send |
 | `host_keys` | 1 to 16 key names (`"Escape"`) that come back to the app even while the guest has focus |
 | `popups` | a link that opens a window goes to the system browser, after a real click |
-| `onevent` | a `GuestEvent`: `Navigated { url, back, forward }`, `Title`, `Key(HostKey)`, `Message { channel, args }`, `Focus`, `Gone { reason }`, `Unresponsive`, `Responsive` |
-| `id` | so `aio::kit::go(id, Go::Back)` can drive it: `Back`, `Forward`, `Reload`, `Stop`, `Send { channel, args }` |
+| `onevent` | a `GuestEvent`: `Navigated { url, back, forward, in_page }` (`in_page: false`: a new document, a reload too), `LoadFailed { url, code, description }` (nothing answered there), `Title`, `Key(HostKey)`, `Message { channel, args }`, `Focus`, `Gone { reason }`, `Unresponsive`, `Responsive` |
+| `id` | so `aio::kit::Guest::new(id)` can steer it: `load_url`, `url`, `reload`, `stop`, `go_back`, `go_forward`, `send_input`; `aio::kit::go(id, Go::Send { channel, args })` and the rest |
 
 A whole window for another site is `aio_shell::guest::open_window` (needs
 `windows: true`). Both need Electron's `<webview>`, so they work in the
 desktop window only: in a browser tab a `Browser` shows nothing and warns
-in the console. More in [the browser and web views](../clients/web.md).
+in the console. A `TestUi` page has no `<webview>` either: a test stands in
+for the guest with `ui.emit(t, &GuestEvent::LoadFailed { .. })`, which
+reaches `onevent` as the guest's would. More in [the browser and web views](../clients/web.md).
 
 ## Portals
 
@@ -478,6 +480,6 @@ once when a kit control renders on a page that doesn't style the kit.
 ## API
 
 `cargo doc -p aio-rs --no-deps --all-features --open`: `aio::kit::WebIsland`,
-`Island`, `Browser`, `GuestEvent`, `HostKey`, `Go`, `go`, `Portal`,
-`PortalHost`, `Defer`, `Trigger`, `use_held`, `aio::held`;
+`Island`, `Browser`, `Guest`, `GuestInput`, `GuestEvent`, `HostKey`, `Go`,
+`go`, `Portal`, `PortalHost`, `Defer`, `Trigger`, `use_held`, `aio::held`;
 `cargo doc -p aio-rs-shell --no-deps --open`: `Window`, `Web`, `guest`.

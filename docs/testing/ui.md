@@ -206,6 +206,7 @@ DevTools protocol, so the page's own rules apply. Then it settles.
 | `check(t)` / `uncheck(t)` | clicks a checkbox, radio or switch only when it isn't / is ticked |
 | `run(\|\| ..)` | runs code in the app's root scope (an `act!`, a global write), then settles |
 | `eval(js)` | runs JavaScript in the page, returns its value, then settles |
+| `emit(t, &event)` | hands `event` to island `t`'s `onevent` as if its script emitted it: what the test page can't make, such as a `Browser`'s `GuestEvent` (the page has no `<webview>`) |
 
 What a person can't do, a test can't either. Each of these fails,
 saying why:

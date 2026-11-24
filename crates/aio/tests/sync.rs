@@ -2889,3 +2889,37 @@ mod paths_and_pace {
         });
     }
 }
+
+#[cell(shared)]
+pub struct Shelf {
+    pub items: Vec<String>,
+}
+
+#[methods]
+impl Shelf {
+    #[client]
+    pub fn put(&mut self, item: String) {
+        self.items.push(item);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_shows_once_while_its_patch_is_in_and_its_reply_is_not() {
+    // The server sends a call's change, then its reply: between the two the
+    // change is confirmed and must not be predicted on top of it again.
+    let h = Handle::<Shelf>::memory();
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(serve(h.clone(), l, "secret".into()));
+    let r = Remote::<Shelf>::connect(&addr, "secret", "ana").await.unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let s = seen.clone();
+    r.listen(move |st| s.lock().unwrap().push(st.items.len()));
+    for i in 0..5 {
+        r.put(format!("i{i}")).unwrap();
+        until("confirmed", || r.pending() == 0).await;
+    }
+    assert_eq!(r.state().items.len(), 5);
+    let seen = seen.lock().unwrap().clone();
+    assert!(seen.windows(2).all(|w| w[1] >= w[0] && w[1] <= w[0] + 1), "shown as it grew: {seen:?}");
+}
