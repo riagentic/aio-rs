@@ -13,6 +13,7 @@ mod check;
 mod components;
 mod control;
 mod create;
+mod credits;
 mod css;
 mod dev;
 mod display;

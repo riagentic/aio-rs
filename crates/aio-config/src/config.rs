@@ -691,6 +691,37 @@ pub struct Home {
     /// A debug build's home in the user's folder (`.purse-dev`), so a dev
     /// run never opens the real data. A profile counts from the plain home.
     pub dev: Option<String>,
+    /// The app's own older layouts, moved into its home once, before the
+    /// store opens: `{ from = "$XDG_DATA_HOME/purse", files = ["data/vault.db"] }`.
+    /// Any app's.
+    pub moved: Vec<Moved>,
+}
+
+/// One older layout of `[home] moved`: each file lands at its own path in
+/// the home (`data/vault.db` → `<home>/data/vault.db`), never over one there;
+/// a database with its `-wal`, `-shm` and `-journal`, or not at all.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[serde(deny_unknown_fields)]
+pub struct Moved {
+    /// The folder: `~/…`, `$HOME/…` or `$XDG_DATA_HOME/…` (a test's own
+    /// world in a test).
+    pub from: String,
+    /// The files in it, by their path there.
+    pub files: Vec<String>,
+}
+
+/// The variable `[home] moved`'s `from` counts from, and the rest of it
+/// (pure): `~/a` and `$HOME/a` are `("HOME", "a")`, `$XDG_DATA_HOME/a` is
+/// `("XDG_DATA_HOME", "a")`; anything else is none.
+pub fn moved_from(from: &str) -> Option<(&'static str, &str)> {
+    [("~/", "HOME"), ("$HOME/", "HOME"), ("$XDG_DATA_HOME/", "XDG_DATA_HOME")]
+        .into_iter()
+        .find_map(|(p, var)| Some((var, from.strip_prefix(p)?)))
+}
+
+/// A path that stays in its folder: relative, each part a name (pure).
+fn inside(p: &str) -> bool {
+    !rooted_anywhere(p) && p.split(['/', '\\']).all(|c| !matches!(c, "" | "." | ".."))
 }
 
 /// `[log]`: what the log keeps. The app, error and warning logs hold at
@@ -732,7 +763,7 @@ impl Default for Log {
 }
 
 /// What `ax build <app>` makes, in order (the kinds: `ax build <app> --list`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize, Lit)]
 #[serde(deny_unknown_fields)]
 pub struct Build {
     /// A kind (`"deb"`), or `{ name, kind, bin }`: a labelled one, to have
@@ -741,9 +772,9 @@ pub struct Build {
     pub targets: Vec<Target>,
     /// The desktop binary's size budget in MB, for apps with heavy batteries
     /// (`ml`, `scene`, `maps`); unset: 10. The build fails above it and says
-    /// which crates take the space.
-    #[serde(default)]
-    pub budget_mb: Option<u64>,
+    /// which crates take the space. A number (`14.5`) or a size (`"14.5MB"`).
+    #[serde(default, deserialize_with = "crate::budgets::mb::deserialize", skip_serializing_if = "Option::is_none")]
+    pub budget_mb: Option<f64>,
     /// Where `ax build` puts what it makes, and where `ax release`,
     /// `ax install` and `ax lab` look (aio's `build.out`): relative to the
     /// workspace, or absolute; unset: `dist`. `--out` wins for one run.
@@ -796,6 +827,9 @@ pub struct Build {
     #[serde(skip)]
     pub asset_files: &'static [(&'static str, &'static [u8])],
 }
+
+// `budget_mb` is parsed finite and above zero: never NaN.
+impl Eq for Build {}
 
 /// The files of `[build] assets` under `at` (`aio.toml`'s folder): each
 /// one's URL path, percent-encoded as a browser asks for it (`/media/a%20b.png`),
@@ -1730,7 +1764,7 @@ impl Config {
         if let Some(port_of) = &c.app.port_of {
             crate::paths::id_ok(port_of).map_err(|e| format!("aio.toml: [app] port_of: {e}"))?;
         }
-        if c.app.port_of.is_none() && (Home { dir: None, ..c.home.clone() }) != Home::default() {
+        if c.app.port_of.is_none() && (Home { dir: None, moved: vec![], ..c.home.clone() }) != Home::default() {
             return Err(
                 "aio.toml: [home] env, portable and dev are a ported app's rules: each needs [app] port_of".into()
             );
@@ -1742,6 +1776,17 @@ impl Config {
                     "aio.toml: {k} {:?} is absolute or ~/… (\"/srv/notes\", \"C:\\\\notes\", \"~/notes\")",
                     d.as_deref().unwrap_or_default()
                 ));
+            }
+        }
+        for m in &c.home.moved {
+            if !moved_from(&m.from).is_some_and(|(_, rest)| inside(rest)) {
+                return Err(format!(
+                    "aio.toml: [home] moved from {:?} is a folder under ~/, $HOME/ or $XDG_DATA_HOME/",
+                    m.from
+                ));
+            }
+            if let Some(f) = m.files.iter().find(|f| !inside(f)) {
+                return Err(format!("aio.toml: [home] moved file {f:?} is a path in its folder (\"data/vault.db\")"));
             }
         }
         // File names: a store or a home never reaches out of its folder.

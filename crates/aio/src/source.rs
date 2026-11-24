@@ -254,6 +254,7 @@ impl<T: Cell> Source<T> {
                         eprintln!("[aio] data: ./data.db may be {app}'s aio store from before its home: it is not moved in without aio-rs's feature `compat`");
                     }
                 }
+                crate::compat::scatter::moved_here(&cfg.home.moved, dirs);
                 for p in crate::compat::data::retire(&dirs.data, &cfg.data.retire)? {
                     eprintln!("[aio] retired {} (an old store, kept: delete it once nothing is missing)", p.display());
                 }

@@ -217,6 +217,30 @@ words: `x86_64`, `amd64`). Each bundle and every other file it needs, per OS: [t
 `dist/` is in the template's `.gitignore`; `ax release` lays out its own
 tree under `dist/<channel>/` ([release](release.md)).
 
+### Credits: `aio::credits!()`
+
+Every `ax build` (desktop, `cli`, Android, `--sizes`) writes the app's
+credits: each crate its binary links (normal dependencies of this
+platform with the build's features; no build script's, no proc-macro's,
+not the workspace's own crates), by name and version, with its licence,
+repository and licence texts (`LICENSE*`, `LICENCE*`, `COPYING*`,
+`NOTICE*`, its `license-file`), each text once and named again after.
+It reads only what cargo has (`cargo tree`, `cargo metadata`), never the
+network; the same lock, platform and features give the same bytes. They
+land in the build folder (`aio/<pkg>-<triple>-credits.md`, Markdown) and
+`aio::credits!()` builds them in, for an About screen:
+
+```rust
+fn about() -> String {
+    // `None` in a build ax didn't make (`ax dev`, `cargo build`).
+    aio::credits!().unwrap_or("Credits come with the release build.").to_string()
+}
+# fn main() { assert!(!about().is_empty()); }
+```
+
+Only an app that calls it carries them (a few hundred KB of licence
+texts for a window app).
+
 ### What `ax build` checks
 
 - `aio.toml` parses (it is built into the binary: a typo fails the build,

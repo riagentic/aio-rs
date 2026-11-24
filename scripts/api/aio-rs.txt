@@ -677,6 +677,7 @@ aio::compat::scatter::Outcome::Failed(String)
 aio::compat::scatter::Outcome::Kept
 aio::compat::scatter::Outcome::Moved
 aio::compat::scatter::adopt: fn adopt(l: &Layout) -> Vec<Move>
+aio::compat::scatter::moved: fn moved(rules: &[crate::config::Moved], home: &std::path::Path) -> Vec<Move>
 aio::compat::scatter::record_of: fn record_of(to: &std::path::Path) -> std::path::PathBuf
 aio::compat::scatter::said: fn said(moves: &[Move], data: &std::path::Path) -> Vec<String>
 aio::config::Gate::Accounts
@@ -1810,8 +1811,10 @@ aio::paths::short_temp: fn short_temp() -> std::path::PathBuf
 aio::paths::sockets: fn sockets(id: &str, data: &std::path::Path) -> io::Result<std::path::PathBuf>
 aio::paths::sockets_at: fn sockets_at(id: &str, data: &std::path::Path) -> std::path::PathBuf
 aio::paths::tool_home: fn tool_home() -> std::path::PathBuf
+aio::paths::user_home: fn user_home() -> std::path::PathBuf
 aio::paths::write_atomic: fn write_atomic(p: &std::path::Path, bytes: &[u8], private: bool) -> io::Result<()>
 aio::paths::write_private: fn write_private(p: &std::path::Path, bytes: &[u8]) -> io::Result<()>
+aio::paths::xdg_data_home: fn xdg_data_home() -> std::path::PathBuf
 aio::peer::Peer::app: fn app(&self) -> &str
 aio::peer::Peer::at: fn at(app: &str, data: impl Into<PathBuf>, user: &str) -> std::io::Result<Option<Self>>
 aio::peer::Peer::blobs: fn blobs(&self) -> crate::blobs::Blobs
@@ -4540,6 +4543,7 @@ use aio::cell = aio_macros::cell
 use aio::cli::Options = aio_macros::Options
 use aio::colors::hue = aio_config::icon::hue
 use aio::config::* = aio_config::config::*
+use aio::credits = aio_macros::credits
 use aio::data = aio_macros::data
 use aio::db::Sql = rusqlite::types::value::Value
 use aio::db::pragma_name = aio_config::db::pragma_name
