@@ -637,8 +637,7 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         }
     };
     let socks = aio::paths::sockets(&dirs.id, &dirs.data)?;
-    let (sock, ctl_sock, hand) =
-        (aio::ipc::addr(&socks, "wire"), aio::ipc::addr(&socks, "ctl"), instance::hand_addr(&dirs.id, &dirs.data)?);
+    let (sock, ctl_sock) = (aio::ipc::addr(&socks, "wire"), aio::ipc::addr(&socks, "ctl"));
     // Electron's Node connects to these as spelled: one too long is said now,
     // not as no window.
     aio::ipc::fits(&sock)?;
@@ -650,8 +649,7 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         // Both serve the window this spawns and no other process of the user,
         // as the app's route door does: the one gate (`Only::window`).
         let only = aio::ipc::Only::window();
-        let ctl: Ctl = Arc::new(tokio::sync::Mutex::new(None));
-        _ = CTL.set(ctl.clone());
+        let ctl = ctl();
         let (c, state, ctl_only) = (ctl.clone(), sized.is_none().then(|| dirs.data.join("window.json")), only.clone());
         tokio::spawn(async move {
             while let Ok(s) = ctl_listener.accept_only(&ctl_only).await {
@@ -668,8 +666,9 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
                 tokio::spawn(control(r, c.clone(), state.clone(), win));
             }
         });
-        // Later launches of the app hand their arguments over here.
-        tokio::spawn(take_launches(aio::ipc::Listener::bind(&hand)?, ctl.clone(), aio::lifecycle::ask_stop, ending));
+        // Later launches of the app hand their arguments over here (open
+        // since `start`; ax's own window has no `start`).
+        instance::open_door(&dirs.id, &dirs.data);
         // `ax surface`, `trigger`, `shot` and `eval` reach the window here:
         // `ax dev`'s builds only (aio-shell's `dev`: tooling; aio's control
         // API was dev-only); elsewhere no DevTools protocol (AIORT_CDP is ignored).
@@ -876,7 +875,8 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
                 eprintln!("[aio] {}: the window failed: {e}", dirs.id);
             }
             eprintln!("{}", kept_serving(&dirs.id, std::fs::read_to_string(dirs.data.join("serving.json")).ok()));
-            instance::take_stops(&dirs.id, &dirs.data);
+            // Its door takes launches and stops again, as a server's.
+            ENDING.store(false, std::sync::atomic::Ordering::SeqCst);
             aio::rt().block_on(async {
                 aio::lifecycle::stop_asked()?.await;
                 std::io::Result::Ok(())
@@ -1060,6 +1060,11 @@ pub(crate) type Ctl = Arc<tokio::sync::Mutex<Option<tokio::io::WriteHalf<aio::ip
 
 /// This process's control line, for views asking the runtime (`page::print`).
 static CTL: std::sync::OnceLock<Ctl> = std::sync::OnceLock::new();
+
+/// [`CTL`], made once: empty until a runtime connects.
+pub(crate) fn ctl() -> Ctl {
+    CTL.get_or_init(Ctl::default).clone()
+}
 
 /// Send the runtime one control line: false without a window (tests).
 pub(crate) async fn send_runtime(line: String) -> bool {
@@ -1371,7 +1376,7 @@ mod tests {
         let _turn = WINDOW_TURN.lock().await;
         let (ours, electron) = pair();
         let (r, w) = tokio::io::split(ours);
-        let ctl = CTL.get_or_init(|| Arc::new(tokio::sync::Mutex::new(None))).clone();
+        let ctl = ctl();
         *ctl.lock().await = Some(w);
         tokio::spawn(control(r, ctl, None, Window::default()));
         let (child, pick) = (Child { url: "https://x.example".into(), ..Default::default() }, page::Pick::default());
@@ -1574,6 +1579,8 @@ mod tests {
     #[tokio::test]
     async fn a_later_launch_hands_over_its_file_and_brings_the_window_forward() {
         use tokio::io::AsyncReadExt;
+        // Launches are the process's: another test's never reach this one.
+        let _turn = WINDOW_TURN.lock().await;
         let d = tempfile::tempdir().unwrap();
         let sock = aio::ipc::addr(d.path(), &format!("hand{}", std::process::id()));
         let (to_electron, mut electron) = pair();
@@ -1585,8 +1592,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let launch = got.recv().await.unwrap();
-        assert_eq!(launch.args, ["notes.md"]);
+        let launch = loop {
+            let l = got.recv().await.unwrap();
+            if l.args == ["notes.md"] {
+                break l;
+            }
+        };
         assert_eq!(launch.path("notes.md"), d.path().join("notes.md").to_string_lossy());
         let mut b = [0u8; 6];
         electron.read_exact(&mut b).await.unwrap();

@@ -28,13 +28,33 @@ fn channel() -> &'static broadcast::Sender<Launch> {
     TX.get_or_init(|| broadcast::channel(16).0)
 }
 
-/// Later launches, for the app to act on (open the file it was given).
+/// Launches handed over while nothing listened (the app still starting,
+/// its first start downloading Electron): the last [`HELD`], for the first
+/// listener.
+static HELD_LAUNCHES: std::sync::Mutex<Vec<Launch>> = std::sync::Mutex::new(Vec::new());
+const HELD: usize = 16;
+
+/// Later launches, for the app to act on (open the file it was given);
+/// first those handed over before anything listened (the last 16).
 pub fn launches() -> broadcast::Receiver<Launch> {
-    channel().subscribe()
+    let mut held = HELD_LAUNCHES.lock().unwrap_or_else(|e| e.into_inner());
+    let rx = channel().subscribe();
+    for l in held.drain(..) {
+        _ = channel().send(l);
+    }
+    rx
 }
 
 pub(crate) fn deliver(l: Launch) {
-    _ = channel().send(l);
+    let mut held = HELD_LAUNCHES.lock().unwrap_or_else(|e| e.into_inner());
+    if channel().receiver_count() > 0 {
+        _ = channel().send(l);
+        return;
+    }
+    if held.len() == HELD {
+        held.remove(0);
+    }
+    held.push(l);
 }
 
 /// How `start` went.
@@ -107,21 +127,32 @@ pub fn quit_at(id: &str, data: &Path) -> io::Result<()> {
     exchange(&hand_addr(id, data)?, QUIT.into())
 }
 
-/// A server's door (as a window's: it takes later launches, and `aio
-/// stop` asks here, the graceful way on every OS: Windows has no SIGTERM,
-/// and a kill would skip the last save and restart under the supervisor).
-/// No door is not fatal: SIGTERM still stops it where there is one. Once
-/// a stop is asked, a launch is told it is ending and waits for the lock
-/// (the window's own end, [`crate::ending`], is no stop: a server kept
-/// after its window still serves).
-pub(crate) fn take_stops(id: &str, data: &Path) {
+/// The app's door, open from [`start`] on (not once its window is up: a
+/// first start downloading Electron outlasts a launch's 30 s wait; `run`
+/// without `start` opens it itself), once per address. Later launches hand
+/// their arguments here, held until the app listens ([`launches`]), and
+/// bring its window forward once there is one; `ax stop` asks here, the
+/// graceful way on every OS (Windows has no SIGTERM, and a kill would
+/// skip the last save and restart under the supervisor). No door is not
+/// fatal: SIGTERM still stops it where there is one. Once a stop is asked
+/// or the window ends ([`crate::ending`]; a server kept after its window
+/// serves on), a launch is told it is ending and waits for the lock.
+pub(crate) fn open_door(id: &str, data: &Path) {
+    static OPEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
     let _rt = aio::rt().enter();
-    match hand_addr(id, data).and_then(|a| aio::ipc::Listener::bind(&a)) {
-        Ok(l) => {
-            let ending = aio::lifecycle::stopping;
-            _ = aio::rt().spawn(crate::take_launches(l, Default::default(), aio::lifecycle::ask_stop, ending));
+    let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    let door = hand_addr(id, data).and_then(|a| match open.contains(&a) {
+        true => Ok(None),
+        false => aio::ipc::Listener::bind(&a).map(|l| Some((a, l))),
+    });
+    match door {
+        Ok(Some((a, l))) => {
+            open.push(a);
+            let ending = || aio::lifecycle::stopping() || crate::ending();
+            _ = aio::rt().spawn(crate::take_launches(l, crate::ctl(), aio::lifecycle::ask_stop, ending));
         }
-        Err(e) => eprintln!("[aio] {id}: no door for `ax stop` ({e})"),
+        Ok(None) => {}
+        Err(e) => eprintln!("[aio] {id}: no door for later launches or `ax stop` ({e})"),
     }
 }
 
@@ -235,8 +266,8 @@ pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
     if matches!(cfg.app.mode, aio::config::Mode::Server | aio::config::Mode::Cli) {
         crate::update::confirm(id, version);
     }
-    if cfg.app.mode == aio::config::Mode::Server {
-        take_stops(id, &d.data);
+    if cfg.app.mode != aio::config::Mode::Cli {
+        open_door(id, &d.data);
     }
     #[cfg(feature = "updates")]
     crate::update::watch(cfg, version, &d.data);
@@ -541,12 +572,14 @@ mod tests {
 
     #[test]
     fn a_servers_door_takes_no_launch_once_stopping() {
+        // Its launch brings the process's window forward: no other test's.
+        let _turn = crate::WINDOW_TURN.blocking_lock();
         let d = tempfile::tempdir().unwrap();
         let id = format!("stopping-{}", std::process::id());
         let _in = aio::rt().enter();
         // Listening, as a server's main is: a stop asked is then no signal.
         let wait = aio::lifecycle::stop_asked().unwrap();
-        take_stops(&id, d.path());
+        open_door(&id, d.path());
         let addr = hand_addr(&id, d.path()).unwrap();
         hand_over(&addr, Path::new("/"), &[]).unwrap();
         aio::lifecycle::ask_stop();
@@ -554,6 +587,37 @@ mod tests {
         assert_eq!(busy.kind(), io::ErrorKind::ResourceBusy, "{busy}");
         // The stop taken here, so no other test's window hears it.
         aio::rt().block_on(wait);
+        _ = std::fs::remove_dir_all(aio::paths::sockets(&id, d.path()).unwrap());
+    }
+
+    /// A launch handed over while the app starts (its door open, nothing
+    /// listening yet: Electron downloading) waits for the app's first
+    /// listener, never lost.
+    #[test]
+    fn a_launch_before_the_app_listens_waits_for_it() {
+        let _turn = crate::WINDOW_TURN.blocking_lock();
+        let d = tempfile::tempdir().unwrap();
+        let id = format!("early-{}", std::process::id());
+        let _in = aio::rt().enter();
+        open_door(&id, d.path());
+        let addr = hand_addr(&id, d.path()).unwrap();
+        hand_over(&addr, Path::new("/w"), &["early.md".into()]).unwrap();
+        let mut got = launches();
+        let early = async {
+            loop {
+                let l = got.recv().await.unwrap();
+                if l.args == ["early.md"] {
+                    return l;
+                }
+            }
+        };
+        let l = aio::rt().block_on(async { tokio::time::timeout(std::time::Duration::from_secs(5), early).await });
+        assert_eq!(l.expect("never heard").path("early.md"), Path::new("/w/early.md").to_string_lossy());
+        // `start` opens it for every app but a CLI, before its window.
+        assert!(
+            include_str!("instance.rs")
+                .contains("if cfg.app.mode != aio::config::Mode::Cli {\n        open_door(id, &d.data);")
+        );
         _ = std::fs::remove_dir_all(aio::paths::sockets(&id, d.path()).unwrap());
     }
 

@@ -184,6 +184,14 @@ version may break things.
 
 ### Fixed
 
+- A second launch's arguments reach the app however long its start
+  takes: the running instance takes launches from `aio_shell::start` on
+  (it did from its window's start, after the app's own setup: past a
+  launch's 30 s wait, the launch failed), and one taken before the app
+  listens is kept for `aio_shell::launches()`'s first listener (the last
+  16; it was dropped: a first start downloading Electron lost every file
+  opened meanwhile). An app shown in the browser or served only takes
+  them too.
 - A desktop notification is held for its click until it is clicked,
   closed or failed, the last 64 at most: Windows may never say `close`
   for one moved to the Action Center, so every one shown stayed in the
