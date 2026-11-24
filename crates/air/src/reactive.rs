@@ -469,7 +469,7 @@ fn drain() {
             since = crate::tree::seq();
         } else if round == ROUNDS {
             let names = crate::tree::mounted_since(since);
-            let names = if names.is_empty() { "none (an effect's first run?)".into() } else { names.join(", ") };
+            let names = if names.is_empty() { "none (an effect's first run?)".into() } else { names };
             panic!(
                 "air: views still drawn again after {ROUNDS} rounds: what runs once a view is drawn (`onmounted`, an \
                  effect's first run) writes what draws it again, on and on (a view that remounts on its own \

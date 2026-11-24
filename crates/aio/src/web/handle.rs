@@ -309,7 +309,9 @@ impl<T: Cell> Handle<T> {
                 Err(e) => match e.downcast::<Abort>() {
                     Ok(a) => self.abort(&a.0),
                     Err(e) => match e.downcast::<crate::tell::Tell>() {
-                        Ok(t) if !crate::tell::show(&t) => super::say(&format!("{}: nobody to tell: {t:?}", T::ID)),
+                        Ok(t) if !crate::tell::show(&t) => {
+                            super::say(&format!("{}: nobody to tell: {}", T::ID, t.line()))
+                        }
                         Ok(_) => {}
                         Err(e) => match e.downcast::<crate::answer::Answered>() {
                             Ok(a) => {
@@ -379,7 +381,7 @@ impl<T: Cell> Handle<T> {
                 None => _ = run.await,
                 Some(d) => {
                     if crate::effect::within(d, run).await.is_none() {
-                        super::say(&format!("{}: effect `{key}` timed out after {d:?}", T::ID));
+                        super::say(&format!("{}: effect `{key}` timed out after {} ms", T::ID, d.as_millis() as u64));
                     }
                 }
             }

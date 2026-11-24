@@ -265,11 +265,36 @@ pub(crate) fn sort_by<T>(v: &mut Vec<T>, cmp: impl Fn(&T, &T) -> std::cmp::Order
     if v.len() < 2 {
         return;
     }
-    let mut order: Vec<u32> = (0..v.len() as u32).collect();
-    let by: &mut dyn FnMut(&u32, &u32) -> std::cmp::Ordering = &mut |a, b| cmp(&v[*a as usize], &v[*b as usize]);
-    order.sort_by(by);
+    let order = merged(v.len(), &|a, b| cmp(&v[a as usize], &v[b as usize]));
     let mut old: Vec<Option<T>> = std::mem::take(v).into_iter().map(Some).collect();
     v.extend(order.iter().filter_map(|&i| old[i as usize].take()));
+}
+
+/// The positions `0..n` in stable order by `cmp`: a bottom-up merge sort,
+/// a run already in order copied whole (sorted input costs one pass). The
+/// standard library's stable sort is ~5 KB of a web build's code.
+fn merged(n: usize, cmp: &dyn Fn(u32, u32) -> std::cmp::Ordering) -> Vec<u32> {
+    let (mut v, mut buf): (Vec<u32>, Vec<u32>) = ((0..n as u32).collect(), vec![0; n]);
+    let mut width = 1;
+    while width < n {
+        for start in (0..n).step_by(2 * width) {
+            let (mid, end) = ((start + width).min(n), (start + 2 * width).min(n));
+            if mid == end || cmp(v[mid - 1], v[mid]).is_le() {
+                buf[start..end].copy_from_slice(&v[start..end]);
+                continue;
+            }
+            let (mut a, mut b) = (start, mid);
+            for slot in &mut buf[start..end] {
+                // A tie takes the left run's first: stable.
+                let left = b == end || (a < mid && cmp(v[a], v[b]).is_le());
+                *slot = if left { v[a] } else { v[b] };
+                if left { a += 1 } else { b += 1 }
+            }
+        }
+        std::mem::swap(&mut v, &mut buf);
+        width *= 2;
+    }
+    v
 }
 
 /// A JSON object of `pairs`, each inserted (the last of a key wins, as
@@ -1495,6 +1520,16 @@ mod sort_tests {
         let mut v = vec![(2, 'a'), (1, 'b'), (2, 'c'), (0, 'd'), (1, 'e')];
         super::sort_by(&mut v, |a, b| a.0.cmp(&b.0));
         assert_eq!(v, [(0, 'd'), (1, 'b'), (1, 'e'), (2, 'a'), (2, 'c')]);
+        // Every length and order against the standard library's stable sort.
+        for n in 0..40u32 {
+            for seed in 0..8u32 {
+                let mut v: Vec<(u32, u32)> = (0..n).map(|i| ((i * 7 + seed * 13) % (seed + 3), i)).collect();
+                let mut want = v.clone();
+                want.sort_by_key(|x| x.0);
+                super::sort_by(&mut v, |a, b| a.0.cmp(&b.0));
+                assert_eq!(v, want, "n {n}, seed {seed}");
+            }
+        }
         let mut one = vec![String::from("x")];
         super::sort_by(&mut one, Ord::cmp);
         assert_eq!(one, ["x"]);

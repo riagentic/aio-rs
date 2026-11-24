@@ -142,6 +142,8 @@ mod islands;
 pub(crate) static WINDOW_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 #[doc(hidden)]
 pub mod macmove;
+#[cfg(target_os = "macos")]
+mod macurl;
 #[doc(hidden)]
 pub mod oneclick;
 pub mod os;
@@ -657,7 +659,7 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
     // not as no window.
     aio::ipc::fits(&sock)?;
     aio::ipc::fits(&ctl_sock)?;
-    let r = tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(async {
+    let r = wait(&tokio::runtime::Builder::new_multi_thread().enable_all().build()?, async {
         let mut listener = aio::ipc::Listener::bind(&sock)?;
         // The runtime's control line (Rust → Electron main): "focus".
         let mut ctl_listener = aio::ipc::Listener::bind(&ctl_sock)?;
@@ -892,7 +894,7 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
             eprintln!("{}", kept_serving(&dirs.id, std::fs::read_to_string(dirs.data.join("serving.json")).ok()));
             // Its door takes launches and stops again, as a server's.
             ENDING.store(false, std::sync::atomic::Ordering::SeqCst);
-            aio::rt().block_on(async {
+            wait(aio::rt(), async {
                 aio::lifecycle::stop_asked()?.await;
                 std::io::Result::Ok(())
             })
@@ -930,7 +932,7 @@ pub fn serve(dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
         return said;
     }
     // Inside the runtime: its signal handlers need it.
-    aio::rt().block_on(async {
+    wait(aio::rt(), async {
         let asked = aio::lifecycle::stop_asked()?;
         // A parent that goes (`ax dev`, a test) stops us gracefully.
         aio::lifecycle::watch_parent();
@@ -968,8 +970,14 @@ fn in_browser(dirs: &aio::paths::AppDirs) -> std::io::Result<()> {
             eprintln!("[aio] {}: open {at} in a browser ({e})", dirs.id);
         }
     });
+    // A later launch opens it again (`take_launch`).
+    _ = BROWSER_PAGE.set(url);
     serve(dirs)
 }
+
+/// The page an app shown in the browser opens (its link with the key), for
+/// a later launch to open again: a browser can't be asked to bring a tab forward.
+static BROWSER_PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// The link that opens the served app's page with `key` (pure): this
 /// machine's address for one that listens on every interface.
@@ -1201,11 +1209,33 @@ async fn take_launch(s: aio::ipc::Stream, ctl: Ctl, stop: fn(), ending: fn() -> 
         return;
     }
     eprintln!("[aio] handed a launch: {:?}", launch.args);
+    instance::open_links(&launch.args);
     instance::deliver(launch);
-    if let Some(c) = ctl.lock().await.as_mut() {
-        _ = c.write_all(b"focus\n").await;
+    // The window comes forward; an app shown in the browser opens its page
+    // again, the launch not kept waiting for the browser.
+    match (ctl.lock().await.as_mut(), BROWSER_PAGE.get()) {
+        (Some(c), _) => _ = c.write_all(b"focus\n").await,
+        (None, Some(url)) => {
+            _ = tokio::spawn(async move {
+                if let Err(e) = os::open_url(url).await {
+                    // The key stays out of the log.
+                    let at = url.split_once("?token=").map_or(&**url, |(u, _)| u);
+                    eprintln!("[aio] open {at} in a browser ({})", e.to_string().replace(url.as_str(), at));
+                }
+            })
+        }
+        (None, None) => {}
     }
     _ = w.write_all(b"ok\n").await;
+}
+
+/// `f` on this thread (the main one), as `rt.block_on`; on macOS an app
+/// with schemes pumps the OS's links meanwhile (`macurl`).
+fn wait<F: Future>(rt: &tokio::runtime::Runtime, f: F) -> F::Output {
+    #[cfg(target_os = "macos")]
+    return macurl::wait(rt, f);
+    #[cfg(not(target_os = "macos"))]
+    rt.block_on(f)
 }
 
 /// How long Electron, then the stores, get to finish at shutdown.

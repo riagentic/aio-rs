@@ -621,7 +621,7 @@ still runs 3 s later, and fails with the device's own lines on a crash.
 | The OS kills the app | every commit is on disk before the call returns (`durability = full`, always on a phone); the next start comes back to it |
 | The page's renderer is lost (memory) | the WebView is rebuilt and the page reloads; what was committed is in the store. A second loss within 10 s stops the app instead of looping |
 | Back | the views' handlers first ([routing](../ui/routing.md#back)); none takes it: the page's history, then the app leaves |
-| Deep links | `schemes = ["notes"]`: a `notes://…` link opens the app (one copy, `singleTask`) and reaches it (`aio::ui::links`; a `router!` goes there). Lower case; none of the system's (`https`, `content`, `file`…) |
+| Deep links | `[app] schemes = ["notes"]` (every platform; `[build.android] schemes` adds Android-only ones): a `notes://…` link opens the app (one copy, `singleTask`) and reaches it (`aio::ui::links`; a `router!` goes there). Lower case; none of the system's (`https`, `content`, `file`…) |
 | The camera | `camera = true` declares it (optional hardware: it still installs without one); the window must allow `"media"`; Android asks once. Only `getUserMedia({ video: true })` alone: anything else asked with it is denied |
 | A link that leaves the page | goes to the app that opens it (the browser, mail, the dialer), only from the page itself after a tap, as on the desktop: a frame's, or one a script starts by itself, is not opened (`link NOT opened` in the log) |
 | `<input type="file">` | the system's picker; the app gets exactly what the user picks, no permission |

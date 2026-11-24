@@ -295,8 +295,11 @@ fn App() -> View {
 - A launch argument: `my-app --route /users/7` (or `--route=/users/7`)
   starts there (`aio::route::start`).
 - A link the app is opened with (`myapp://users/7`): declare the scheme in
-  `[build.android] schemes = ["myapp"]`; the link reaches the running app
-  through `aio::ui::links()`, and the router goes there with a Back step.
+  `[app] schemes = ["myapp"]`; its install registers it on every OS, the
+  link reaches the app through `aio::ui::links()` (started by it or
+  running), and the router goes there with a Back step. A link is
+  untrusted input: a route it reaches asks before it acts
+  ([deep links](../clients/desktop.md#deep-links)).
 - A notification or tray click with a `route` goes through the app's
   router: call `aio_shell::desktop::use_asks(go)` in the root.
 

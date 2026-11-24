@@ -903,6 +903,21 @@ mod tests {
     }
 
     #[test]
+    fn the_apps_schemes_are_checked_as_androids_and_the_desktops_own_are_refused() {
+        let c = |t: &str| Config::parse(&format!("[app]\nid = \"t\"\n{t}"));
+        assert_eq!(c("schemes = [\"myapp\", \"my-app.b2+x\"]").unwrap().app.schemes, ["myapp", "my-app.b2+x"]);
+        assert!(c("").unwrap().app.schemes.is_empty(), "opt-in");
+        for bad in ["MyApp", "1app", "my app", "", "my_app", "my:app"] {
+            let e = c(&format!("schemes = [\"{bad}\"]")).unwrap_err();
+            assert!(e.contains("[app] schemes") && e.contains("is not a URL scheme"), "{bad}: {e}");
+        }
+        for system in ["http", "https", "file", "aio", "chrome", "javascript", "mailto", "ms-settings", "view-source"] {
+            let e = c(&format!("schemes = [\"{system}\"]")).unwrap_err();
+            assert!(e.contains("[app] schemes") && e.contains("is the system's"), "{system}: {e}");
+        }
+    }
+
+    #[test]
     fn an_offline_build_is_asked_for_by_name_and_a_typo_is_refused() {
         let c = |t: &str| Config::parse(&format!("[app]\nid = \"t\"\n[build]\n{t}"));
         let b = Config::parse("[app]\nid = \"t\"").unwrap().build;

@@ -365,8 +365,13 @@ fn lay_out(
     let name_of = |v: &str| match image {
         true => format!("{}-{v}-{}.AppImage", b.app.id, b.platform.arch),
         false => {
-            let old =
-                crate::build::App { id: b.app.id.clone(), name: String::new(), version: v.to_string(), icon: None };
+            let old = crate::build::App {
+                id: b.app.id.clone(),
+                name: String::new(),
+                version: v.to_string(),
+                icon: None,
+                schemes: vec![],
+            };
             crate::build::bundle_file(&old, b.platform)
         }
     };
@@ -1128,7 +1133,8 @@ fn aio_update_key(keys: &Path) -> Result<Option<PathBuf>, String> {
 
 /// `out/SHA256SUMS` signed with `key` as `out/SHA256SUMS.sig` (base64
 /// Ed25519, `aio::update::verify`); none: no signature (an old one goes).
-fn sign_sums(out: &Path, key: Option<&Path>) -> Result<String, String> {
+/// A key other than the `pinned` one (`release.pub`) is refused.
+fn sign_sums(out: &Path, key: Option<&Path>, pinned: Option<&str>) -> Result<String, String> {
     let (what, sig) = ("aio-rs update key (SHA256SUMS.sig)", out.join("SHA256SUMS.sig"));
     let Some(key) = key else {
         _ = std::fs::remove_file(&sig);
@@ -1137,7 +1143,7 @@ fn sign_sums(out: &Path, key: Option<&Path>) -> Result<String, String> {
     let key = read_key(key)?;
     let public = up::public_key(&key).map_err(|e| e.to_string())?;
     // The ax that installs the release checks it against the key it pins.
-    if let Some(pinned) = crate::upgrade::pinned().filter(|p| *p != public) {
+    if let Some(pinned) = pinned.filter(|p| *p != public) {
         return Err(format!(
             "{RELEASE_KEY} is {public}, but crates/aio-cli/release.pub pins {pinned}: ax upgrade would refuse this release"
         ));
@@ -1272,7 +1278,7 @@ pub fn aio(targets: &[&str], dir: Option<&Path>, url: &str) -> Result<String, St
     signing.retain(|l| !l.is_empty());
     // Both Mac builds say the same about codesign: once.
     signing.dedup();
-    signing.push(sign_sums(&out, update_key.as_deref())?);
+    signing.push(sign_sums(&out, update_key.as_deref(), crate::upgrade::pinned())?);
     let list: Vec<String> = made
         .iter()
         .map(|(t, f, s)| {
@@ -1541,7 +1547,13 @@ mod tests {
         let mut cfg = aio::config::Config::default();
         cfg.updates.keys = vec![public];
         let linux = crate::platform::of("linux", "x86_64").unwrap();
-        let app = crate::build::App { id: "notes".into(), name: "Notes".into(), version: "1.1.0".into(), icon: None };
+        let app = crate::build::App {
+            id: "notes".into(),
+            name: "Notes".into(),
+            version: "1.1.0".into(),
+            icon: None,
+            schemes: vec![],
+        };
         let b = crate::build::Built {
             app,
             cfg,
@@ -1613,7 +1625,13 @@ mod tests {
         let mut cfg = aio::config::Config::default();
         cfg.updates.keys = vec![public];
         let p = |n: &str| crate::platform::ALL.iter().find(|p| p.name == n).unwrap();
-        let app = crate::build::App { id: "notes".into(), name: "Notes".into(), version: "1.1.0".into(), icon: None };
+        let app = crate::build::App {
+            id: "notes".into(),
+            name: "Notes".into(),
+            version: "1.1.0".into(),
+            icon: None,
+            schemes: vec![],
+        };
         let mut b = crate::build::Built {
             app,
             cfg,
@@ -1960,15 +1978,19 @@ mod tests {
         assert_eq!(listed, ["aio.tar.gz", "template/android/t.apk"]);
         std::fs::write(out.join("SHA256SUMS"), sums(&files)).unwrap();
 
-        let said = sign_sums(&out, None).unwrap();
+        let said = sign_sums(&out, None, None).unwrap();
         assert!(said.contains("unsigned: no keys configured (AIO_RELEASE_KEY"), "{said}");
         assert!(!out.join("SHA256SUMS.sig").exists(), "no key: an earlier signature goes");
 
         let keys = d.path().join("keys");
         keygen_aio(&keys, false).unwrap();
         let key = keys.join("aio.release.key");
-        let said = sign_sums(&out, Some(&key)).unwrap();
         let public = up::public_key(&read_key(&key).unwrap()).unwrap();
+        let other = "ed25519:AQXTwYWEITUFAaJ2BLJZqivu/ezKvTHwnoEjkcxq9Eo=";
+        let refused = sign_sums(&out, Some(&key), Some(other)).unwrap_err();
+        assert!(refused.contains("ax upgrade would refuse this release"), "another pinned key: {refused}");
+        assert!(!out.join("SHA256SUMS.sig").exists(), "refused: nothing signed");
+        let said = sign_sums(&out, Some(&key), Some(&public)).unwrap();
         assert!(said.ends_with(&format!("signed by {public}")), "{said}");
         let sig = std::fs::read_to_string(out.join("SHA256SUMS.sig")).unwrap();
         let body = std::fs::read(out.join("SHA256SUMS")).unwrap();

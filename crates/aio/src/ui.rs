@@ -625,18 +625,25 @@ pub fn back_presses() -> tokio::sync::mpsc::UnboundedReceiver<BackAsk> {
     rx
 }
 
-/// The links the app is opened with (Android's deep links: `[build.android]
-/// schemes`): who listens, and those that came before anyone did.
+/// The links the app is opened with (its deep links: `[app] schemes`,
+/// `[build.android] schemes`): who listens, and those that came before
+/// anyone did.
 type Links = (Vec<tokio::sync::mpsc::UnboundedSender<String>>, Vec<String>);
 static LINKS: std::sync::Mutex<Links> = std::sync::Mutex::new((Vec::new(), Vec::new()));
+/// The most links held for a listener to come (the newest).
+const HELD_LINKS: usize = 16;
 
 /// The app was opened with `url` (`myapp://users/7`), by the host: every
 /// listener ([`links`]) gets it; with none yet (a cold start), the first to
-/// listen does. Any app on the phone can send one: it is data, never code.
+/// listen does (the last 16). Any program or page can send one: it is
+/// untrusted input, never code.
 pub fn open_link(url: &str) {
     let mut l = LINKS.lock().unwrap_or_else(|e| e.into_inner());
     l.0.retain(|v| !v.is_closed());
     if l.0.is_empty() {
+        if l.1.len() == HELD_LINKS {
+            l.1.remove(0);
+        }
         l.1.push(url.to_string());
     }
     for v in &l.0 {
@@ -1263,6 +1270,13 @@ mod tests {
         drop((first, second));
         open_link("myapp://later");
         assert_eq!(links().try_recv().ok().as_deref(), Some("myapp://later"), "nobody left: it waits again");
+        // A flood while nobody listens holds the newest 16, not every one.
+        for i in 0..1000 {
+            open_link(&format!("myapp://flood/{i}"));
+        }
+        let mut held = links();
+        let got: Vec<String> = std::iter::from_fn(|| held.try_recv().ok()).collect();
+        assert_eq!((got.len(), got[0].as_str()), (16, "myapp://flood/984"));
     }
 
     #[tokio::test]

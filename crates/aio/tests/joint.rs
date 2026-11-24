@@ -119,7 +119,9 @@ fn joint_child() {
         Err(_) => (Handle::<Orders>::open(&f).unwrap(), Handle::<Stock>::open(&f).unwrap()),
     };
     stock.listens_to(&orders, "place", |s, _| s.take());
-    println!("placing");
+    // Said once one joint commit is on disk: the kill lands in a later one.
+    orders.place().unwrap();
+    println!("placed");
     loop {
         orders.place().unwrap();
     }
@@ -142,7 +144,8 @@ fn a_kill_mid_commit_leaves_both_calls_or_neither() {
             let mut child = cmd.stdout(std::process::Stdio::piped()).spawn().unwrap();
             let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
             let mut line = String::new();
-            while !line.contains("placing") {
+            // From its first commit on, however slow the disk (a CI runner).
+            while !line.contains("placed") {
                 line.clear();
                 assert!(out.read_line(&mut line).unwrap() > 0, "the child ended early");
             }

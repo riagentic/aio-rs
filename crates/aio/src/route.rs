@@ -334,6 +334,9 @@ impl Nest {
 pub fn start(args: impl IntoIterator<Item = String>) -> String {
     let mut args = args.into_iter();
     while let Some(a) = args.next() {
+        if a == "--" {
+            break;
+        }
         match a.strip_prefix("--route") {
             Some("") => return args.next().unwrap_or_else(|| "/".into()),
             Some(v) if v.starts_with('=') => return v[1..].into(),
@@ -759,7 +762,7 @@ macro_rules! router {
                         _ = ask.send(back());
                     }
                 });
-                // A link the app is opened with (Android): it goes there.
+                // A link the app is opened with (`[app] schemes`): it goes there.
                 $crate::ui::spawn_forever(async {
                     let mut links = $crate::ui::links();
                     while let Some(url) = links.recv().await {
@@ -1207,6 +1210,7 @@ mod tests {
         assert_eq!(start(a(&["app", "--router"])), "/");
         assert_eq!(start(a(&["app", "--route"])), "/");
         assert_eq!(start(a(&["app"])), "/");
+        assert_eq!(start(a(&["app", "--", "myapp://x", "--route", "/admin"])), "/", "a link's text is no flag");
         assert_eq!(
             History::new(&start(a(&["app", "--route", "https://x.org/"]))).here().path,
             "/",
