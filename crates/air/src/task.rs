@@ -187,16 +187,13 @@ pub fn run_tasks() -> usize {
         }
         rounds += 1;
         if rounds > ROUNDS {
-            let mut names: Vec<&str> = EXEC.with_borrow(|x| {
+            let names = EXEC.with_borrow(|x| {
                 let comp = |&(i, v): &(u32, u32)| x.slots.get(i as usize).filter(|s| s.ver == v).map(|s| s.comp);
-                ready.iter().filter_map(comp).map(|n| if n.is_empty() { "(no component)" } else { n }).collect()
+                crate::listed(ready.iter().filter_map(comp).map(|n| if n.is_empty() { "(no component)" } else { n }))
             });
-            names.sort_unstable();
-            names.dedup();
             panic!(
                 "air: tasks still making each other ready after {ROUNDS} rounds: each one's end starts the next, on and \
-                 on (a view that remounts on its own task's end?); still running: {}",
-                names.join(", ")
+                 on (a view that remounts on its own task's end?); still running: {names}"
             );
         }
         for (idx, ver) in ready {

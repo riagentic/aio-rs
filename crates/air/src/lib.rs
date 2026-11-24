@@ -177,6 +177,23 @@ pub fn on_warn(f: impl Fn(&str, &str) + Send + Sync + 'static) {
     *WARN.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
 }
 
+/// `names` as `a, b, c`, each once, in the order first met (pure): no
+/// sort, dedup or join of `&str`, ~1.5 KB of a web build's code.
+pub(crate) fn listed<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    let mut seen: Vec<&str> = vec![];
+    let mut out = String::new();
+    for n in names {
+        if !seen.contains(&n) {
+            if !seen.is_empty() {
+                out.push_str(", ");
+            }
+            out.push_str(n);
+            seen.push(n);
+        }
+    }
+    out
+}
+
 /// `v` sorted by `cmp`, stably, through the one sort every caller shares (a
 /// sort of `u32` positions): each element type's own sort is ~3 KB of a web
 /// build's code.
@@ -228,6 +245,12 @@ pub mod __rt {
 
 #[cfg(test)]
 mod sort_tests {
+    #[test]
+    fn listed_names_each_once_in_the_order_first_met() {
+        assert_eq!(super::listed(["Thumb", "List", "Thumb", "Row", "List"]), "Thumb, List, Row");
+        assert_eq!(super::listed([]), "");
+    }
+
     #[test]
     fn sort_by_is_stable_and_keeps_every_element() {
         let mut v = vec![(2, 'a'), (1, 'b'), (2, 'c'), (0, 'd'), (1, 'e')];
