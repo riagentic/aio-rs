@@ -25,6 +25,8 @@ struct Slot {
     polling: bool,
     /// Cancelled while polled: dropped when it comes back.
     cancelled: bool,
+    /// The component whose view spawned it ("": none), for a loop's report.
+    comp: &'static str,
 }
 
 #[derive(Default)]
@@ -96,9 +98,9 @@ fn cancel(idx: u32, ver: u32) {
 }
 
 fn add(fut: Fut, owner: Option<Owner>) -> Task {
-    let root = current_root();
+    let (root, comp) = (current_root(), crate::tree::current_name());
     let (idx, ver, shared) = EXEC.with_borrow_mut(|x| {
-        let slot = |ver| Slot { ver, fut: Some(fut), owner, root, polling: false, cancelled: false };
+        let slot = |ver| Slot { ver, fut: Some(fut), owner, root, polling: false, cancelled: false, comp };
         let idx = match x.free.pop() {
             Some(i) => {
                 let v = x.slots[i as usize].ver;
@@ -151,15 +153,35 @@ pub fn on_wake(f: impl Fn() + Send + Sync + 'static) {
     *shared.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(f));
 }
 
+/// Rounds of tasks made ready by the round before, in one [`run_tasks`],
+/// that are a loop: each one's end starts the next, on and on.
+const ROUNDS: u32 = 10_000;
+
 /// Poll every task that is ready, until none is (each under its owner, in
-/// a batch: what it writes is drawn once). How many polls ran.
+/// a batch: what it writes is drawn once). How many polls ran. Tasks that
+/// still make each other ready after 10 000 rounds (a view that
+/// remounts on its own task's end) panic, naming their components.
 pub fn run_tasks() -> usize {
     let shared = EXEC.with_borrow(|x| x.shared.clone());
-    let mut polls = 0;
+    let (mut polls, mut rounds) = (0, 0);
     loop {
         let ready = std::mem::take(&mut *shared.ready.lock().unwrap_or_else(|e| e.into_inner()));
         if ready.is_empty() {
             return polls;
+        }
+        rounds += 1;
+        if rounds > ROUNDS {
+            let mut names: Vec<&str> = EXEC.with_borrow(|x| {
+                let comp = |&(i, v): &(u32, u32)| x.slots.get(i as usize).filter(|s| s.ver == v).map(|s| s.comp);
+                ready.iter().filter_map(comp).map(|n| if n.is_empty() { "(no component)" } else { n }).collect()
+            });
+            names.sort_unstable();
+            names.dedup();
+            panic!(
+                "air: tasks still making each other ready after {ROUNDS} rounds: each one's end starts the next, on and \
+                 on (a view that remounts on its own task's end?); still running: {}",
+                names.join(", ")
+            );
         }
         for (idx, ver) in ready {
             polls += poll(idx, ver, &shared, false) as usize;

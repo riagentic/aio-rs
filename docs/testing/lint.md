@@ -175,6 +175,7 @@ budgets.
 | a `.read()`, `.read_untracked()` or `.write()` guard held across an `if let`, `while let` or `match` whose block writes: it panics as already borrowed | warn |
 | page CSS made in `once`: an edit never shows under `ax dev` | error |
 | `ondragstart` that calls `set_data`: the view runs after the browser's drag start, so the drop never gets it | warn: `"data-drag": "{id}"` |
+| a literal `data-t` handle on two elements of one `rsx!` that show together (a branch's arms show one at a time): a test naming it can't tell them apart, and `TestUi` refuses it | warn: a handle of its own for each |
 
 ### `renderer`
 

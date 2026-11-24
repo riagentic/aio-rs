@@ -241,6 +241,32 @@ fn quiet() {
     }
 }
 
+/// The components of `after` that rendered or mounted since `before`
+/// (pure): their paths (`Parent/Child`), once each.
+fn churned(before: &[air::Mounted], after: &[air::Mounted]) -> Vec<String> {
+    fn walk<'a>(cs: &'a [air::Mounted], at: &str, out: &mut Vec<(String, &'a air::Mounted)>) {
+        for c in cs {
+            let path = if at.is_empty() { c.name.to_string() } else { format!("{at}/{}", c.name) };
+            out.push((path.clone(), c));
+            walk(&c.children, &path, out);
+        }
+    }
+    let (mut was, mut now) = (vec![], vec![]);
+    walk(before, "", &mut was);
+    walk(after, "", &mut now);
+    let same = |a: &air::Mounted, b: &air::Mounted| (&a.key, a.renders, a.updates, a.nodes) == (&b.key, b.renders, b.updates, b.nodes);
+    let mut out: Vec<String> = vec![];
+    for (path, c) in now {
+        if !was.iter().any(|(p, w)| *p == path && same(w, c)) && !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// A failed wait names the components that rendered in its last this long.
+const LATE: Duration = Duration::from_millis(500);
+
 fn metrics((width, height): (u32, u32)) -> Value {
     json!({ "width": width, "height": height, "deviceScaleFactor": 1, "mobile": false })
 }
@@ -504,8 +530,17 @@ impl TestUi {
             }
         };
         for _ in 0..10 {
+            let mut late = vec![];
             for pass in 0.. {
-                assert!(pass < 1000, "the views and their page never settle: each answers the other on and on");
+                // The components that render in the last passes are the loop's.
+                if pass == 990 {
+                    late = self.drawn();
+                }
+                if pass == 1000 {
+                    let busy = churned(&late, &self.drawn());
+                    let busy = if busy.is_empty() { "none (a page script or an effect?)".into() } else { busy.join(", ") };
+                    panic!("the views and their page never settle: each answers the other on and on; still rendering: {busy}");
+                }
                 quiet();
                 self.drive(yields());
                 let frames: Vec<String> = std::iter::from_fn(|| self.from_view.try_recv().ok())
@@ -590,8 +625,12 @@ impl TestUi {
                 })
                 .collect()
         }
+        of(self.drawn())
+    }
+
+    fn drawn(&self) -> Vec<air::Mounted> {
         let _in = self.rt.enter();
-        of(air::with_owner(self.view, air::components))
+        air::with_owner(self.view, air::components)
     }
 
     /// The mounted components for the page's reader (`comp=` paths): each
@@ -606,8 +645,7 @@ impl TestUi {
             }
         }
         let mut out = vec![];
-        let _in = self.rt.enter();
-        flat(air::with_owner(self.view, air::components), None, &mut out);
+        flat(self.drawn(), None, &mut out);
         out.into()
     }
 
@@ -707,7 +745,7 @@ impl TestUi {
 
     /// `until`, failing after `patience`; the failure shows the screen and leaves a trace.
     pub fn until_within(&mut self, patience: Duration, what: &str, f: impl Fn() -> bool) {
-        let end = Instant::now() + patience;
+        let (end, mut late) = (Instant::now() + patience, None);
         loop {
             self.settle();
             if self.in_root(&f) {
@@ -717,11 +755,26 @@ impl TestUi {
                 return;
             }
             if Instant::now() >= end {
-                let why = format!("timed out after {patience:?} waiting for: {what}");
+                let why = format!("timed out after {patience:?} waiting for: {what}{}", self.busy(&late));
                 panic!("{why}\n  screen:\n{}{}", self.surface(), self.trace(&why));
             }
+            self.near(end, &mut late);
             self.pause(Duration::from_millis(10));
         }
+    }
+
+    /// A wait's last stretch begun (`end` is near): the components then, once.
+    fn near(&self, end: Instant, late: &mut Option<Vec<air::Mounted>>) {
+        if late.is_none() && Instant::now() + LATE >= end {
+            *late = Some(self.drawn());
+        }
+    }
+
+    /// What a failed wait adds: the components that rendered in its last
+    /// stretch (since `late`), a view that never stops among them.
+    fn busy(&self, late: &Option<Vec<air::Mounted>>) -> String {
+        let busy = late.as_ref().map(|l| churned(l, &self.drawn())).unwrap_or_default();
+        if busy.is_empty() { String::new() } else { format!("\n  still rendering: {}", busy.join(", ")) }
     }
 
     /// Settle until element `t` is there and shows `want` (a change applied
@@ -738,7 +791,7 @@ impl TestUi {
     }
 
     fn until_shows(&mut self, t: &str, what: &str, ok: impl Fn(&str) -> bool) {
-        let end = Instant::now() + PATIENCE;
+        let (end, mut late) = (Instant::now() + PATIENCE, None);
         loop {
             let now = self.js("el", json!({ "path": t }));
             if now.as_ref().is_ok_and(|e| ok(e["text"].as_str().unwrap_or_default())) {
@@ -749,18 +802,26 @@ impl TestUi {
                     Ok(e) => format!("it shows {:?}", e["text"].as_str().unwrap_or_default()),
                     Err(why) => why,
                 };
-                let why = format!("timed out after {PATIENCE:?} waiting for {t} to {what}: {seen}");
+                let why = format!("timed out after {PATIENCE:?} waiting for {t} to {what}: {seen}{}", self.busy(&late));
                 panic!("{why}\n  screen:\n{}{}", self.surface(), self.trace(&why));
             }
+            self.near(end, &mut late);
             self.wait(Duration::from_millis(10));
         }
     }
 
     /// Wait until the cell's state satisfies `f` (aio's `expectCell`); a
-    /// failure after 5 s says `what` and prints the state.
+    /// failure after 5 s says `what` and prints the state. `door` is the
+    /// cell to read, any [`Door`]: its module's `Ui` (the views' door, the
+    /// one `act!` calls), its source (`&*HANDLE.read_untracked()`), a `Handle`.
+    ///
+    /// ```ignore
+    /// ui.click("AddButton");
+    /// ui.expect_cell(&todos::Ui, "one todo", |s: &Todos| s.items.len() == 1);
+    /// ```
     #[track_caller]
     pub fn expect_cell<T: Cell>(&mut self, door: &impl Door<T>, what: &str, f: impl Fn(&T) -> bool) {
-        let end = Instant::now() + PATIENCE;
+        let (end, mut late) = (Instant::now() + PATIENCE, None);
         loop {
             self.settle();
             if self.in_root(|| door.read(&f)) {
@@ -769,8 +830,9 @@ impl TestUi {
             }
             if Instant::now() >= end {
                 let state = self.in_root(|| door.read(|s| dump(s, 2000)));
-                panic!("{what}\n  state: {state}{}", self.trace(what));
+                panic!("{what}{}\n  state: {state}{}", self.busy(&late), self.trace(what));
             }
+            self.near(end, &mut late);
             self.pause(Duration::from_millis(10));
         }
     }
@@ -1356,6 +1418,25 @@ fn strings(v: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_components_still_rendering_are_the_ones_mounted_or_drawn_again_since() {
+        let c = |name, key: Option<&str>, renders, nodes, children| air::Mounted {
+            name,
+            key: key.map(String::from),
+            renders,
+            updates: 0,
+            nodes: Some(nodes),
+            children,
+        };
+        let row = |k, n| c("Row", Some(k), 1, (n, n), vec![]);
+        let before = vec![c("List", None, 1, (1, 9), vec![row("a", 2), row("b", 3)]), c("Clock", None, 4, (10, 10), vec![])];
+        assert!(churned(&before, &before).is_empty(), "nothing drew");
+        let after = vec![c("List", None, 1, (1, 9), vec![row("a", 2), row("c", 11)]), c("Clock", None, 5, (10, 10), vec![])];
+        assert_eq!(churned(&before, &after), ["List/Row", "Clock"], "a new row, a body run again; each once, by path");
+        let remounted = vec![c("List", None, 1, (1, 9), vec![row("a", 12), row("b", 3)]), before[1].clone()];
+        assert_eq!(churned(&before, &remounted), ["List/Row"], "the same key drawn anew");
+    }
 
     #[test]
     fn modifiers_are_counted_as_the_devtools_protocol_counts_them() {

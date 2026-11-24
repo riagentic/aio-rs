@@ -2446,6 +2446,7 @@ aio::testing::TestUi::within: fn within<R>(&mut self, t: &str, f: impl FnOnce(&m
 aio::testing::call_all: fn call_all<T: Cell>(clients: &[&crate::sync::Remote<T>], method: &str, args: serde_json::Value) -> Vec<crate::Result<serde_json::Value>>
 aio::testing::cdp_key: fn cdp_key(name: &str, bits: u32) -> Option<serde_json::Value>
 aio::testing::dump: fn dump(state: &impl Serialize, max: usize) -> String
+aio::testing::exclusive: fn exclusive() -> std::sync::MutexGuard<'static, ()>
 aio::testing::expect: fn expect<T: Cell>(door: &impl Door<T>, what: &str, f: impl FnOnce(&T) -> bool)
 aio::testing::fails: fn fails(f: impl FnOnce()) -> String
 aio::testing::patches: fn patches<T: Cell>(client: &crate::sync::Remote<T>) -> Patches
@@ -2488,6 +2489,7 @@ aio::ui::back_pressed: fn back_pressed() -> impl std::future::Future<Output = bo
 aio::ui::back_presses: fn back_presses() -> tokio::sync::mpsc::UnboundedReceiver<BackAsk>
 aio::ui::back_taken: fn back_taken(handlers: &[&dyn Fn() -> bool]) -> bool
 aio::ui::btn: fn btn(variant: &str) -> String
+aio::ui::clock::sleep: async fn sleep(d: std::time::Duration)
 aio::ui::collect_css: fn collect_css() -> String
 aio::ui::css: fn css(body: &str) -> String
 aio::ui::cx: fn cx(parts: &[(&str, bool)]) -> String
@@ -4211,6 +4213,7 @@ mod aio::testing
 mod aio::time
 mod aio::tls
 mod aio::ui
+mod aio::ui::clock
 mod aio::ui::events
 mod aio::ui::prelude
 mod aio::update
@@ -4616,6 +4619,7 @@ use aio::ui::View = air::dom::View
 use aio::ui::ViewError = air::dom::ViewError
 use aio::ui::WriteGuard = air::reactive::WriteGuard
 use aio::ui::callback = air::reactive::callback
+use aio::ui::clock::Instant = tokio::time::instant::Instant
 use aio::ui::comp = air::h::comp
 use aio::ui::component = air_macro::component
 use aio::ui::context = air::reactive::context

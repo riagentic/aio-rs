@@ -456,3 +456,118 @@ fn a_file_input_hands_its_files_to_change_and_to_the_forms_submit() {
         "the form's submit carries them by field, its values by name"
     );
 }
+
+#[test]
+fn a_canvas_gets_webgl() {
+    let mut ui = TestUi::new(|| rsx! { canvas { "data-t": "c" } });
+    let gl = "const c = document.querySelector('[data-t=c]'); [!!c.getContext('webgl2'), !!document.createElement('canvas').getContext('webgl')]";
+    assert_eq!(ui.eval(gl), serde_json::json!([true, true]), "WebGL 2 and 1, drawn by SwiftShader");
+}
+
+#[test]
+fn a_wait_that_times_out_names_the_component_still_rendering() {
+    static DONE: Global<u32> = Global::new(|| 0);
+    // Remounts on its own success, through the page: drawn, it takes the
+    // focus, and the page's focus event gives it a new key.
+    #[component]
+    fn Field(n: u32) -> View {
+        rsx! {
+            input {
+                aria_label: "field",
+                onmounted: move |e| {
+                    let el = e.data();
+                    spawn(async move { _ = el.set_focus(true).await });
+                },
+                onfocus: move |_| DONE.set(n + 1),
+            }
+        }
+    }
+    fn app() -> View {
+        rsx! {
+            p { "data-t": "state", "loading" }
+            for n in [DONE.get()] { Field { key: n, n } }
+        }
+    }
+    let mut ui = TestUi::new(app);
+    let got = fails(|| ui.until_within(std::time::Duration::from_secs(1), "the field to settle", || false));
+    assert!(got.contains("waiting for: the field to settle\n  still rendering: Field\n"), "{got}");
+    let mut ui = TestUi::new(counter);
+    let got = fails(|| ui.until_within(std::time::Duration::from_secs(1), "nothing", || false));
+    assert!(!got.contains("still rendering"), "a still page names none: {got}");
+}
+
+#[test]
+fn views_that_remount_on_their_own_mount_name_the_component() {
+    static DONE: Global<u32> = Global::new(|| 0);
+    #[component]
+    fn Thumb(n: u32) -> View {
+        rsx! { img { alt: "", onmounted: move |_| DONE.set(n + 1) } }
+    }
+    fn app() -> View {
+        rsx! { for n in [DONE.get()] { Thumb { key: n, n } } }
+    }
+    let got = fails(|| _ = TestUi::new(app));
+    assert!(got.contains("air: views still drawn again") && got.ends_with("still mounting: Thumb"), "{got}");
+}
+
+#[test]
+fn views_whose_tasks_never_settle_name_the_component() {
+    static DONE: Global<u32> = Global::new(|| 0);
+    // Remounts on its own task's end, without the page.
+    #[component]
+    fn Thumb(n: u32) -> View {
+        task(move || async move { DONE.set(n + 1) });
+        rsx! { span { "{n}" } }
+    }
+    fn app() -> View {
+        rsx! { for n in [DONE.get()] { Thumb { key: n, n } } }
+    }
+    let got = fails(|| _ = TestUi::new(app));
+    assert!(got.contains("air: tasks still making each other ready") && got.ends_with("still running: Thumb"), "{got}");
+}
+
+#[test]
+fn a_countdown_on_the_views_clock_moves_with_advance() {
+    use aio::ui::clock::{Instant, sleep};
+    use std::time::Duration;
+    fn app() -> View {
+        let left = signal(|| 8u64);
+        task(move || async move {
+            let start = Instant::now();
+            while left.get_untracked() > 0 {
+                sleep(Duration::from_millis(250)).await;
+                left.set(8u64.saturating_sub((Instant::now() - start).as_secs()));
+            }
+        });
+        rsx! { p { "data-t": "left", "{left}" } }
+    }
+    let mut ui = TestUi::new(app);
+    let t = std::time::Instant::now();
+    ui.advance(Duration::from_millis(1300));
+    assert_eq!(ui.text("left"), "7");
+    ui.advance(Duration::from_secs(10));
+    assert_eq!(ui.text("left"), "0");
+    assert!(t.elapsed() < Duration::from_secs(5), "virtual: {:?}", t.elapsed());
+}
+
+#[test]
+fn a_handle_two_showing_elements_share_is_refused_naming_both() {
+    fn app() -> View {
+        rsx! {
+            nav { "data-t": "side", button { "data-t": "fleet", "Fleet" } }
+            table { "data-t": "fleet", tr { td { "gpu 1" } } }
+            p { "data-t": "note", hidden: true, "old" }
+            p { "data-t": "note", "new" }
+        }
+    }
+    let ui = TestUi::new(app);
+    let got = fails(|| _ = ui.text("fleet"));
+    assert!(
+        got.starts_with(r#"2 elements have data-t="fleet" (<button> "Fleet" in data-t="side", <table> "gpu 1"): give each its own handle"#),
+        "{got}"
+    );
+    assert_eq!(ui.text("side/fleet"), "Fleet", "a path names one");
+    assert_eq!(ui.text("note"), "new", "a hidden one doesn't count while one shows");
+    assert_eq!(ui.count("[data-t=fleet]"), 2);
+    assert!(ui.present("fleet"));
+}

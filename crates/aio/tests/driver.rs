@@ -608,9 +608,10 @@ fn the_component_tree_says_who_rendered_how_often() {
     let mut ui = TestUi::new(panel);
     let tree = |ui: &TestUi| ui.components().iter().map(|c| (c.name, c.renders, c.updates)).collect::<Vec<_>>();
     assert_eq!(tree(&ui), [("Still", 1, 0), ("Clicks", 1, 0), ("Clicks", 1, 0)]);
-    ui.click("more");
-    ui.click("more");
-    assert_eq!(ui.text("more"), "2");
+    // Two `more` buttons: the first one's component names it.
+    ui.click("comp=Clicks[0]");
+    ui.click("comp=Clicks[0]");
+    assert_eq!(ui.text("comp=Clicks[0]"), "2");
     assert_eq!(tree(&ui), [("Still", 1, 0), ("Clicks", 1, 2), ("Clicks", 1, 0)], "only the clicked one's hole wrote");
 }
 

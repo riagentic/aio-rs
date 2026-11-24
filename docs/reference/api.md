@@ -129,6 +129,7 @@ In `aio`: `aio::boot` (the boot report), `aio::paths` (where files are),
 | `aio::colors`, `aio::kit::theme` | the colours from one hue, the `--aio-*` tokens |
 | `aio::page` | the page the views are drawn in (with `kit` or `web`) |
 | `aio::ui::prelude` | the view API (with `kit`): `rsx!`, `#[component]`, `View`, `Signal`, `signal`, `memo`, `effect`, `watch`, `once`, `on_cleanup`, `provide`/`context`, `callback`, `task`, `spawn`, `resource`, `Global`, `ErrorBoundary`, `Suspense`, `eval`, the event types, `Key`, `Modifiers` ([views](../ui/views.md)) |
+| `aio::ui::clock` | the views' clock (`Instant`, `sleep`): a view's own timer on it moves with `TestUi::advance` |
 | `aio::web` | the app in the browser's own page (feature `web`, `ax build --web`) |
 
 ## Sync, server and HTTP (feature `server`)
@@ -165,7 +166,7 @@ In `aio`: `aio::boot` (the boot report), `aio::paths` (where files are),
 | `aio::testing::TestCells` | cells in a sandbox: `cell`, `start`, `effects`, `settle`, `advance`, `fuzz`, `as_client`, `saved` |
 | `aio::testing::TestUi` | the real views headless (feature `kit`) |
 | `aio::testing::TestServer`, `Sim`, `TestBrowser` | a server, simulated sync, a browser page (feature `server`) |
-| `aio::testing::{expect, seeded, totp_code}` | helpers |
+| `aio::testing::{expect, seeded, totp_code, fails, exclusive}` | helpers; `exclusive()`: the test world to one test at a time |
 | `aio::log`, `trace!` … `error!` | the app's log (`logs/app.log`, `error.log`, `warning.log`) |
 | `aio::report`, `aio::feedback` | problem reports; a "Report a problem" UI |
 | `aio::health`, `aio::vitals`, `aio::perf`, `aio::budgets`, `aio::cost` | health, vitals, perf budgets, size budgets, what moves on links |

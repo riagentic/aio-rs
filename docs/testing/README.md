@@ -347,6 +347,16 @@ the world.
 - `aio::paths::sandbox()` enters (or shares) the same world in a test of
   your own; `aio::paths::in_sandbox()` says which world runs, for code
   that must pick a simulated device over real hardware.
+- `in_sandbox()` is the guard for every side effect a test must not
+  have: a process the app starts (a root helper, an installer), a write
+  outside the app's own dirs (`/etc`, a system service). A UI test clicks
+  "Apply" as a person does, so the code behind it must check. In the test
+  world `aio::process::Command` refuses a program that raises privileges
+  (`pkexec`, `sudo`, `doas`, `su`); `std::process::Command` is not watched.
+- Tests that share one world of the process (a demo world the app
+  builds, a `static` they change) take it in turn:
+  `let _world = aio::testing::exclusive();`, once per test; the others
+  still run in parallel.
 - A test that needs hardware puts the transport behind a trait and gives
   the test world a simulated device, or replays a [cassette](cassettes.md).
 - A UI test's page and aio-rs's own outbound requests are held to this

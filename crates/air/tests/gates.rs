@@ -179,6 +179,40 @@ fn gate_2_an_effect_loop_trips_the_round_guard() {
 }
 
 #[test]
+fn gate_2_tasks_that_make_each_other_ready_trip_the_round_guard_naming_their_component() {
+    thread_local!(static DONE: std::cell::Cell<Option<Signal<u32>>> = const { std::cell::Cell::new(None) });
+    // Remounts on its own success: its task's write gives it a new key.
+    #[component]
+    fn Thumb(n: u32) -> View {
+        task(move || async move { DONE.get().unwrap().set(n + 1) });
+        rsx! { span { "{n}" } }
+    }
+    fn app() -> View {
+        let done = signal(|| 0u32);
+        DONE.set(Some(done));
+        rsx! { for n in [done.get()] { Thumb { key: n, n } } }
+    }
+    let e = says(|| _ = TestPage::mount(app));
+    assert!(e.contains("after 10000 rounds") && e.ends_with("still running: Thumb"), "{e}");
+}
+
+#[test]
+fn gate_2_a_view_that_remounts_on_its_own_mount_trips_the_round_guard_naming_it() {
+    thread_local!(static DONE: std::cell::Cell<Option<Signal<u32>>> = const { std::cell::Cell::new(None) });
+    #[component]
+    fn Thumb(n: u32) -> View {
+        rsx! { img { alt: "", onmounted: move |_| DONE.get().unwrap().set(n + 1) } }
+    }
+    fn app() -> View {
+        let done = signal(|| 0u32);
+        DONE.set(Some(done));
+        rsx! { for n in [done.get()] { Thumb { key: n, n } } }
+    }
+    let e = says(|| _ = TestPage::mount(app));
+    assert!(e.contains("after 1000 rounds") && e.ends_with("still mounting: Thumb"), "{e}");
+}
+
+#[test]
 fn gate_2_a_signal_used_after_its_view_ended_fails_unless_asked_first() {
     static KEPT: Global<Option<Signal<u32>>> = Global::new(|| None);
     #[component]
