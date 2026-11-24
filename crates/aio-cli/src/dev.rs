@@ -1513,7 +1513,7 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
                     }
                     // Its own reason, said again last (its stderr scrolls by).
                     let why = said_why(logs.as_deref(), pid).map(|w| format!(": {w}")).unwrap_or_default();
-                    eprintln!("ax dev: {name} ended ({status}){why}; waiting: save a fix, or ax restart {name}");
+                    eprintln!("{}", ended_on_its_own(name, &status, status.success(), &why));
                     crate::splash::not_started(&format!("{name} ended ({status}) before its window opened{why}"));
                 }
                 continue;
@@ -1574,6 +1574,15 @@ pub fn run(name: &str, args: &[String]) -> Result<String, String> {
         }
     }
     Ok(String::new())
+}
+
+/// What `ax dev` says of an app that ended on its own (pure): a clean exit
+/// (a command-line tool's work done) is nothing to fix.
+fn ended_on_its_own(name: &str, status: &impl std::fmt::Display, ok: bool, why: &str) -> String {
+    match ok {
+        true => format!("ax dev: {name} finished ({status}); a save runs it again, or ax restart {name}"),
+        false => format!("ax dev: {name} ended ({status}){why}; waiting: save a fix, or ax restart {name}"),
+    }
 }
 
 /// How long a session is quiet before the next start's build is brought
@@ -2184,6 +2193,15 @@ mod tests {
 
     /// A service or a command-line tool is told no stylesheet or markup
     /// edit (it has none to show), and gets no display or splash.
+    /// A CLI that exits 0 finished its work: no fix is waited for.
+    #[test]
+    fn a_clean_exit_finished_and_a_failed_one_waits_for_a_fix() {
+        let done = ended_on_its_own("tool", &"exit status: 0", true, "");
+        assert_eq!(done, "ax dev: tool finished (exit status: 0); a save runs it again, or ax restart tool");
+        let failed = ended_on_its_own("tool", &"exit status: 101", false, ": it panicked");
+        assert!(failed.ends_with("ended (exit status: 101): it panicked; waiting: save a fix, or ax restart tool"));
+    }
+
     #[test]
     fn a_windowless_app_is_told_only_what_it_takes_live() {
         assert_eq!(

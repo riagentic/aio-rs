@@ -213,6 +213,8 @@ version may break things.
 
 ### Fixed
 
+- `ax dev`: an app that exits 0 on its own (a command-line tool done)
+  "finished; a save runs it again", where it said "waiting: save a fix".
 - `ax dev`'s `[aio] boot: … settings in the log` line is said once the
   boot report ends: it waited for the app's next line, so it came after a
   hot patch or at stop. `aio::boot::say` writes its rows in one write
