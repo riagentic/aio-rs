@@ -548,6 +548,12 @@ version may break things.
   the literal was an `i32`. `Some(<literal>)` and `None` take the prop's
   type now, as a bare `500` does.
 
+- `callback(f)` kept the closure of its body's first run: a body run
+  again (after a `follow`, a wait) handed it a new `f` that was dropped,
+  so `use_window_event`, `use_back_button` and a handler prop called a
+  closure that saw the first run's values (their docs said the latest
+  runs). It is the same handler still, calling the latest run's closure.
+
 ## [0.4.2] - 2026-11-11
 
 A fix release from porting a large app: aio crash-journal replay for a

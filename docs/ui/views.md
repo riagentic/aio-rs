@@ -410,7 +410,7 @@ assert_eq!(ui.read(&THEME), "dark");
 | `seeded_resource(move \|\| async move { .. })` | `resource` whose value a served page carries: the server waits for it while the page streams, the page's first frame starts from it ([server rendering](#server-rendering-and-hydration)); its value is `Serialize` and `Deserialize` | none |
 | `watch(deps, move \|deps\| ..)` | runs once the view is drawn, again when `deps` (values the view made, e.g. of its props) differ | |
 | `on_change(move \|\| .., \|next, prev\| ..)` | runs when the first closure's value changes (not at the start), with the old one; only what it reads is followed, the second runs untracked | `watch(source, fn)`, `effect(on(..))` |
-| `callback(move \|x\| ..)` | a handler made once, for a prop | `useCallback` |
+| `callback(move \|x\| ..)` | a handler made once, for a prop: the same handler on every run of the body, calling the latest run's closure | `useCallback` |
 | `task(move \|\| async move { .. })` | work for the view's life: started at mount, stopped at unmount | `onMount` + a loop |
 | `once(\|\| ..)` | made once, as the view mounts | `onMount`, `useRef` |
 | `on_cleanup(\|\| ..)` | runs as the component goes (unmount) | `onCleanup`, `onUnmount` |

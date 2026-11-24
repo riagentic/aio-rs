@@ -1691,8 +1691,24 @@ impl<A: 'static, R: 'static> Callback<A, R> {
             .with_borrow(|rt| rt.node(self.key).and_then(|n| n.value.clone()))
             .unwrap_or_else(|| panic!("air: a callback called after the view that made it ended"));
         let f = f.downcast_ref::<CallFn<A, R>>().expect("air: a callback of another type");
-        let mut f = f.try_borrow_mut().expect("air: a callback called from inside itself");
-        batch(|| f(a))
+        // Its batch drawn once it returned: a body that runs again then may hand it its latest closure.
+        let r = {
+            let _c = Batch::open();
+            let mut f = f.try_borrow_mut().expect("air: a callback called from inside itself");
+            f(a)
+        };
+        flush_if_idle();
+        r
+    }
+
+    /// Its closure is `f` from now on (the same handler, its latest body's run).
+    fn replace(&self, f: impl FnMut(A) -> R + 'static) {
+        let cell = RT.with_borrow(|rt| rt.node(self.key).and_then(|n| n.value.clone()));
+        if let Some(Ok(mut old)) =
+            cell.as_ref().and_then(|c| c.downcast_ref::<CallFn<A, R>>()).map(|c| c.try_borrow_mut())
+        {
+            *old = Box::new(f);
+        }
     }
 }
 
@@ -1709,10 +1725,17 @@ impl<A: 'static, R: 'static, F: FnMut(A) -> R + 'static> From<F> for Callback<A,
     }
 }
 
-/// A handler made once (a hook), so a prop that takes it keeps it.
+/// A handler made once (a hook), so a prop that takes it keeps it; it
+/// calls the closure of its body's latest run (a body that ran again, as
+/// after a [`follow`], hands it the closure that sees that run's values).
 #[track_caller]
 pub fn callback<A: 'static, R: 'static>(f: impl FnMut(A) -> R + 'static) -> Callback<A, R> {
-    hook("callback", || Callback::new(f))
+    let mut f = Some(f);
+    let cb = hook("callback", || Callback::new(f.take().expect("made once")));
+    if let Some(f) = f {
+        cb.replace(f);
+    }
+    cb
 }
 
 // -------------------------------------------------------------- optimistic

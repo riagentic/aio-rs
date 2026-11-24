@@ -609,7 +609,7 @@ adapters (`crates/aio/src/ui/view.rs`).
 | area | names |
 |---|---|
 | views | `rsx!`, `#[component]`, `Props`, `View` (a `Result`: `?` throws to an `ErrorBoundary`), `ViewError`, `Component` (what `TestUi::with` mounts), `Fragment`, `Attribute` (`..attributes`, `#[props(extends = GlobalAttributes)]`) |
-| handlers | `EventHandler<T>`, `Callback<A, R>`, `callback(f)` (made once) |
+| handlers | `EventHandler<T>`, `Callback<A, R>`, `callback(f)` (made once, calling the latest run's `f`) |
 | local state | `signal(\|\| v) -> Signal<T>`; `Signal::new(v)` outside a view's body |
 | `Signal<T>` (`Copy`) | `get`, `get_untracked`, `with`, `with_untracked`, `read`, `read_untracked` (guards), `set` (tells only on a change, `T: PartialEq`), `update(\|v\| ..)`, `write` (guard, tells on drop), `try_write`, `try_read_untracked`, `alive`, `toggle`, `+=`, `-=`; `Display`/`Debug` subscribe (`"{n}"`); as an attribute value it follows |
 | derived | `memo(f) -> Memo<T>` (`get`, `with`, `read`, …), `watch(deps, f)` (an effect when values the view made change) |

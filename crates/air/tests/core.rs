@@ -837,3 +837,38 @@ fn a_signal_read_again_after_a_memo_of_it_reruns_its_hole_once() {
     p.within(|| a.set(3));
     assert_eq!((p.text("t"), RUNS.get() - runs), ("3-30-3".to_string(), 2));
 }
+
+#[component]
+fn Caller(go: Callback<(), String>) -> View {
+    let out = signal(String::new);
+    rsx! {
+        button { "data-t": "call", onclick: move |_| out.set(go.call(())), "Call" }
+        p { "data-t": "out", "{out}" }
+    }
+}
+
+/// `callback` hands back the same handler on every run of its body (a prop
+/// keeps it), calling the closure of the latest run: what that run saw.
+#[test]
+fn a_callback_calls_the_closure_of_its_bodys_latest_run() {
+    let mut p = TestPage::mount(|| {
+        let n = signal(|| 0);
+        let seen = follow(|| n.get());
+        let go = callback(move |()| format!("run {seen}"));
+        let first = once(|| go);
+        rsx! {
+            button { "data-t": "inc", onclick: move |_| n += 1, "+" }
+            p { "data-t": "same", "{first == go}" }
+            Caller { go }
+        }
+    });
+    p.click("call");
+    assert_eq!(p.text("out"), "run 0");
+    p.click("inc");
+    p.click("call");
+    assert_eq!(
+        (p.text("out"), p.text("same")),
+        ("run 1".into(), "true".into()),
+        "the latest closure, the same handler"
+    );
+}
