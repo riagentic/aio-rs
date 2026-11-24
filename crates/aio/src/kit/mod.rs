@@ -34,6 +34,7 @@ mod modal;
 mod motion;
 mod pattern;
 mod portal;
+mod qr;
 #[doc(hidden)]
 pub mod redux;
 mod schema;
@@ -70,6 +71,7 @@ pub use markdown::Markdown;
 pub use modal::*;
 pub use motion::{FRAME, Spring, SpringValue, spring_step, use_frame, use_interval, use_spring};
 pub use portal::{Portal, PortalHost};
+pub use qr::{QrScanner, QrState, decode_qr};
 pub use redux::ReduxDevTools;
 pub use schema::{Parse, Rule, Schema, optional, rule, text, use_form_schema};
 #[cfg(any(feature = "server", target_arch = "wasm32"))]

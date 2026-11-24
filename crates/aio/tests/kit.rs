@@ -2276,6 +2276,132 @@ fn a_sandboxed_island_runs_in_a_frame_of_its_own_and_still_talks_through_its_pro
     ui.until_text("said", "[0, 0, 0]");
 }
 
+/// A version 2 code of "https://example.org/r/42", as python-qrcode drew it.
+const CODE: [&str; 25] = [
+    "#######.##.###....#######",
+    "#.....#.#..#..#.#.#.....#",
+    "#.###.#.#.#..#....#.###.#",
+    "#.###.#..###.#.##.#.###.#",
+    "#.###.#.#####.#.#.#.###.#",
+    "#.....#...##.##.#.#.....#",
+    "#######.#.#.#.#.#.#######",
+    "..........#.##.##........",
+    "#..######.#.#...##..#.###",
+    ".####..#####.#####.#####.",
+    ".##.########.#.###.###..#",
+    ".####...##....#..###.####",
+    "#...#.#.##.#...##.##....#",
+    "#..#...#.#..##.##...#..#.",
+    "###...##.##....##.#.#####",
+    "#...##.##...#.#..###.##.#",
+    "#..#.##########.#####.##.",
+    "........##.#.#..#...#.##.",
+    "#######.#...#...#.#.#...#",
+    "#.....#.####.#.##...#...#",
+    "#.###.#.#.###..######....",
+    "#.###.#.#.#.#...###....##",
+    "#.###.#...###..#.#..#####",
+    "#.....#...#.#..#...##.###",
+    "#######.##.#..#.#.#..#..#",
+];
+
+/// A stand-in camera: `getUserMedia` answers with a canvas showing `CODE`
+/// (re-drawn so the stream keeps sending frames), and its track's stop is
+/// counted. `detector`: `"none"` takes the browser's own reader away.
+fn fake_camera(ui: &mut TestUi, detector: &str) {
+    let rows = aio::serde_json::to_string(&CODE).unwrap();
+    ui.eval(&format!(
+        "const rows = {rows}, c = document.createElement('canvas'), m = 8, q = 4;
+         c.width = c.height = (rows.length + 2 * q) * m;
+         const g = c.getContext('2d');
+         const draw = () => {{ g.fillStyle = '#eee'; g.fillRect(0, 0, c.width, c.height); g.fillStyle = '#111';
+           rows.forEach((r, y) => [...r].forEach((d, x) => d === '#' && g.fillRect((x + q) * m, (y + q) * m, m, m))); }};
+         draw(); setInterval(draw, 50);
+         window.__stopped = 0;
+         const camera = async () => {{ const s = c.captureStream(20);
+           s.getTracks().forEach((t) => {{ const stop = t.stop.bind(t); t.stop = () => {{ window.__stopped++; stop(); }}; }});
+           return s; }};
+         Object.defineProperty(navigator, 'mediaDevices', {{ configurable: true, value: {{ getUserMedia: camera }} }});
+         if ({detector:?} === 'none') delete window.BarcodeDetector;
+         if ({detector:?} === 'fake') window.BarcodeDetector = class {{
+           static async getSupportedFormats() {{ return ['qr_code']; }}
+           async detect() {{ return [{{ rawValue: 'read by the browser' }}]; }} }};
+         true"
+    ));
+}
+
+/// A scanner shown on a click, what it read and where its camera is.
+fn scanner() -> View {
+    let shown = signal(|| false);
+    let said = signal(Vec::<String>::new);
+    let state = signal(|| "-".to_string());
+    rsx! {
+        button { "data-t": "show", onclick: move |_| shown.toggle(), "Scan" }
+        if shown.get() {
+            QrScanner {
+                onscan: move |t: String| said.update(|s| s.push(t)),
+                onstate: move |s: QrState| state.set(format!("{s:?}")),
+                "data-t": "qr",
+            }
+        }
+        p { "data-t": "said", {said.get().join(" | ")} }
+        p { "data-t": "state", "{state}" }
+    }
+}
+
+#[test]
+fn a_qr_scanner_reads_the_cameras_frames_itself_says_each_code_once_and_lets_the_camera_go() {
+    let mut ui = TestUi::new(scanner);
+    fake_camera(&mut ui, "none");
+    ui.click("show");
+    ui.until_text("state", "Scanning");
+    ui.until_text("said", "https://example.org/r/42");
+    assert_eq!(ui.count("[data-t=qr] video"), 1);
+    assert_eq!(ui.attr("qr", "class").as_deref(), Some("aio-qr"));
+    // The code stays in view: it was said once.
+    ui.wait(Duration::from_millis(600));
+    assert_eq!(ui.text("said"), "https://example.org/r/42");
+    ui.click("show");
+    ui.wait(Duration::from_millis(400));
+    assert_eq!(ui.eval("window.__stopped"), 1, "the camera let go with the view");
+}
+
+#[test]
+fn a_qr_scanner_takes_the_browsers_own_reader_where_there_is_one() {
+    let mut ui = TestUi::new(scanner);
+    fake_camera(&mut ui, "fake");
+    ui.click("show");
+    ui.until_text("said", "read by the browser");
+}
+
+#[test]
+fn a_qr_scanner_without_a_camera_says_why() {
+    for (asked, state, note) in [
+        ("NotFoundError", "NoCamera", "No camera found."),
+        ("NotAllowedError", "Denied", "The camera is not allowed. Allow it in the system's settings, then try again."),
+        (
+            "NotReadableError",
+            "Failed(\"Could not start video source\")",
+            "The camera failed: Could not start video source",
+        ),
+    ] {
+        let mut ui = TestUi::new(scanner);
+        ui.eval(&format!(
+            "Object.defineProperty(navigator, 'mediaDevices', {{ configurable: true, value: {{ getUserMedia: async () => {{
+               throw new DOMException('Could not start video source', '{asked}'); }} }} }}); true"
+        ));
+        ui.click("show");
+        ui.until_text("state", state);
+        assert_eq!(ui.text("css=[data-t=qr] .aio-qr__note"), note, "{asked}");
+        assert_eq!(ui.attr("css=[data-t=qr] .aio-qr__note", "role").as_deref(), Some("status"));
+    }
+    // A page with no camera API at all (plain http).
+    let mut ui = TestUi::new(scanner);
+    ui.eval("Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: undefined }); true");
+    ui.click("show");
+    ui.until_text("state", "NoCamera");
+}
+
 fn browser() -> View {
     rsx! {
         Browser { src: "https://a.example/", class: "pane", "data-t": "web", host_keys: vec!["Escape".into()] }

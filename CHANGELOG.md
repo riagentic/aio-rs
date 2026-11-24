@@ -124,6 +124,15 @@ version may break things.
   ([Waiting](docs/testing/ui.md#waiting)).
 - `ax lint` (`render`): a literal `data-t` handle on two elements that
   show together (a branch's arms aside) is a warning.
+- `aio::kit::QrScanner`: the camera's picture and the text of each QR
+  code in it (`onscan`), on the desktop, Android and in a browser. The
+  browser's own reader where there is one (`BarcodeDetector`), else
+  `aio::kit::decode_qr`, aio's own (versions 1 to 40, every level,
+  turned, tilted, shaded, light on dark), on grey frames the page hands
+  the app one at a time. Without a camera, or refused, it says why
+  (`onstate`: `QrState`). An app that shows none builds none of it; one
+  that does grows by about 70 KB in a web build (the reader 42 KB of it)
+  ([kit](docs/ui/kit.md#qr-codes-from-the-camera)).
 
 ### Changed
 
