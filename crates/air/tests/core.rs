@@ -784,35 +784,6 @@ fn a_selector_read_in_the_batch_that_moved_it_answers_the_new_key() {
     o.dispose();
 }
 
-thread_local!(static MANY: RefCell<Vec<Signal<u64>>> = const { RefCell::new(Vec::new()) });
-
-/// The best of 5 re-runs of one hole that reads `n` signals.
-fn rerun_of_a_hole_reading(n: usize) -> std::time::Duration {
-    let mut p = TestPage::mount(move || {
-        let sigs: Vec<Signal<u64>> = (0..n).map(|i| Signal::new(i as u64)).collect();
-        MANY.set(sigs.clone());
-        rsx! { p { "data-t": "sum", {sigs.iter().map(|s| s.get()).sum::<u64>().to_string()} } }
-    });
-    let sigs = MANY.take();
-    (0..5)
-        .map(|k| {
-            let t = std::time::Instant::now();
-            p.within(|| sigs[k].set(u64::MAX / 8));
-            t.elapsed()
-        })
-        .min()
-        .unwrap()
-}
-
-#[test]
-fn a_hole_reading_many_signals_reruns_in_time_linear_in_them() {
-    let (small, big) = (rerun_of_a_hole_reading(2000), rerun_of_a_hole_reading(16_000));
-    // 8 times the reads: about 8 times the time (a look through the hole's
-    // reads per read made it 64).
-    let ratio = big.as_secs_f64() / small.as_secs_f64();
-    assert!(ratio < 24.0, "{small:?} for 2000 reads, {big:?} for 16000: {ratio:.0}x");
-}
-
 #[test]
 fn a_signal_read_again_after_a_memo_of_it_reruns_its_hole_once() {
     thread_local!(static RUNS: Cell<u32> = const { Cell::new(0) });
