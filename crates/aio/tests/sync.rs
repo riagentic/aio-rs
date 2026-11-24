@@ -2463,7 +2463,8 @@ async fn views(w: &mut Sock, wait: Duration) -> Vec<serde_json::Value> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn background_changes_are_paced_and_a_persons_go_at_once() {
-    let (h, addr) = limited(aio::sync::Limits { sync_interval: Duration::from_millis(200), ..Default::default() }).await;
+    let (h, addr) =
+        limited(aio::sync::Limits { sync_interval: Duration::from_millis(200), ..Default::default() }).await;
     let (mut w, _) = raw_link(&addr).await;
     // A schedule's burst: the first at once, the rest folded into one patch.
     let tick = h.by(By::Schedule("tick".into()));

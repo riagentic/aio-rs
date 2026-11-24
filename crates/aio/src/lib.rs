@@ -131,12 +131,12 @@ pub use status::{Conn, Status};
 #[cfg(target_arch = "wasm32")]
 pub use web::{Handle, Source, sync};
 
+#[doc(hidden)]
+pub use aio_config::config::span_ms as __span_ms_of;
 /// The app's monogram: its letter in its hue, as pixels or SVG.
 pub use aio_config::icon;
 #[doc(hidden)]
 pub use aio_config_macro::config as __config_lit;
-#[doc(hidden)]
-pub use aio_config::config::span_ms as __span_ms_of;
 
 /// `#[every("5m")]`, `#[ttl("1m")]`, `#[long("2m")]`: the span's ms as
 /// `$t`, worked out as the app builds by `aio.toml`'s span parser; a bad
@@ -147,7 +147,12 @@ macro_rules! __span_ms {
     ($t:ty, $s:literal, $what:literal) => {{
         const MS: $t = match $crate::__span_ms_of($s) {
             Some(ms) if ms > 0 && ms <= <$t>::MAX as u64 => ms as $t,
-            _ => panic!(concat!($what, "(", stringify!($s), "): a span is a whole number and ms, s, m, h or d (\"5m\"), more than 0")),
+            _ => panic!(concat!(
+                $what,
+                "(",
+                stringify!($s),
+                "): a span is a whole number and ms, s, m, h or d (\"5m\"), more than 0"
+            )),
         };
         MS
     }};

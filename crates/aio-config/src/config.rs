@@ -2055,7 +2055,9 @@ impl Config {
             ("[updates] every", c.updates.every),
         ];
         let channels = c.updates.every_by_channel.values().map(|e| ("[updates] every_by_channel", *e));
-        if let Some((key, _)) = second.into_iter().chain(channels).find(|(_, d)| d.is_some_and(|d| d < Duration::from_secs(1))) {
+        if let Some((key, _)) =
+            second.into_iter().chain(channels).find(|(_, d)| d.is_some_and(|d| d < Duration::from_secs(1)))
+        {
             return Err(format!("aio.toml: {key} must be at least 1s"));
         }
         if c.updates.keep < 2 {

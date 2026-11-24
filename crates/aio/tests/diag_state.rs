@@ -85,7 +85,10 @@ async fn a_failing_call_effect_or_hook_carries_its_screened_state_and_aios_code(
     assert_eq!(p.state, Some(json!({ "note": "see token=…" })), "no #[server] field, the token masked");
 
     // An async call past its ceiling: its caller hears EFFECT_TIMEOUT, the bus too.
-    aio::perf::set(aio::perf::Budgets { call_ceiling: Some(std::time::Duration::from_millis(50)), ..Default::default() });
+    aio::perf::set(aio::perf::Budgets {
+        call_ceiling: Some(std::time::Duration::from_millis(50)),
+        ..Default::default()
+    });
     let e = h.hang().unwrap().await.unwrap_err();
     aio::perf::set(aio::perf::Budgets::default());
     assert_eq!(e.code, Some(aio::Code::EffectTimeout), "{e}");

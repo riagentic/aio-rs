@@ -1161,7 +1161,9 @@ fn schedule(h: &str, a: &Attribute) -> syn::Result<(Tokens, Tokens, bool)> {
 fn span(lit: &syn::Lit, ty: &str, what: &str) -> syn::Result<Tokens> {
     let ty = format_ident!("{ty}");
     match lit {
-        syn::Lit::Int(n) if n.base10_parse::<u64>()? == 0 => Err(syn::Error::new(n.span(), format!("{what}: ms must be > 0"))),
+        syn::Lit::Int(n) if n.base10_parse::<u64>()? == 0 => {
+            Err(syn::Error::new(n.span(), format!("{what}: ms must be > 0")))
+        }
         syn::Lit::Int(n) => Ok(quote!(#n)),
         syn::Lit::Str(s) => Ok(quote::quote_spanned!(s.span()=> ::aio::__span_ms!(#ty, #s, #what))),
         _ => Err(syn::Error::new(lit.span(), format!("{what}: a span (\"5m\") or a number of ms"))),
