@@ -1326,27 +1326,51 @@ impl<T: Cell> Handle<T> {
     /// Schedules missed while the app was off fire once, right away.
     pub fn start(&self) -> tokio::task::JoinHandle<()> {
         _ = self.live(true);
-        let h = self.clone();
-        tokio::spawn(async move {
-            loop {
-                // Register before looking, so a change made meanwhile still wakes us.
-                let mut woken = std::pin::pin!(h.inner.wake.notified());
-                woken.as_mut().enable();
-                if h.closing() {
-                    return;
-                }
-                // On the blocking pool: a slow scheduled method holds no
-                // runtime thread, so other cells and the sockets go on.
-                let f = h.clone();
-                let Ok((next, now)) = tokio::task::spawn_blocking(move || f.fire()).await else { return };
-                let wait = wait_ms(next, now);
-                tokio::select! {
-                    _ = woken => {}
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(wait)) => {}
-                }
-            }
-        })
+        schedule(Arc::new(self.clone()))
     }
+}
+
+/// What [`schedule`] needs of a cell.
+trait Fires: Send + Sync + 'static {
+    fn woken(&self) -> &Notify;
+    fn closing(&self) -> bool;
+    /// [`Handle::fire`].
+    fn fire(&self) -> (Option<i64>, i64);
+}
+
+impl<T: Cell> Fires for Handle<T> {
+    fn woken(&self) -> &Notify {
+        &self.inner.wake
+    }
+    fn closing(&self) -> bool {
+        Handle::closing(self)
+    }
+    fn fire(&self) -> (Option<i64>, i64) {
+        Handle::fire(self)
+    }
+}
+
+/// [`Handle::start`]'s task: once in the binary, not once per cell type.
+fn schedule(h: Arc<dyn Fires>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            // Register before looking, so a change made meanwhile still wakes us.
+            let mut woken = std::pin::pin!(h.woken().notified());
+            woken.as_mut().enable();
+            if h.closing() {
+                return;
+            }
+            // On the blocking pool: a slow scheduled method holds no
+            // runtime thread, so other cells and the sockets go on.
+            let f = h.clone();
+            let Ok((next, now)) = tokio::task::spawn_blocking(move || f.fire()).await else { return };
+            let wait = wait_ms(next, now);
+            tokio::select! {
+                _ = woken => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(wait)) => {}
+            }
+        }
+    })
 }
 
 /// Call each of `cell`'s schedules due on another cell there; those on a

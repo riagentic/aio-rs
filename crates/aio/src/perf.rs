@@ -52,48 +52,58 @@ impl Storms {
     /// And what began or ended.
     pub fn track(&mut self, cfg: &Storm, label: &str, now: i64) -> (bool, Vec<Weather>) {
         let mut said = vec![];
-        if self.storming > 0 {
-            let hot: Vec<String> = self.rates.iter().filter(|(_, r)| r.storming).map(|(l, _)| l.clone()).collect();
-            for l in hot.iter().filter(|l| *l != label) {
-                self.roll(cfg, l, now, &mut said);
+        // Other storms whose second is over: rare (once a second), so their
+        // labels are copied only then.
+        let over = |(l, r): (&String, &Rate)| r.storming && l != label && now - r.start >= 1000;
+        if self.storming > 0 && self.rates.iter().any(over) {
+            let hot: Vec<String> = self.rates.iter().filter(|e| over(*e)).map(|(l, _)| l.clone()).collect();
+            for l in &hot {
+                let r = self.rates.get_mut(l).expect("listed");
+                // Quiet labels go: the map holds only what is being called.
+                if roll(cfg, l, r, now, &mut said, &mut self.storming) {
+                    self.rates.remove(l);
+                }
             }
         }
-        self.roll(cfg, label, now, &mut said);
-        let r = self.rates.entry(label.into()).or_insert(Rate { start: now, count: 0, hot: 0, storming: false });
+        // One lookup a call; a label is copied once, when first called. Its
+        // own quiet bucket starts again in place (as a new one would).
+        let r = match self.rates.get_mut(label) {
+            Some(r) => {
+                roll(cfg, label, r, now, &mut said, &mut self.storming);
+                r
+            }
+            None => self.rates.entry(label.into()).or_insert(Rate { start: now, count: 0, hot: 0, storming: false }),
+        };
         r.count += 1;
         (cfg.breaker && r.storming, said)
     }
+}
 
-    /// Close `label`'s bucket if its second is over.
-    fn roll(&mut self, cfg: &Storm, label: &str, now: i64, said: &mut Vec<Weather>) {
-        let Some(r) = self.rates.get_mut(label) else { return };
-        let elapsed = now - r.start;
-        if elapsed < 1000 {
-            return;
-        }
-        // A gap of more than a bucket: the seconds skipped had no calls.
-        let rate = if elapsed < 2000 { r.count } else { 0 };
-        if rate >= cfg.rate {
-            r.hot += 1;
-            if !r.storming && r.hot >= cfg.secs {
-                r.storming = true;
-                self.storming += 1;
-                said.push(Weather::Began { label: label.into(), rate, secs: r.hot });
-            }
-        } else {
-            if r.storming {
-                self.storming -= 1;
-                said.push(Weather::Ended { label: label.into(), rate });
-            }
-            (r.hot, r.storming) = (0, false);
-            // Quiet labels go: the map holds only what is being called.
-            if rate == 0 {
-                self.rates.remove(label);
-                return;
-            }
-        }
-        (r.count, r.start) = (0, now);
+/// Close `r`'s bucket (`label`'s) if its second is over: whether it was
+/// quiet (no calls in it).
+fn roll(cfg: &Storm, label: &str, r: &mut Rate, now: i64, said: &mut Vec<Weather>, storming: &mut usize) -> bool {
+    let elapsed = now - r.start;
+    if elapsed < 1000 {
+        return false;
     }
+    // A gap of more than a bucket: the seconds skipped had no calls.
+    let rate = if elapsed < 2000 { r.count } else { 0 };
+    if rate >= cfg.rate {
+        r.hot += 1;
+        if !r.storming && r.hot >= cfg.secs {
+            r.storming = true;
+            *storming += 1;
+            said.push(Weather::Began { label: label.into(), rate, secs: r.hot });
+        }
+    } else {
+        if r.storming {
+            *storming -= 1;
+            said.push(Weather::Ended { label: label.into(), rate });
+        }
+        (r.hot, r.storming) = (0, false);
+    }
+    (r.count, r.start) = (0, now);
+    rate == 0 && rate < cfg.rate
 }
 
 /// A call of `cell.method` starts: refused when it is in a storm and the
@@ -101,13 +111,18 @@ impl Storms {
 /// begins, and its end in the log.
 pub(crate) fn storm(cell: &str, method: &str) -> crate::Result {
     static STORMS: Mutex<Option<Storms>> = Mutex::new(None);
+    // The label in this thread's buffer: no allocation per call.
+    thread_local!(static LABEL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) });
     let cfg = budgets(|b| b.storm);
-    let label = format!("{cell}.{method}");
-    let (refuse, said) = STORMS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().track(
-        &cfg,
-        &label,
-        crate::store::now_ms(),
-    );
+    let (refuse, said) = LABEL.with_borrow_mut(|label| {
+        label.clear();
+        label.extend([cell, ".", method]);
+        STORMS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().track(
+            &cfg,
+            label,
+            crate::store::now_ms(),
+        )
+    });
     for w in said {
         match w {
             Weather::Began { label, rate, secs } => {
@@ -120,7 +135,10 @@ pub(crate) fn storm(cell: &str, method: &str) -> crate::Result {
         }
     }
     if refuse {
-        return Err(crate::Rejected::coded(crate::Code::DispatchLoop, format!("{label}: refused during a call storm ([perf.storm] breaker)")));
+        return Err(crate::Rejected::coded(
+            crate::Code::DispatchLoop,
+            format!("{cell}.{method}: refused during a call storm ([perf.storm] breaker)"),
+        ));
     }
     Ok(())
 }
@@ -338,7 +356,11 @@ mod tests {
             for _ in 0..n {
                 let t0 = Instant::now();
                 let (t1, t2, t3) = (Instant::now(), Instant::now(), Instant::now());
-                method("perf-probe", "m", Phases { clone: t1 - t0, apply: t2 - t1, check: t3 - t2, commit: t3.elapsed() });
+                method(
+                    "perf-probe",
+                    "m",
+                    Phases { clone: t1 - t0, apply: t2 - t1, check: t3 - t2, commit: t3.elapsed() },
+                );
             }
             t.elapsed() / n
         };
