@@ -1801,8 +1801,13 @@ pub struct Selector<K> {
 
 struct SelectorInner<K> {
     current: RefCell<Option<K>>,
+    /// A signal per key asked: no one's (the selector's end ends those
+    /// left); one no reader follows goes once their count doubles.
     buckets: RefCell<HashMap<K, Signal<bool>>>,
-    owner: Option<Owner>,
+    /// The count of buckets that next drops the unread ones.
+    prune_at: Cell<usize>,
+    /// Its computation: a read makes it first if it waits ([`pull`]).
+    node: Cell<Option<Key>>,
 }
 
 impl<K> Clone for Selector<K> {
@@ -1819,10 +1824,16 @@ impl<K> PartialEq for Selector<K> {
 
 /// A selector made now, under the current owner (not a hook).
 pub fn selector<K: Hash + Eq + Clone + 'static>(src: impl Fn() -> K + 'static) -> Selector<K> {
-    let inner =
-        Rc::new(SelectorInner { current: RefCell::new(None), buckets: RefCell::default(), owner: current_owner() });
+    let inner = Rc::new(SelectorInner {
+        current: RefCell::new(None),
+        buckets: RefCell::default(),
+        prune_at: Cell::new(64),
+        node: Cell::new(None),
+    });
     let i = inner.clone();
-    effect_of(Kind::Memo, move || {
+    cleanup(move || i.buckets.take().into_values().for_each(|b| dispose(b.key)));
+    let i = inner.clone();
+    let node = effect_of(Kind::Memo, move || {
         let k = src();
         let old = i.current.borrow_mut().replace(k.clone());
         if old.as_ref() == Some(&k) {
@@ -1843,24 +1854,46 @@ pub fn selector<K: Hash + Eq + Clone + 'static>(src: impl Fn() -> K + 'static) -
             })
         });
     });
+    inner.node.set(Some(node));
     Selector { inner }
 }
 
 impl<K: Hash + Eq + Clone + 'static> Selector<K> {
     /// Is `k` the selected key? Tracked per key.
     pub fn is(&self, k: K) -> bool {
+        if let Some(n) = self.inner.node.get() {
+            pull(n);
+        }
         let b = self.inner.buckets.borrow().get(&k).copied();
         let b = b.unwrap_or_else(|| {
+            self.prune();
             let on = self.inner.current.borrow().as_ref() == Some(&k);
-            let make = || Signal::new(on);
-            let s = match self.inner.owner {
-                Some(o) => with_owner(o, make),
-                None => detached(make),
-            };
+            let s = detached(|| Signal::new(on));
             self.inner.buckets.borrow_mut().insert(k, s);
             s
         });
         b.get()
+    }
+
+    /// Drop the buckets no reader follows, once their count reached
+    /// [`SelectorInner::prune_at`] (rows whose keys come and go: a feed).
+    fn prune(&self) {
+        let i = &self.inner;
+        if i.buckets.borrow().len() < i.prune_at.get() {
+            return;
+        }
+        let mut gone = vec![];
+        i.buckets.borrow_mut().retain(|_, b| {
+            let read = RT.with_borrow(|rt| {
+                rt.node(b.key).is_some_and(|n| n.subs.iter().any(|(e, r)| rt.node(*e).is_some_and(|n| n.runs == *r)))
+            });
+            if !read {
+                gone.push(b.key);
+            }
+            read
+        });
+        i.prune_at.set((i.buckets.borrow().len() * 2).max(64));
+        gone.into_iter().for_each(dispose);
     }
 }
 

@@ -745,3 +745,41 @@ fn a_script_ends_with_its_owner_while_a_handle_is_kept() {
     p.within(|| _ = spawn_forever(async move { *g.borrow_mut() = Some(e.recv_json().await) }));
     assert_eq!(*got.borrow(), Some(Err("the script's view ended".to_string())));
 }
+
+#[test]
+fn a_selector_over_keys_that_come_and_go_keeps_only_the_buckets_read() {
+    thread_local!(static NEXT: Cell<Option<Signal<u32>>> = const { Cell::new(None) });
+    fn app() -> View {
+        let (base, cur) = (signal(|| 0u32), signal(|| 0u32));
+        NEXT.set(Some(base));
+        let sel = once(move || selector(move || cur.get()));
+        rsx! {
+            for k in base.get()..base.get() + 10 {
+                p { key: "{k}", class: if sel.is(k) { "on" } else { "" }, "{k}" }
+            }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    let base = NEXT.get().unwrap();
+    let live = air::live();
+    let mut most = 0;
+    for _ in 0..100 {
+        p.within(|| base.update(|b| *b += 10));
+        most = most.max(air::live().nodes);
+    }
+    assert!(most <= live.nodes + 64, "a bucket per key ever asked piled up: {most} nodes, {} at first", live.nodes);
+}
+
+#[test]
+fn a_selector_read_in_the_batch_that_moved_it_answers_the_new_key() {
+    let ((cur, sel), o) = air::scope(|| {
+        let cur = Signal::new(0u32);
+        (cur, selector(move || cur.get()))
+    });
+    let seen = batch(|| {
+        cur.set(1);
+        (sel.is(0), sel.is(1))
+    });
+    assert_eq!(seen, (false, true));
+    o.dispose();
+}

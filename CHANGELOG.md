@@ -158,6 +158,11 @@ version may break things.
 
 ### Fixed
 
+- `selector` kept a signal for every key ever asked until its owner
+  ended: rows whose keys come and go (a feed, a paged list) grew it
+  without end. Keys no row reads now go as the count doubles. And
+  `sel.is(k)` in the batch that moved the selection (a handler) answered
+  for the old key.
 - A component's handlers piled up state for the component's life on
   every event: each `async` handler (and each `spawn` in one) left a
   cleanup behind, and each page script (`eval`, and `MountedData`'s
