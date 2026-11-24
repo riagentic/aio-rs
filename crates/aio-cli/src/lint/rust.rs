@@ -2,7 +2,7 @@
 //! fields named like credentials, methods that aren't pure, hooks off the
 //! top level of a component, and rsx! markup without accessible names.
 use super::{Issue, Severity, secrets};
-use crate::reload::air_rsx::{Node, Val};
+use crate::reload::air_rsx::{Node, PropName, Val};
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -853,6 +853,7 @@ impl Checks<'_> {
         let mut found = Vec::new();
         a11y(&body, Within::default(), &mut found);
         keys(&body, roots, &mut found);
+        found.extend(twins(&body));
         found.sort_by_key(|f| f.0);
         for (line, sev, area, msg, fix) in found {
             self.push(sev, area, msg, line, fix);
@@ -1091,6 +1092,64 @@ fn keys(nodes: &[Node], block: Nodes, out: &mut Found) {
             _ => {}
         }
     }
+}
+
+/// Each literal `data-t` handle a tree may show at once: how many carry
+/// it, the line of the last. A branch's arms show one at a time; a loop's
+/// body counts once (its rows need handles of their own: `"row-{id}"`).
+fn handles(nodes: &[Node]) -> BTreeMap<String, (usize, usize)> {
+    let mut all = BTreeMap::new();
+    let mut add = |more: BTreeMap<String, (usize, usize)>| {
+        for (t, (n, line)) in more {
+            let e = all.entry(t).or_insert((0, 0));
+            *e = (e.0 + n, e.1.max(line));
+        }
+    };
+    let either = |arms: &mut dyn Iterator<Item = &Vec<Node>>| {
+        let mut most: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+        for (t, got) in arms.flat_map(|a| handles(a)) {
+            let e = most.entry(t).or_insert(got);
+            if got.0 > e.0 {
+                *e = got;
+            }
+        }
+        most
+    };
+    for n in nodes {
+        let own = match n {
+            Node::El { attrs, at, .. } => attrs.iter().find_map(|(k, v)| match v {
+                Val::Static(t) if k == "data-t" => Some((t.clone(), at.start().line)),
+                _ => None,
+            }),
+            Node::Comp { props, .. } => props.iter().find_map(|(k, v)| match k {
+                PropName::Attr(k) if k == "data-t" => {
+                    let lit = syn::parse2::<syn::LitStr>(v.clone()).ok()?;
+                    Some((lit.value(), lit.span().start().line))
+                }
+                _ => None,
+            }),
+            _ => None,
+        };
+        add(own.map(|(t, line)| (t, (1, line))).into_iter().collect());
+        match n {
+            Node::El { children, .. } | Node::Comp { children, .. } => add(handles(children)),
+            Node::For { body, .. } => add(handles(body)),
+            Node::If { then, otherwise, .. } => add(either(&mut [then, otherwise].into_iter())),
+            Node::Match { arms, .. } => add(either(&mut arms.iter().map(|(_, _, arm)| arm))),
+            _ => {}
+        }
+    }
+    all
+}
+
+/// A literal `data-t` handle on two elements that show together: a test
+/// naming it can't tell which it means (`TestUi` refuses it).
+fn twins(roots: &[Node]) -> Found {
+    let say = |(t, (n, line)): (String, (usize, usize))| {
+        let msg = format!("data-t {t:?} is on {n} elements that show together: a test naming it can't tell them apart");
+        (line, Severity::Warn, "render", msg, "a handle of its own for each (\"fleet-nav\", \"fleet-table\")")
+    };
+    handles(roots).into_iter().filter(|(_, (n, _))| *n > 1).map(say).collect()
 }
 
 /// Where an element sits: in a `label`, in a `form`.

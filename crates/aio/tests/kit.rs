@@ -603,8 +603,8 @@ fn the_pager_windows_marks_the_current_page_and_clamps() {
     assert_eq!(ui.count(&format!("nav{p}[aria-label=Pagination] [aria-label^='Page ']")), 5);
     assert_eq!(ui.count(&format!("{p} [aria-current=page][aria-label='Page 1'].aio-page__btn--current")), 1);
     assert_eq!(ui.count(&format!("{p} [data-t=pagePrev][disabled]")), 1);
-    ui.click("pageNext");
-    ui.click("page3");
+    ui.click("pager/pageNext");
+    ui.click("pager/page3");
     assert_eq!(ui.count(&format!("{p} [aria-current=page][aria-label='Page 3']")), 1);
     assert_eq!(ui.count(&format!("{p} [aria-label^='Page ']")), 5);
     // Out of range (page 9 of 3): every enabled button leads back in.
@@ -737,7 +737,7 @@ fn a_toast_shows_in_the_host_until_dismissed_or_its_time_is_up() {
     ui.click("bad");
     assert_eq!(ui.count(".aio-toast--success:not([role])"), 1);
     assert_eq!(ui.count(".aio-toast--error[role=alert]"), 1);
-    ui.click("toastDismiss");
+    ui.click("css=.aio-toast--success [data-t=toastDismiss]");
     assert_eq!(ui.text("toasts"), "Failed×");
     ui.click("brief");
     assert!(ui.text("toasts").contains("Brief"));

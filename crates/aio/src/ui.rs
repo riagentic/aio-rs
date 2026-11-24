@@ -77,10 +77,14 @@ pub mod prelude {
 }
 
 /// The views' clock: a moment and a wait, on the page's timer in a
-/// browser, else on tokio's (a test's paused clock too).
+/// browser, else on tokio's. A view's timer (a countdown, a debounce)
+/// reads and waits on it, never on `std::time::Instant`, so a UI test's
+/// `advance` (`aio::testing::TestUi`) moves all of it at once:
+/// a countdown read on the wall clock but ticked by `sleep` races the
+/// machine's load. `Instant::now()` and `later - earlier` work on every target.
 #[cfg(feature = "kit")]
-pub(crate) mod clock {
-    pub(crate) async fn sleep(d: std::time::Duration) {
+pub mod clock {
+    pub async fn sleep(d: std::time::Duration) {
         #[cfg(target_arch = "wasm32")]
         crate::web::sleep(u32::try_from(d.as_millis()).unwrap_or(u32::MAX)).await;
         #[cfg(not(target_arch = "wasm32"))]
@@ -89,16 +93,16 @@ pub(crate) mod clock {
 
     /// Tokio's: a UI test's `advance` moves it.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) use tokio::time::Instant;
+    pub use tokio::time::Instant;
 
     /// A moment, on the page's clock: a browser has no `std` one.
     #[cfg(target_arch = "wasm32")]
     #[derive(Clone, Copy)]
-    pub(crate) struct Instant(f64);
+    pub struct Instant(f64);
 
     #[cfg(target_arch = "wasm32")]
     impl Instant {
-        pub(crate) fn now() -> Self {
+        pub fn now() -> Self {
             Self(js_sys::Date::now())
         }
     }

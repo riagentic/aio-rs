@@ -32,6 +32,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
+/// Does `program` run what it is given as another user (root)? (pure)
+fn raises(program: &OsStr) -> bool {
+    let stem = std::path::Path::new(program).file_stem().and_then(OsStr::to_str).map(str::to_ascii_lowercase);
+    stem.is_some_and(|s| ["pkexec", "sudo", "doas", "su"].contains(&s.as_str()))
+}
+
 /// Which of the child's outputs a line came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stream {
@@ -128,7 +134,14 @@ impl Command {
     }
 
     /// Start it. Inside the app's runtime (an effect, a method's async part).
+    /// In the test world ([`crate::paths::in_sandbox`]) a program that
+    /// raises privileges (`pkexec`, `sudo`, `doas`, `su`) is refused: a
+    /// test's click must not change the machine as root.
     pub fn spawn(self) -> io::Result<Child> {
+        if crate::paths::in_sandbox() && raises(&self.program) {
+            let why = "a test may not raise privileges: guard the call with aio::paths::in_sandbox() and simulate it";
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{}: {why}", self.name())));
+        }
         let mut cmd = tokio::process::Command::new(&self.program);
         crate::lifecycle::scrub(cmd.as_std_mut(), false);
         cmd.args(&self.args)
@@ -537,6 +550,24 @@ mod tests {
         }
         s.finish(&mut |l| got.push(l.to_string()));
         got
+    }
+
+    #[test]
+    fn a_program_that_raises_privileges_is_known_by_its_name() {
+        for p in ["pkexec", "/usr/bin/sudo", "doas", "su", "sudo.exe", "SUDO"] {
+            assert!(raises(OsStr::new(p)), "{p}");
+        }
+        for p in ["ffmpeg", "sudoku", "/usr/bin/surf", "pkexec-helper.sh"] {
+            assert!(!raises(OsStr::new(p)), "{p}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_test_world_refuses_a_program_that_raises_privileges() {
+        let _world = crate::paths::sandbox().unwrap();
+        let e = Command::new("pkexec").arg("true").spawn().err().expect("refused");
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+        assert!(e.to_string().starts_with("pkexec: a test may not raise privileges"), "{e}");
     }
 
     #[test]

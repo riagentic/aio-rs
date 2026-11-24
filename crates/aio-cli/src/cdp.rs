@@ -450,6 +450,18 @@ pub(crate) mod tests {
         }
     }
 
+    /// `aio::testing::TestBrowser` draws WebGL (on the CPU), as `TestUi` does.
+    #[cfg(unix)]
+    #[test]
+    fn a_test_browser_gets_webgl() {
+        let Some(page) = Chromium::open("<canvas id=c></canvas>") else { return };
+        aio::rt().block_on(async {
+            let mut s = page.session().await;
+            let gl = s.eval("[!!document.getElementById('c').getContext('webgl2'), !!document.createElement('canvas').getContext('webgl')]").await;
+            assert_eq!(gl, Ok(json!([true, true])));
+        });
+    }
+
     #[test]
     fn a_launch_with_cdp_keeps_its_port_for_the_verbs_that_reach_the_window() {
         let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();

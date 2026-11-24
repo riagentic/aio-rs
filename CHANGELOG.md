@@ -79,6 +79,17 @@ version may break things.
 - `ax lint` warns on a DOM property no attribute sets and air doesn't set
   (`src_object`, `text_content`, `inner_text`, `scroll_top`,
   `scroll_left`): written as an attribute, it did nothing.
+- `aio::testing::exclusive()`: the test world to one test at a time
+  (`let _world = aio::testing::exclusive();`), for tests that share a
+  world of the process (a demo world, a `static`), instead of a hand-made
+  `static ONE: Mutex` in every test file. Dropped at once (`let _ = …`)
+  it doesn't compile.
+- `aio::ui::clock::{Instant, sleep}`, the views' clock, is public: a view's
+  own countdown or debounce on it moves with `TestUi::advance`, where one
+  read on `std::time::Instant` raced the machine under a loaded suite
+  ([Waiting](docs/testing/ui.md#waiting)).
+- `ax lint` (`render`): a literal `data-t` handle on two elements that
+  show together (a branch's arms aside) is a warning.
 
 ### Changed
 
@@ -102,6 +113,15 @@ version may break things.
 - `Browser` brings its own look (its guest fills its box) without the
   kit's sheet: a page without it no longer warns that `aio-browser` is
   unstyled. Any rule of the app's wins over it, as before.
+- **Breaking: `TestUi` refuses a `data-t` handle two showing elements
+  share**, naming both (`2 elements have data-t="fleet" (<button> "Fleet"
+  in data-t="side", <table> "gpu 1")`), where it read the first: name one
+  inside another (`side/fleet`) or give each its own. A hidden one doesn't
+  count while one shows; `count`, `present` and `handles` are as before.
+- In the test world, `aio::process::Command` refuses a program that
+  raises privileges (`pkexec`, `sudo`, `doas`, `su`): a test's click
+  never runs a root helper. The testing guide names
+  `aio::paths::in_sandbox()` as the guard for processes and host writes.
 - **Breaking: `aio::update` fails with `UpdateError`**, not `String`
   (`#[non_exhaustive]`: `BadSignature`, `UntrustedKey`, `Refused`,
   `Http { status, .. }`, `NoPatch`, `KeyFormat`, `Io`, …), each one's text
@@ -186,6 +206,22 @@ version may break things.
   a call's change, then its reply, and in between the copy replayed the
   call on a state that already had it (a list showed 1, 2, 1). The change
   that names the call now ends its prediction.
+- `aio::testing::TestBrowser` (a web build's tests) had no WebGL: it
+  started Chromium with `--disable-gpu`; it draws WebGL on the CPU
+  (SwiftShader) now, as `TestUi`'s window does.
+- `TestUi` had no WebGL on macOS: the runtime's SwiftShader makes no
+  context there; a Mac's test window draws WebGL with ANGLE's Metal.
+- A `TestUi` wait that times out (`until…`, `expect_cell`) and `the
+  views and their page never settle` name the components still rendering
+  (`still rendering: Gallery/Thumb`), such as one that remounts on its own
+  success.
+- A view that remounts on its own task's end or its own `onmounted`, on
+  and on, hung its window (and a `TestUi` test) inside air: air now fails
+  as it does for an effect loop, naming the components (`air: tasks still
+  making each other ready after 10000 rounds … still running: Thumb`,
+  `air: views still drawn again after 1000 rounds … still mounting: Thumb`).
+- `ax agent`'s guide and the migration guide named Dioxus's `.peek()`;
+  air's is `.read_untracked()` / `.get_untracked()` (no trait to import).
 - A memo of a memo could still glitch: an effect older than the outer
   memo, reading it and a signal the inner one follows, ran once with the
   outer memo's old value and once more with the new one. A read now

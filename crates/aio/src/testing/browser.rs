@@ -209,7 +209,9 @@ fn isolated(os: &str) -> Vec<(&'static str, Option<&'static str>)> {
 /// (pure). Windows: `--guest`, or each launch of Edge on a fresh profile
 /// tries a logon as the Windows user that fails, and ten lock the account;
 /// `--do-not-de-elevate`, or from an elevated shell it relaunches itself
-/// and the process started exits at once (both measured in aio).
+/// and the process started exits at once (both measured in aio). WebGL is
+/// drawn on the CPU by SwiftShader, as in `TestUi`'s window: a canvas
+/// app's 3D runs in its web build's tests too.
 fn flags(profile: &Path, os: &str) -> Vec<String> {
     let own: &[&str] = match os {
         "windows" => &["--guest", "--do-not-de-elevate"],
@@ -219,7 +221,8 @@ fn flags(profile: &Path, os: &str) -> Vec<String> {
     let all = [
         "--headless=new",
         "--no-sandbox",
-        "--disable-gpu",
+        "--use-angle=swiftshader",
+        "--enable-unsafe-swiftshader",
         "--disable-dev-shm-usage",
         "--no-first-run",
         "--no-default-browser-check",

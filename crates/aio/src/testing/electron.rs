@@ -87,17 +87,20 @@ fn runtime() -> PathBuf {
 /// window otherwise draws about once a second; measured with 30 pages at
 /// once: 2.6 ms to a frame), at 1 CSS pixel to a device pixel on every
 /// host (a Retina Mac's window is otherwise 2×: shots, wheel steps and
-/// zoom differ), and on Linux no display at all.
+/// zoom differ), and on Linux no display at all. On macOS WebGL is
+/// ANGLE's Metal, which every Mac has: the runtime's SwiftShader makes no
+/// WebGL context there ("BindToCurrentSequence failed").
 fn flags(os: &str) -> Vec<&'static str> {
     let mut f = vec![
         "--no-sandbox",
-        "--use-angle=swiftshader",
-        "--enable-unsafe-swiftshader",
         "--disable-gpu-compositing",
         "--disable-gpu-vsync",
         "--disable-frame-rate-limit",
         "--force-device-scale-factor=1",
     ];
+    if os != "macos" {
+        f.extend(["--use-angle=swiftshader", "--enable-unsafe-swiftshader"]);
+    }
     if os == "linux" {
         f.push("--ozone-platform=headless");
     }
@@ -450,8 +453,11 @@ mod tests {
         assert_eq!(flags("linux").last(), Some(&"--ozone-platform=headless"));
         assert!(!flags("macos").contains(&"--ozone-platform=headless"));
         assert!(flags("windows").contains(&"--disable-frame-rate-limit"));
-        let f = flags("macos");
-        assert!(f.contains(&"--use-angle=swiftshader") && f.contains(&"--disable-gpu-compositing") && !f.contains(&"--disable-gpu"));
-        assert!(f.contains(&"--force-device-scale-factor=1"), "a HiDPI host's test window is 1x too");
+        for os in ["linux", "windows", "macos"] {
+            let f = flags(os);
+            assert!(f.contains(&"--disable-gpu-compositing") && !f.contains(&"--disable-gpu"), "{os}: WebGL on");
+            assert_eq!(f.contains(&"--use-angle=swiftshader"), os != "macos", "{os}: SwiftShader, but Metal on a Mac");
+            assert!(f.contains(&"--force-device-scale-factor=1"), "a HiDPI host's test window is 1x too");
+        }
     }
 }
