@@ -158,6 +158,9 @@ version may break things.
 
 ### Fixed
 
+- A `Breadcrumb` crumb with an `href` and no `onclick` was a dead link:
+  it always had a click handler (one that did nothing), so the page kept
+  the click. It has none now and the page follows it.
 - A link in a box that hears clicks never followed: the page kept every
   click on a link that any handler on its way up heard, so under
   `GlobalKeys` (its root hears clicks) no `a { href }` worked, the kit's
