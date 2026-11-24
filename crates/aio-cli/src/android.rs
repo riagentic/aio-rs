@@ -1286,8 +1286,8 @@ mod tests {
         assert!(draw.contains("if (!painted && splash == null) return false;"), "{draw}");
         assert!(create.contains("}, SPLASH_CAP_MS);"));
         assert!(method(java, "public void onMessage(").contains("if (PAINTED.equals(m.getData())) painted();"));
-        let natives = include_str!("../../aio-shell/src/android.rs");
-        assert!(natives.contains("port.postMessage('aio-painted')"), "the page says it");
+        let bridge = include_str!("../../aio-shell/src/lib.rs");
+        assert!(bridge.contains("port.postMessage('aio-painted')"), "the page says it");
         // base64 is 4n long: a frame is never the word.
         assert_ne!("aio-painted".len() % 4, 0);
     }
