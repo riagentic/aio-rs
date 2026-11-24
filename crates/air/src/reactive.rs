@@ -351,6 +351,10 @@ fn reset(k: Key) {
     owned.into_iter().rev().for_each(dispose);
 }
 
+// The entries a read looked at to tell a repeat (tests: it stays linear).
+#[cfg(test)]
+thread_local!(static LOOKED: Cell<u64> = const { Cell::new(0) });
+
 fn track(s: Key) {
     rt(|rt| {
         let Some(e) = rt.observer else {
@@ -367,6 +371,8 @@ fn track(s: Key) {
             _ = rt.node_mut(e).map(|n| n.deps.push(s));
             return;
         };
+        #[cfg(test)]
+        LOOKED.set(LOOKED.get() + 1);
         if sig.subs.last() == Some(&(e, runs)) {
             return;
         }
@@ -2055,6 +2061,28 @@ mod tests {
         assert_eq!(runs.get(), 102, "row 0 off, row 1 on");
         o.dispose();
         assert_eq!(live(), Live::default());
+    }
+
+    /// The entries looked at to tell repeat reads in one re-run of a hole that reads `n` signals.
+    fn looked_in_a_rerun(n: usize) -> u64 {
+        let (sigs, o) = scope(|| {
+            let sigs: Vec<Signal<u64>> = (0..n).map(|i| Signal::new(i as u64)).collect();
+            let s = sigs.clone();
+            render(move || _ = s.iter().map(|s| s.get()).sum::<u64>());
+            sigs
+        });
+        LOOKED.set(0);
+        sigs[0].set(u64::MAX / 2);
+        let looked = LOOKED.get();
+        o.dispose();
+        looked
+    }
+
+    #[test]
+    fn a_hole_reading_many_signals_looks_at_each_read_once() {
+        // A look through the reader's reads made it n^2 / 2 (2000: 2 million).
+        assert_eq!(looked_in_a_rerun(2000), 2000);
+        assert_eq!(looked_in_a_rerun(16_000), 16_000);
     }
 
     #[test]
