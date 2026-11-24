@@ -41,6 +41,14 @@ version may break things.
   out or a running `#[mode(first)]` call is joined: a caller the state now
   refuses (an `allow` rule) no longer gets the answer it was let in for.
 
+- A native saved copy (`Remote::connect_saved`, a client's
+  `data/copy.json`) keeps who it is: opened as another user, or linked
+  to a server that now says another user (a relink to another account),
+  it was shown offline and its waiting calls were sent as the new user.
+  Now it is never shown and its calls are never sent: with calls waiting
+  it is kept aside (`copy.other-user-<ms>`) and said (`sync:other-user`),
+  as a page's copy already was. A copy saved before is no one's.
+
 ### Added
 
 - `GuestEvent::LoadFailed { url, code, description }`: a `Browser`'s guest
