@@ -319,9 +319,9 @@ pub(crate) fn sweep(dir: &std::path::Path) {
 
 /// Write a new private file (mode 0600), whole, on disk when this
 /// returns; an existing one is an error (`AlreadyExists`), also between
-/// writers racing. Written to a temp file and linked in (a link never
-/// replaces a file), so no reader or crash sees it part-written; where
-/// there are no hard links (Android's app sandbox) it is made in place.
+/// writers racing. Written to a temp file and put in place whole, by a
+/// hard link or else a rename that never replaces a file, so no reader or
+/// crash sees it part-written; only where neither works is it made in place.
 pub fn write_private(p: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
     let whole = |at: &std::path::Path| {
         let mut f = create(at, true)?;
@@ -330,13 +330,57 @@ pub fn write_private(p: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
     };
     let name = p.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
     let tmp = p.with_file_name(format!(".{}.{}.tmp", name.to_string_lossy(), crate::uuid_v4().simple()));
-    let made = whole(&tmp).and_then(|()| match std::fs::hard_link(&tmp, p) {
-        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => whole(p),
-        r => r,
-    });
+    let made = whole(&tmp).and_then(|()| if link_new(&tmp, p)? { Ok(()) } else { whole(p) });
     _ = std::fs::remove_file(&tmp);
     made?;
     sync_dir(parent(p))
+}
+
+/// The whole file `tmp` put at `at` in one step, never over a file there
+/// (`AlreadyExists`, also between writers racing): a hard link, else a
+/// rename that refuses to replace one (Linux's and Android's
+/// `RENAME_NOREPLACE`: an Android app's sandbox has no hard links).
+/// `false`: neither works here (the caller writes in place).
+pub(crate) fn link_new(tmp: &std::path::Path, at: &std::path::Path) -> io::Result<bool> {
+    match std::fs::hard_link(tmp, at) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => rename_new(tmp, at),
+        r => r.map(|()| true),
+    }
+}
+
+/// `from` renamed to `to` unless `to` exists (`AlreadyExists`); `false`:
+/// the kernel or the file system can't.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn rename_new(from: &std::path::Path, to: &std::path::Path) -> io::Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &std::path::Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(io::Error::other);
+    let (from, to) = (c(from)?, c(to)?);
+    // The system call, not libc's wrapper: bionic has one from API 30, and
+    // aio's minSdk is 29; Android's app seccomp filter allows it since 8.
+    #[allow(clippy::unnecessary_cast)] // a c_uint on Linux, a c_int on Android
+    // SAFETY: two NUL-terminated paths that outlive the call.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE as libc::c_uint,
+        )
+    };
+    match r {
+        0 => Ok(true),
+        _ => match io::Error::last_os_error() {
+            e if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
+            _ => Ok(false),
+        },
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn rename_new(_: &std::path::Path, _: &std::path::Path) -> io::Result<bool> {
+    Ok(false)
 }
 
 /// Replace `p` with `bytes` so that a crash leaves the old file or the new
@@ -1005,6 +1049,22 @@ impl AppDirs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Android's app sandbox has no hard links: there a new file is put in
+    /// place by a rename that never replaces one, not written in place.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_rename_that_never_replaces_puts_a_new_file_whole() {
+        let d = tempfile::tempdir().unwrap();
+        let (tmp, at) = (d.path().join(".t.tmp"), d.path().join("sync.token"));
+        std::fs::write(&tmp, "mine").unwrap();
+        assert!(rename_new(&tmp, &at).unwrap());
+        assert_eq!(std::fs::read_to_string(&at).unwrap(), "mine");
+        assert!(!tmp.exists());
+        std::fs::write(&tmp, "theirs").unwrap();
+        assert_eq!(rename_new(&tmp, &at).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&at).unwrap(), "mine", "the first one stays");
+    }
 
     #[test]
     fn a_start_sweeps_the_temp_files_a_crash_left_in_the_data_folder() {
