@@ -318,17 +318,20 @@ pub fn splash_files(
 }
 
 /// The manifest's lines for `cfg`: the camera's permission (its hardware
-/// optional: the app still installs where there is none), the launch mode
-/// and one VIEW filter per scheme, the app's (`[app] schemes`) and
-/// Android's own (a link reaches the copy that is open), and the theme that
-/// fixes light or dark (`splashed`: the splash's).
-fn manifest_parts(cfg: &AndroidBuild, app: &[String], splashed: bool) -> [(&'static str, String); 4] {
+/// optional: the app still installs where there is none), the fingerprint
+/// or face's (`aio::secrets::set_biometric`), the launch mode and one VIEW
+/// filter per scheme, the app's (`[app] schemes`) and Android's own (a link
+/// reaches the copy that is open), and the theme that fixes light or dark
+/// (`splashed`: the splash's).
+fn manifest_parts(cfg: &AndroidBuild, app: &[String], splashed: bool) -> [(&'static str, String); 5] {
     let camera = if cfg.camera {
         "\n  <uses-permission android:name=\"android.permission.CAMERA\" />\n  \
          <uses-feature android:name=\"android.hardware.camera\" android:required=\"false\" />"
     } else {
         ""
     };
+    let biometric =
+        if cfg.biometric { "\n  <uses-permission android:name=\"android.permission.USE_BIOMETRIC\" />" } else { "" };
     let mut schemes: Vec<&String> = app.iter().chain(&cfg.schemes).collect();
     schemes.sort();
     schemes.dedup();
@@ -345,7 +348,13 @@ fn manifest_parts(cfg: &AndroidBuild, app: &[String], splashed: bool) -> [(&'sta
         })
         .collect();
     let theme = if splashed { SPLASH_THEME } else { system_theme(cfg.color_scheme) };
-    [("{{CAMERA}}", camera.into()), ("{{LAUNCH_MODE}}", mode.into()), ("{{LINKS}}", links), ("{{THEME}}", theme.into())]
+    [
+        ("{{CAMERA}}", camera.into()),
+        ("{{BIOMETRIC}}", biometric.into()),
+        ("{{LAUNCH_MODE}}", mode.into()),
+        ("{{LINKS}}", links),
+        ("{{THEME}}", theme.into()),
+    ]
 }
 
 /// The template, filled in for `app` and its `[build.android]` (`cfg`), its
@@ -1202,7 +1211,7 @@ mod tests {
             String::from_utf8(m).unwrap()
         };
         let none = manifest(&AndroidBuild::default());
-        for absent in ["action.VIEW", "launchMode", "CAMERA", "uses-feature", "{{"] {
+        for absent in ["action.VIEW", "launchMode", "CAMERA", "BIOMETRIC", "uses-feature", "{{"] {
             assert!(!none.contains(absent), "{absent} in {none}");
         }
         assert!(
@@ -1212,6 +1221,7 @@ mod tests {
         let cfg = AndroidBuild {
             schemes: vec!["myapp".into(), "other".into()],
             camera: true,
+            biometric: true,
             color_scheme: ColorScheme::Dark,
             ..Default::default()
         };
@@ -1221,6 +1231,7 @@ mod tests {
         assert_eq!(all.matches("android.intent.category.BROWSABLE").count(), 2, "a link in a browser opens it");
         assert!(all.contains("android:launchMode=\"singleTask\""), "a link reaches the copy that is open");
         assert!(all.contains("<uses-permission android:name=\"android.permission.CAMERA\" />"));
+        assert!(all.contains("<uses-permission android:name=\"android.permission.USE_BIOMETRIC\" />"));
         assert!(
             all.contains("android:name=\"android.hardware.camera\" android:required=\"false\""),
             "it still installs where there is no camera"
