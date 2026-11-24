@@ -630,14 +630,11 @@ impl<T: Cell> Handle<T> {
         }
     }
 
-    /// A problem of this cell: its state, read without waiting, goes with
-    /// the diagnostic (aio's `stateSnapshot`).
+    /// A problem of this cell: its name and last shown state go with the
+    /// diagnostic (aio's `stateSnapshot`). `shown` is only ever held for a
+    /// copy, never around other code: the wait is brief and can't deadlock.
     fn problem(&self, kind: &str, msg: &str) {
-        let st = self.inner.shown.try_lock().map(|s| s.1.clone());
-        match st {
-            Ok(st) => crate::report::problem_in(kind, msg, &*st),
-            Err(_) => _ = crate::report::problem(kind, msg),
-        }
+        crate::report::problem_in(kind, msg, &*self.state());
     }
 
     /// Is the cell enabled (taking calls, firing schedules)?
@@ -1516,6 +1513,42 @@ pub(crate) fn snapshot_state<T: Cell>(snap: &Value, force: bool) -> Result<Value
 
 #[cfg(test)]
 mod tests {
+    use crate::prelude::*;
+
+    #[cell]
+    pub struct Probe {
+        note: String,
+    }
+
+    #[methods]
+    impl Probe {
+        pub fn set(&mut self, note: String) {
+            self.note = note;
+        }
+    }
+
+    #[test]
+    fn a_problem_names_its_cell_and_state_while_another_thread_shows_one() {
+        let h = Handle::<Probe>::memory();
+        h.set("seen".into()).unwrap();
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let to = heard.clone();
+        let _sub = crate::report::subscribe(move |d| {
+            if d.message == "probe: shown while busy" {
+                to.lock().unwrap().push((d.cell.clone(), d.state.clone()));
+            }
+        });
+        // Another thread mid-commit holds what the cell shows, briefly.
+        let shown = super::lock(&h.inner.shown);
+        let h2 = h.clone();
+        let told = std::thread::spawn(move || h2.problem("reaction", "probe: shown while busy"));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(shown);
+        told.join().unwrap();
+        let state = serde_json::json!({ "note": "seen" });
+        assert_eq!(*heard.lock().unwrap(), [(Some("probe".to_string()), Some(state))]);
+    }
+
     #[test]
     fn the_scheduler_wakes_at_least_every_minute() {
         assert_eq!(super::wait_ms(None, 0), 60_000);

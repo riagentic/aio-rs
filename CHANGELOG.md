@@ -158,6 +158,11 @@ version may break things.
 
 ### Fixed
 
+- A cell's diagnostic (a refused reaction, a timed-out effect, a refused
+  `#[on_stop]`, a cell disabled after failures) sometimes came without
+  its cell's name and state: when another thread was showing a commit of
+  that cell at that moment, the state wasn't read. It now always is.
+
 - Each published aio-rs crate carries its MIT licence text (`LICENSE`),
   so an app's credits (`aio::credits!()`) and the crates' packages
   include it, not only the licence's name.
