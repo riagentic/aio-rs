@@ -119,6 +119,7 @@ counterpart of.
 - [Migrating from aio to aio-rs](migration/README.md): construct-by-construct tables, a worked example, a checklist.
 - [aio app data](migration/data.md): the `state.db` format both read and write.
 - [aio wire formats](migration/wire.md): protocol v3, pairing, discovery, peers.
+- [aio-rs 0.4 to 0.5](migration/0.4-to-0.5.md): every breaking change, before and after.
 
 ## 5. Help
 

@@ -28,6 +28,7 @@ and is many times slower than the aio app it replaces.
 8. [0.1 → 0.2: Dioxus is gone](#8-01--02-dioxus-is-gone)
 9. [0.2 → 0.3](#9-02--03)
 10. [0.3 → 0.4](#10-03--04)
+11. [0.4 → 0.5](0.4-to-0.5.md): its own page
 
 ## 1. Project and boot
 
