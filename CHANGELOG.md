@@ -232,8 +232,9 @@ version may break things.
 
 - `ax lint` checks the closures a cell method runs (`.map(|_|
   rand::random())`, one it keeps and calls) for the clock, randomness and
-  I/O: it skipped every closure. A closure handed to `Effect::new` and an
-  `async` block are still the effect's.
+  I/O: it skipped every closure. A closure handed to `Effect::new` (there,
+  or kept in a name the method only hands to it) and an `async` block are
+  still the effect's.
 - `ax dev`: an app that exits 0 on its own (a command-line tool done)
   "finished; a save runs it again", where it said "waiting: save a fix".
 - `ax dev`'s `[aio] boot: … settings in the log` line is said once the

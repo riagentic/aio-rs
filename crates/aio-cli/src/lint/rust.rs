@@ -558,9 +558,7 @@ impl<'ast> Visit<'ast> for Checks<'_> {
             let cell = i.self_ty.to_token_stream().to_string();
             for item in &i.items {
                 let syn::ImplItem::Fn(m) = item else { continue };
-                let mut p = Impure::default();
-                p.visit_block(&m.block);
-                for (path, what, line) in p.found {
+                for (path, what, line) in Impure::of(&m.block) {
                     self.push(
                         Severity::Error,
                         "cells",
@@ -715,22 +713,74 @@ pub fn impure(segs: &[String]) -> Option<&'static str> {
     })
 }
 
+/// Whether `e` is `Effect::new(..)`.
+fn effect_new(e: &syn::ExprCall) -> bool {
+    matches!(&*e.func, Expr::Path(p)
+        if p.path.segments.iter().rev().take(2).map(|s| s.ident.to_string()).eq(["new", "Effect"]))
+}
+
+/// The plain names a method uses, each with how many of its uses are
+/// arguments of `Effect::new` and how many in all.
+#[derive(Default)]
+struct Uses(BTreeMap<String, (usize, usize)>);
+
+impl<'ast> Visit<'ast> for Uses {
+    fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
+        if effect_new(e) {
+            for a in &e.args {
+                if let Expr::Path(p) = a
+                    && let Some(i) = p.path.get_ident()
+                {
+                    self.0.entry(i.to_string()).or_default().0 += 1;
+                }
+            }
+        }
+        visit::visit_expr_call(self, e);
+    }
+    fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+        if let Some(i) = p.path.get_ident() {
+            self.0.entry(i.to_string()).or_default().1 += 1;
+        }
+    }
+}
+
 /// Paths in a method body that aren't pure, the closures it runs (an
 /// iterator's, one it keeps and calls) among them. A closure handed to
-/// `Effect::new` and an async block are left out: effects, run after the commit.
+/// `Effect::new`, there or kept in a name only ever handed to it, and an
+/// async block are left out: effects, run after the commit.
 #[derive(Default)]
 struct Impure {
     found: Vec<(String, &'static str, usize)>,
+    /// Names whose every use is an argument of `Effect::new`.
+    effects: Vec<String>,
+}
+
+impl Impure {
+    /// The paths in `body` that aren't pure.
+    fn of(body: &Block) -> Vec<(String, &'static str, usize)> {
+        let mut uses = Uses::default();
+        uses.visit_block(body);
+        let effects = uses.0.into_iter().filter(|(_, (to, all))| *to > 0 && to == all).map(|(n, _)| n).collect();
+        let mut p = Impure { found: vec![], effects };
+        p.visit_block(body);
+        p.found
+    }
 }
 
 impl<'ast> Visit<'ast> for Impure {
     fn visit_expr_async(&mut self, _: &'ast syn::ExprAsync) {}
     fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
-        let effect = matches!(&*e.func, Expr::Path(p)
-            if p.path.segments.iter().rev().take(2).map(|s| s.ident.to_string()).eq(["new", "Effect"]));
+        let effect = effect_new(e);
         self.visit_expr(&e.func);
         for a in e.args.iter().filter(|a| !(effect && matches!(a, Expr::Closure(_)))) {
             self.visit_expr(a);
+        }
+    }
+    fn visit_local(&mut self, l: &'ast syn::Local) {
+        let kept = matches!(&l.pat, syn::Pat::Ident(p) if self.effects.contains(&p.ident.to_string()));
+        match &l.init {
+            Some(init) if kept && matches!(*init.expr, Expr::Closure(_)) => {}
+            _ => visit::visit_local(self, l),
         }
     }
     fn visit_item(&mut self, _: &'ast Item) {}
