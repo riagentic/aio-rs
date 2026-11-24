@@ -1639,9 +1639,31 @@ async fn serve_static(roots: &[Root], asked: &HeaderMap, path: &str) -> Reply {
     }
 }
 
+/// `name` (`page.js`) as the file of `bytes` is named for good: the first
+/// 8 bytes of their SHA-256 before its extension (`page.0123456789abcdef.js`).
+/// aio's server lets a browser keep such a file a year without asking
+/// again: a page that names it loads it from the cache at once (pure).
+pub fn content_name(name: &str, bytes: &[u8]) -> String {
+    let hex: String = crate::sha256::Sha256::digest(bytes)[..8].iter().map(|b| format!("{b:02x}")).collect();
+    match name.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem}.{hex}.{ext}"),
+        None => format!("{name}.{hex}"),
+    }
+}
+
+/// Whether `name` is [`content_name`]'s for `bytes` (pure).
+fn named_by_content(name: &str, bytes: &[u8]) -> bool {
+    let mut parts = name.rsplitn(3, '.');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(ext), Some(hex), Some(stem)) if hex.len() == 16 => content_name(&format!("{stem}.{ext}"), bytes) == name,
+        _ => false,
+    }
+}
+
 /// A static file's answer: a small one is read whole (typed by its bytes,
 /// tagged by its content, so it can be compressed); a big one is streamed
-/// with its mtime+size tag. Both take a Range.
+/// with its mtime+size tag. Both take a Range. One named by its content
+/// ([`content_name`]) is kept a year, never asked for again.
 fn static_reply(asked: &HeaderMap, f: &file::Opened, name: &str) -> std::io::Result<Reply> {
     let whole = file::Window { file: f.file.clone(), start: 0, len: f.size, gzip: false };
     let all = (f.size <= BUFFER).then(|| whole.read()).transpose()?;
@@ -1653,6 +1675,8 @@ fn static_reply(asked: &HeaderMap, f: &file::Opened, name: &str) -> std::io::Res
     // The shell must pick up a new build at once.
     if name == "index.html" {
         headers.push(("cache-control".into(), "no-cache".into()));
+    } else if all.as_ref().is_some_and(|b| named_by_content(name, b)) {
+        headers.push(("cache-control".into(), "public, max-age=31536000, immutable".into()));
     }
     let mut r = file::send(asked, f, headers);
     if let Some(b) = all
@@ -1701,6 +1725,27 @@ pub(crate) async fn request(
 
 #[cfg(test)]
 mod tests {
+    /// A file named by its content is kept for good; the name of other
+    /// bytes, or no hash in it, is not.
+    #[test]
+    fn a_file_named_by_its_content_is_immutable() {
+        let name = super::content_name("page.js", b"x()");
+        assert!(name.starts_with("page.") && name.ends_with(".js") && name.len() == "page..js".len() + 16, "{name}");
+        assert_eq!(super::content_name("LICENSE", b"x"), format!("LICENSE.{}", &super::content_name("a.b", b"x")[2..18]));
+        assert!(super::named_by_content(&name, b"x()"));
+        assert!(!super::named_by_content(&name, b"y()") && !super::named_by_content("page.js", b"x()"));
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(&name), "x()").unwrap();
+        std::fs::write(d.path().join("page.js"), "x()").unwrap();
+        let cache = |f: &str| {
+            let opened = super::file::open(&d.path().join(f)).unwrap().unwrap();
+            let r = super::static_reply(&Default::default(), &opened, f).unwrap();
+            r.headers.iter().find(|(k, _)| k == "cache-control").map(|(_, v)| v.clone())
+        };
+        assert_eq!(cache(&name).as_deref(), Some("public, max-age=31536000, immutable"));
+        assert_eq!(cache("page.js"), None, "asked again: a new build may change it");
+    }
+
     use super::*;
 
     /// A server that answers on and on is read up to the cap, at once.

@@ -72,6 +72,12 @@ version may break things.
 
 ### Added
 
+- `aio::http::content_name(name, bytes)`: a file's name by its content
+  (`page.<16 hex>.js`). The web build names `page.js`, `start.js` and the
+  splash so, and the shell serves a file whose name is its content's with
+  `Cache-Control: public, max-age=31536000, immutable`: a navigation no
+  longer revalidates them (a 304 each), and a streamed page's parts
+  don't wait on `page.js`'s round trip to be parsed.
 - `aio::config::Mode::has_window()`: whether an app of that mode opens a
   window (a server or a CLI doesn't), the one rule `ax dev`, `ax start`,
   `ax build` (`--smoke`, a bundled runtime) and the updater follow; each

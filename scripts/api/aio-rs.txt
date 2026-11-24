@@ -1085,6 +1085,7 @@ aio::http::Viewer.linked: bool
 aio::http::Viewer.path: String
 aio::http::Viewer.role: Option<String>
 aio::http::Viewer.user: Option<String>
+aio::http::content_name: fn content_name(name: &str, bytes: &[u8]) -> String
 aio::http::encoding::Encoding::Br
 aio::http::encoding::Encoding::Deflate
 aio::http::encoding::Encoding::Gzip
