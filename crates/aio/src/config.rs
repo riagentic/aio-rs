@@ -442,6 +442,14 @@ mod tests {
         assert_eq!(c.data.durability, Durability::Full);
         assert!(Config::parse("[app]\nid = \"t\"\n[data]\ndurability = \"max\"").is_err());
         assert!(Config::parse("[app]\nid = \"t\"\nmode = \"server\"").unwrap_err().contains("[server] listen"));
+        // An address no socket takes fails the build, not the boot (or a bind with the OS's words).
+        let at = |l: &str| Config::parse(&format!("[app]\nid = \"t\"\nmode = \"server\"\n[server]\nlisten = \"{l}\""));
+        for ok in ["127.0.0.1:7420", "0.0.0.0:0", "[::1]:8443", "localhost:65535"] {
+            assert!(at(ok).is_ok(), "{ok}");
+        }
+        for bad in ["nonsense", "127.0.0.1:99999", "127.0.0.1:", ":7420", "127.0.0.1:http", ""] {
+            assert!(at(bad).unwrap_err().contains("[server] listen"), "{bad}");
+        }
     }
 
     #[test]

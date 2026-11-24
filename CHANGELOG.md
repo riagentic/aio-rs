@@ -439,6 +439,9 @@ version may break things.
 - `ax release` of an app whose `aio.toml` doesn't trust its signing key
   (a new app has no `[updates]` yet) said so and no more: it names the
   line to add, `keys = ["ed25519:…"]` with the key's own value.
+- `[server] listen` was taken as any text: `"127.0.0.1:99999"` or
+  `"nonsense:http"` built, and the app failed at boot with the OS's bind
+  error. It is `host:port`, the port 0 to 65535, or the build says so.
 
 ## [0.4.2] - 2026-11-11
 

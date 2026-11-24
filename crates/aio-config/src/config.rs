@@ -1834,6 +1834,13 @@ impl Config {
             // A client may get its server from pairing instead (`ax pair`).
             Mode::Standalone | Mode::Cli | Mode::Client => {}
         }
+        if let Some(l) = &c.server.listen
+            && !l.rsplit_once(':').is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
+        {
+            return Err(format!(
+                "aio.toml: [server] listen {l:?} is host:port, the port 0 to 65535 (\"127.0.0.1:7420\", 0: a free one)"
+            ));
+        }
         if c.app.ui == Shown::Browser && c.app.mode != Mode::ClientServer {
             return Err(format!(
                 "aio.toml: [app] ui = \"browser\" needs mode \"client-server\" (its server serves the page), not {:?}",
