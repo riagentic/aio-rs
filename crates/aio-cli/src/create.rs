@@ -676,7 +676,10 @@ network = []            # hosts aio may reach besides this machine: "api.example
          [toolchain]\nchannel = \"{}\"\n",
         crate::setup::toolchain()
     );
-    let ignore = "/target\n/.data\n/dist\n\n# Secrets and release keys: never committed\n.env\n*.key\n*.p12\n*.jks\n*.keystore\n";
+    let ignore = format!(
+        "/target\n/.data\n/dist\n# ax shot's pictures, named {id}-<time>.png where it runs\n/{id}-*.png\n\n\
+         # Secrets and release keys: never committed\n.env\n*.key\n*.p12\n*.jks\n*.keystore\n"
+    );
     let attributes = "# LF line endings in every checkout, whatever git's core.autocrlf says:\n\
                       # a Windows clone holds the same bytes as a Linux one.\n* text=auto eol=lf\n";
     let style = ui.then(|| ("assets/style.css".into(), STYLE_CSS.into()));
@@ -690,7 +693,7 @@ network = []            # hosts aio may reach besides this machine: "api.example
         ("app/src/main.rs".into(), main.into()),
         (".cargo/config.toml".into(), CARGO_CONFIG.into()),
         ("rust-toolchain.toml".into(), toolchain),
-        (".gitignore".into(), ignore.into()),
+        (".gitignore".into(), ignore),
         (".gitattributes".into(), attributes.into()),
         ("README.md".into(), readme(n, ui)),
         ("AGENTS.md".into(), agents(n, ui)),
@@ -965,6 +968,10 @@ mod tests {
             assert!(
                 get(".gitignore").contains("/.data") && get(".gitignore").contains("\n.env\n*.key\n*.p12\n*.jks\n")
             );
+            // A shot taken in the app's folder leaves the tree clean: a build after it is a release.
+            let shot = crate::shot::default_file("my-tool").display().to_string();
+            assert!(shot.starts_with("my-tool-") && shot.ends_with(".png"), "{shot}");
+            assert!(get(".gitignore").lines().any(|l| l == "/my-tool-*.png"), "{}", get(".gitignore"));
             assert!(get(".gitattributes").contains("* text=auto eol=lf\n"));
             let tc = format!("[toolchain]\nchannel = \"{}\"\n", crate::setup::toolchain());
             assert!(get("rust-toolchain.toml").ends_with(&tc), "aio's own Rust: {}", get("rust-toolchain.toml"));

@@ -411,6 +411,10 @@ version may break things.
   colour codes (cargo asks for them whatever the terminal) in
   `build.log` and `ax errors` (`--json` too), and the window's overlay
   said "build failed" with no error in it. They are plain text.
+- `ax shot <app>` run in the app's folder (as its `AGENTS.md` loop does)
+  left its `<id>-<time>.png` there, untracked: the next `ax build` was
+  `-dirty` and `ax release` refused it. An `ax create` app's `.gitignore`
+  leaves the shots out (`/<id>-*.png`).
 
 ## [0.4.2] - 2026-11-11
 

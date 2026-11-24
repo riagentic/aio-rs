@@ -14,7 +14,7 @@ An app is its own Cargo workspace with two crates, made by `ax create`:
 | `assets/` | stylesheets and files the views use (window apps only) |
 | `rust-toolchain.toml` | aio-rs's Rust, so ax's shared build folder is reused across apps |
 | `.cargo/config.toml` | the build's settings: the bundled SQLite without the extensions aio never uses |
-| `.gitignore` | `target/`, `.data/`, `dist/`, `.env` and release keys |
+| `.gitignore` | `target/`, `.data/`, `dist/`, `ax shot`'s pictures (`<id>-*.png`), `.env` and release keys |
 | `.gitattributes` | LF line endings in every checkout, whatever git's `core.autocrlf` |
 | `README.md` | run, test, build, ship; where its aio-rs comes from |
 | `AGENTS.md`, `CLAUDE.md` | for coding agents: the rules and the loop, then `ax agent` and the guide by URL |

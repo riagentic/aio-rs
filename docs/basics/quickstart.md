@@ -85,7 +85,7 @@ notes/
 ├── app/src/lib.rs        the same window on Android (app only)
 ├── rust-toolchain.toml   aio-rs's Rust, so one build folder serves every app
 ├── .cargo/config.toml    the bundled SQLite without the extensions aio never uses
-├── .gitignore            target/, .data/, dist/, .env, release keys
+├── .gitignore            target/, .data/, dist/, ax shot's pictures, .env, release keys
 ├── .gitattributes        LF line endings in every checkout
 ├── README.md             run, test, build, ship; where its aio-rs comes from
 ├── AGENTS.md, CLAUDE.md  for coding agents: the rules, the loop, ax agent

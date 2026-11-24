@@ -8,7 +8,7 @@
 //! may differ.
 use aio::serde_json::json;
 use image::RgbaImage;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// How far two shots may differ and still be the same.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -128,6 +128,12 @@ async fn frame(s: &mut crate::cdp::Session, selector: Option<&str>, full: bool) 
     let data = r["data"].as_str().ok_or("Page.captureScreenshot returned no data")?;
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| format!("Page.captureScreenshot: {e}"))
+}
+
+/// Where a shot goes when no file is named: `<id>-<time>.png` here (an
+/// app's `.gitignore` from `ax create` leaves it out of git).
+pub fn default_file(id: &str) -> PathBuf {
+    PathBuf::from(format!("{id}-{}.png", jiff::Timestamp::now().strftime("%Y%m%d-%H%M%S")))
 }
 
 /// What `ax shot --json` says of a PNG written to `file` (pure): its size
