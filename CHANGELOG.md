@@ -419,6 +419,9 @@ version may break things.
   fresh clone builds as it is, taking aio-rs from git: it takes it from
   the checkout, so a clone builds only with that checkout beside it, as
   its `Cargo.toml` says.
+- `ax lint` let a cell method read the clock through jiff
+  (`Timestamp::now`, `Zoned::now`) or draw from `fastrand`: a replay gave
+  another state. They are errors, as chrono's and rand's are.
 
 ## [0.4.2] - 2026-11-11
 

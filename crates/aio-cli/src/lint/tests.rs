@@ -86,6 +86,9 @@ fn impure_paths() {
     let p = |s: &str| rust::impure(&s.split("::").map(String::from).collect::<Vec<_>>());
     assert_eq!(p("Utc::now"), Some("the clock"));
     assert_eq!(p("chrono::Local::now"), Some("the clock"));
+    assert_eq!(p("jiff::Timestamp::now"), Some("the clock"));
+    assert_eq!(p("jiff::Zoned::now"), Some("the clock"));
+    assert_eq!(p("fastrand::i64"), Some("randomness"));
     assert_eq!(p("Uuid::new_v4"), Some("randomness"));
     assert_eq!(p("aio::uuid_v7"), Some("randomness"));
     assert_eq!(p("tokio::spawn"), Some("a task"));

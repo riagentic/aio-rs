@@ -690,13 +690,17 @@ pub fn impure(segs: &[String]) -> Option<&'static str> {
     let first = s.first().copied().unwrap_or("");
     let last = s.last().copied().unwrap_or("");
     Some(match s.as_slice() {
-        [.., "SystemTime" | "Instant" | "Utc" | "Local" | "OffsetDateTime", "now" | "now_utc" | "now_local"] => {
-            "the clock"
-        }
+        [
+            ..,
+            "SystemTime" | "Instant" | "Utc" | "Local" | "OffsetDateTime" | "Timestamp" | "Zoned",
+            "now" | "now_utc" | "now_local",
+        ] => "the clock",
         [.., "Uuid", "new_v4" | "new_v7" | "now_v7" | "now_v1"] | [.., "uuid_v4" | "uuid_v7" | "random_bytes"] => {
             "randomness"
         }
-        _ if first == "rand" || ["thread_rng", "OsRng", "getrandom"].contains(&last) => "randomness",
+        _ if ["rand", "fastrand"].contains(&first) || ["thread_rng", "OsRng", "getrandom"].contains(&last) => {
+            "randomness"
+        }
         [.., "thread", "spawn" | "sleep" | "scope"] => "a thread",
         [r, .., "spawn" | "spawn_blocking" | "sleep"] if ["tokio", "async_std", "smol"].contains(r) => "a task",
         [.., "env", "var" | "var_os" | "vars" | "args" | "current_dir" | "set_var" | "remove_var"] => "the environment",
