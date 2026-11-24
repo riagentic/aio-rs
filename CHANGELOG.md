@@ -163,6 +163,10 @@ version may break things.
 
 ### Fixed
 
+- A character the app's control line to the window split across two
+  reads (lines queued up, or a long one) arrived as two replacement
+  characters: a notice's title, a dialog's title or start folder, a tray
+  tooltip. The runtime reads the line as UTF-8 text whole.
 - A second launch while the app was starting (its lock taken, its door
   for launches not open yet: a double click, two files opened at once)
   waited 30 s and failed, its arguments lost. It is handed over once the

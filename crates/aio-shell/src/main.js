@@ -353,8 +353,10 @@ app.whenReady().then(() => {
   let w = null
   let icon
   let pending = ''
+  // Text whole: a character the socket splits in two waits for its rest.
+  ctl.setEncoding('utf8')
   ctl.on('data', (d) => {
-    const lines = (pending + d.toString()).split('\n')
+    const lines = (pending + d).split('\n')
     pending = lines.pop()
     lines.forEach(line)
   })

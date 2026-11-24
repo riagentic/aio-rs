@@ -1389,6 +1389,39 @@ mod tests {
         assert_eq!(e.kind(), std::io::ErrorKind::NotConnected);
     }
 
+    /// A control line whose character the socket splits in two (lines
+    /// queue up, or one is long) reaches the runtime whole: a title, a
+    /// path, a notice's text never turns into replacement characters.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_control_line_split_inside_a_character_arrives_whole() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let rt = runtime::dir();
+        if !runtime::exe(&rt).exists() {
+            return eprintln!("skipped: no Electron runtime in {}", rt.display());
+        }
+        let d = tempfile::tempdir_in(aio::paths::short_temp()).unwrap();
+        let dir = d.path().join("shell");
+        install(&dir, "split", &Window { title: "Split", ..Default::default() }).unwrap();
+        let (mut child, _wires, mut ctls) = splash::tests::headless(&rt, d.path(), &dir, "Split");
+        let ctl = tokio::time::timeout(std::time::Duration::from_secs(60), ctls.accept()).await.unwrap().unwrap();
+        let (r, mut ctl) = tokio::io::split(ctl);
+        let mut told = tokio::io::BufReader::new(r).lines();
+        ctl.write_all(b"{\"t\":\"place\",\"width\":640,\"height\":480}\n").await.unwrap();
+        splash::tests::until(&mut told, r#""state":"loaded""#, &mut vec![]).await;
+        let line = aio::serde_json::json!({ "t": "cdp", "id": 1, "method": "Runtime.evaluate",
+            "params": { "expression": "'Grüße'", "returnByValue": true } })
+        .to_string();
+        let at = line.find('ü').unwrap() + 1;
+        ctl.write_all(&line.as_bytes()[..at]).await.unwrap();
+        ctl.flush().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        ctl.write_all(&[&line.as_bytes()[at..], b"\n"].concat()).await.unwrap();
+        let answer = splash::tests::until(&mut told, r#""t":"cdp","id":1"#, &mut vec![]).await;
+        _ = child.kill().await;
+        let v: aio::serde_json::Value = aio::serde_json::from_str(&answer).unwrap();
+        assert_eq!(v["result"]["result"]["value"], "Grüße", "{answer}");
+    }
+
     /// A syntax error in the shell is a window that never opens (aio tests
     /// the generated main parses).
     #[test]
