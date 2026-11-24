@@ -32,6 +32,17 @@ pub(crate) struct Slot {
     gone: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Where its pieces go, when its caller asked for them ([`Parts`]).
     parts: Mutex<Option<Parts>>,
+    /// A part of the call let go of it as it panicked: whichever part goes
+    /// last, its effect panicked.
+    panicked: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for Reply {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.panicked.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 /// Where an async method's pieces go (`cx.part`): frames of call `op` on
@@ -65,8 +76,8 @@ impl Drop for Slot {
             f();
         }
         let why = CUT.with_borrow(Clone::clone).unwrap_or_else(|| {
-            // Dropped as its effect unwinds: the effect panicked (aio's EFFECT_ERROR).
-            if std::thread::panicking() {
+            // Let go of as its effect unwound: the effect panicked (aio's EFFECT_ERROR).
+            if std::thread::panicking() || *self.panicked.get_mut() {
                 let why = format!("{}: its effect panicked before it answered", self.method);
                 return Rejected::coded(crate::Code::EffectError, why);
             }
@@ -92,6 +103,7 @@ impl Reply {
                 to: Mutex::new(vec![tx]),
                 gone: Mutex::default(),
                 parts: Mutex::default(),
+                panicked: Default::default(),
             })),
             Answer::waiting(rx),
         )
@@ -413,8 +425,24 @@ pub fn ttl_key(cx: &Cx, method: &str, ms: i64) -> Option<(String, i64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cache, fresh};
+    use super::{Cache, Reply, fresh};
     use serde_json::{Value, json};
+
+    #[test]
+    fn an_effect_that_panics_answers_effect_error_whichever_copy_goes_last() {
+        let (reply, mut answer) = Reply::new("crash");
+        // The call's own copy outlives the effect's, dropped as it panicked.
+        let effects = reply.clone();
+        let panicked = std::thread::spawn(move || {
+            let _held = effects;
+            panic!("io bug");
+        });
+        assert!(panicked.join().is_err());
+        drop(reply);
+        let e = answer.now().expect("answered").unwrap_err();
+        assert_eq!(e.code(), Some(crate::Code::EffectError), "{e}");
+        assert!(e.why.contains("crash: its effect panicked before it answered"), "{e}");
+    }
 
     #[test]
     fn an_answer_is_fresh_for_its_ttl_and_not_from_the_future() {

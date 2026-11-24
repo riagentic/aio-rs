@@ -173,7 +173,8 @@ pub fn timed_once(id: &str, store: &Path, dir: &Path, keep: usize) -> io::Result
     let to = dir.join(format!("{id}-auto-{stamp}.aio-backup"));
     backup_all(id, store, &to)?;
     let names = std::fs::read_dir(dir)?.flatten().map(|e| e.file_name().to_string_lossy().into_owned());
-    for old in timed_names(id, names, keep).1 {
+    // Never the new one, though backups dated ahead of the clock sort after it.
+    for old in timed_names(id, names, keep).1.into_iter().filter(|n| to.file_name() != Some(n.as_ref())) {
         std::fs::remove_file(dir.join(old))?;
     }
     Ok(to)
@@ -191,9 +192,11 @@ pub fn timed(id: &str, store: &Path, dir: &Path, every: std::time::Duration, kee
         loop {
             let names = std::fs::read_dir(&dir).into_iter().flatten().flatten();
             let newest = timed_names(&id, names.map(|e| e.file_name().to_string_lossy().into_owned()), keep).0.pop();
+            // One dated ahead of the clock counts as new: never a backup
+            // after another until the clock gets there.
             let age = newest
-                .and_then(|n| std::fs::metadata(dir.join(n)).ok()?.modified().ok()?.elapsed().ok())
-                .unwrap_or(every);
+                .and_then(|n| std::fs::metadata(dir.join(n)).ok()?.modified().ok())
+                .map_or(every, |t| t.elapsed().unwrap_or_default());
             std::thread::sleep(every.saturating_sub(age));
             if let Err(e) = timed_once(&id, &store, &dir, keep) {
                 eprintln!("[aio] backup: the timed backup of {id} failed: {e}; trying again in {every:?}");
@@ -386,5 +389,31 @@ mod tests {
             .collect();
         assert_eq!(app_of(&made[2]).unwrap(), "notes");
         assert!(!made[0].exists() && made[1].exists() && made[2].exists());
+    }
+
+    /// Backups dated ahead of the clock (it was set back, or they came from
+    /// another machine): the one just made is kept though its name sorts
+    /// first, and the timer waits a turn instead of making one after
+    /// another (a newest backup whose age can't be told is a new one).
+    #[test]
+    fn backups_from_ahead_of_the_clock_never_cost_the_new_one_nor_a_loop() {
+        let d = tempfile::tempdir().unwrap();
+        let store = d.path().join("data/state.db");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        Connection::open(&store).unwrap().execute_batch("CREATE TABLE t (x)").unwrap();
+        let dir = d.path().join("backups");
+        std::fs::create_dir_all(&dir).unwrap();
+        let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(400 * 86_400);
+        for n in ["notes-auto-2999-01-01T00-00-00-000Z", "notes-auto-2999-01-02T00-00-00-000Z"] {
+            let f = std::fs::File::create(dir.join(format!("{n}.aio-backup"))).unwrap();
+            f.set_modified(ahead).unwrap();
+        }
+        let made = timed_once("notes", &store, &dir, 2).unwrap();
+        assert!(made.exists(), "the new backup is kept");
+        let count = || std::fs::read_dir(&dir).unwrap().count();
+        let before = count();
+        timed("notes", &store, &dir, std::time::Duration::from_secs(3600), 2);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(count(), before, "no backup made at once");
     }
 }

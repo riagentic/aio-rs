@@ -275,7 +275,8 @@ instruction:
   below `[log] level` costs one load and formats nothing.
 - Every line is one line: a message's line breaks are written `\n`,
   control characters `\xNN`, and text past 8192 characters is cut and
-  says so, so no text can forge an entry.
+  says so, so no text can forge an entry. A line of stderr (a child's
+  too) past 64 KiB is cut and says how many bytes it dropped.
 - The same line many times in a row is written once, then `… last line
   repeated N more times`.
 - Credentials are masked with `…`: `token=` values, `Bearer` tokens and

@@ -95,6 +95,9 @@ impl Mover {
             }
             f.sync_all()?;
             crate::paths::rename_over(&partial, to)?;
+            // Its name on disk before the original goes (another disk:
+            // nothing orders the two).
+            crate::paths::sync_dir(crate::paths::parent(to))?;
             std::fs::remove_file(from)
         })();
         match copied {
@@ -517,6 +520,22 @@ mod tests {
         assert_eq!([read(&l.store), read(&with(&l.store, "-wal"))], ["STATE", "WAL"]);
         assert!(!exists(&with(&l.store, ".partial")) && !exists(&l.cwd.join("data.db")));
         assert_eq!(std::fs::metadata(&l.store).unwrap().modified().unwrap(), before, "the source's time");
+    }
+
+    /// Across filesystems the copy's name is on disk before the original
+    /// goes: a power cut between the two leaves the original, never only a
+    /// `.partial` that the next start doesn't take as the store.
+    #[cfg(unix)]
+    #[test]
+    fn across_filesystems_the_copys_name_is_flushed_before_the_original_goes() {
+        let d = tempfile::tempdir().unwrap();
+        let (from, to) = (d.path().join("a.db"), d.path().join("in/a.db"));
+        std::fs::create_dir_all(d.path().join("in")).unwrap();
+        std::fs::write(&from, "STATE").unwrap();
+        let before = crate::paths::SYNCS.get();
+        let m = Mover(|_, _| Err(io::Error::from(io::ErrorKind::CrossesDevices))).file(&from, &to);
+        assert_eq!((m.outcome, read(&to), exists(&from)), (Outcome::Moved, "STATE".into(), false));
+        assert_eq!(crate::paths::SYNCS.get() - before, 1, "the folder it landed in, flushed");
     }
 
     #[test]

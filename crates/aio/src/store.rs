@@ -378,18 +378,30 @@ pub(crate) fn sweep(path: &Path) {
     }
 }
 
-/// `PRAGMA quick_check` on the file at `path` (fine if it doesn't exist yet).
+/// `PRAGMA quick_check` on the file at `path` (fine if it doesn't exist
+/// yet). A file another program still holds locked after the wait is not
+/// found damaged: the open that follows says it is locked.
 pub(crate) fn healthy(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
     }
-    let db =
-        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())?;
-    let rows: Vec<String> = db
-        .prepare("PRAGMA quick_check")
-        .and_then(|mut q| q.query_map([], |r| r.get(0))?.collect())
-        .map_err(|e| e.to_string())?;
-    if rows == ["ok"] { Ok(()) } else { Err(rows.join("; ")) }
+    let rows: rusqlite::Result<Vec<String>> =
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).and_then(|db| {
+            db.prepare("PRAGMA quick_check").and_then(|mut q| q.query_map([], |r| r.get(0))?.collect())
+        });
+    match rows {
+        Ok(rows) if rows == ["ok"] => Ok(()),
+        Ok(rows) => Err(rows.join("; ")),
+        Err(e)
+            if matches!(
+                e.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+            ) =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Set the damaged store aside and put the good copy in its place.
@@ -2855,6 +2867,23 @@ mod tests {
         let before = std::fs::read(&other).unwrap();
         born(&other).unwrap();
         assert_eq!(std::fs::read(&other).unwrap(), before);
+    }
+
+    /// A file another program holds locked (a write in rollback mode, a
+    /// tool's exclusive lock) is not damaged: never set aside for an older
+    /// good copy, nor its boot refused as damaged.
+    #[test]
+    fn a_locked_file_is_never_taken_for_a_damaged_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch("PRAGMA journal_mode = DELETE; CREATE TABLE t(x); BEGIN EXCLUSIVE; INSERT INTO t VALUES (1);")
+            .unwrap();
+        assert_eq!(healthy(&path), Ok(()));
+        c.execute_batch("COMMIT").unwrap();
+        // Damage still is.
+        std::fs::write(&path, b"not a database at all, and long enough to be read as a header....").unwrap();
+        assert!(healthy(&path).is_err());
     }
 
     #[test]

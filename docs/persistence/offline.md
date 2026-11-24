@@ -126,7 +126,10 @@ rt.block_on(async {
   are kept beside it (`copy.orphan-<cell>-v<n>-<ms>`, in a page
   `<key>.orphan-v<n>`, then `-2`…; never over an earlier set) and said once (`sync:orphan-queue`, aio's
   `sync-orphan-queue`), never dropped silently: send them by hand, or
-  delete the file.
+  delete the file. A saved copy that can't be read (torn by a disk fault,
+  edited by hand) is moved aside (`copy.unreadable-<ms>`, in a page
+  `<key>.corrupt`, then `-2`…) and said (`sync:unreadable-copy`), never
+  saved over.
 - `Remote::connect(addr, token, user)` keeps nothing on disk: it needs
   the server to start, then works offline the same way while it runs.
 - A refused key (a wrong key, a revoked or ended session: the server's

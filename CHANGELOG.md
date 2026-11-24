@@ -203,6 +203,17 @@ version may break things.
   cleanup, its answer read or not (a flip `TransitionGroup` measured every
   row on every change). An owner now ends its tasks and scripts with one
   cleanup, and a script goes with the last handle on it.
+- A cell's diagnostic (a refused reaction, a timed-out effect, a refused
+  `#[on_stop]`, a cell disabled after failures) sometimes came without
+  its cell's name and state: when another thread was showing a commit of
+  that cell at that moment, the state wasn't read. It now always is.
+
+- An async call whose effect panicked was sometimes answered "ended
+  before it answered" (`DISPATCH_ABORTED`) instead of "its effect
+  panicked" (`EFFECT_ERROR`): when the effect panicked before the call
+  itself had finished on its own thread, that thread decided the answer.
+  The panic now decides it, whichever goes last.
+
 - Each published aio-rs crate carries its MIT licence text (`LICENSE`),
   so an app's credits (`aio::credits!()`) and the crates' packages
   include it, not only the licence's name.
@@ -452,6 +463,42 @@ version may break things.
 - An `aio.toml` edit under `ax dev` was hot-patched with the old build's
   features (an added `[updates] url` left the updater off). It now
   rebuilds, with the features it turns on.
+- A saved copy (`Remote::connect_saved`, a client's `data/copy.json`)
+  that couldn't be read (torn by a disk fault, edited by hand, another
+  aio-rs's format) counted as none and was saved over at the start: the
+  calls made offline in it were lost without a word. It is moved aside
+  (`copy.unreadable-<ms>`) and said (`sync:unreadable-copy`), as a page
+  keeps its `.corrupt` document.
+- A saved copy's save that failed (a full disk, a folder unwritable a
+  moment) was counted as written: the drop and the exit wrote nothing
+  more, and a call made offline then was lost when the app closed,
+  though the disk took writes again. It is written at the next save, the
+  drop or the exit.
+- A store (or a guarded `aio::db` file) another program held locked past
+  the boot's 5 s wait was taken for damaged: set aside, and the app
+  booted on its good copy (up to a day older), or the boot was refused as
+  damaged. A locked file is left to the open, which says it is locked.
+- `aio::compat::scatter`'s copy across filesystems removed the original
+  before the copy's new name was flushed: a power cut between the two
+  could leave only a `.partial` the next start doesn't take. The folder
+  is flushed first.
+- Timed backups (`backup_every`) dated ahead of the clock (the clock set
+  back, a folder from another machine) made backups one after another
+  with no pause, and each new one, its name sorting first, was pruned at
+  once. One dated ahead counts as new, and the one just made is never
+  pruned.
+- The log copier read stderr by whole lines: one with no newline (a
+  child dumping a blob) grew its memory without bound and landed whole in
+  `app.log`, past `[log] file_mb`. A line is cut at 64 KiB, saying how
+  many bytes were dropped.
+- `aio::log::parse_stamp` took a signed offset field (`+-1:00`,
+  `+01:-5`) as an offset. Each part is two digits.
+- An aio page's sync stamp at the far end of time (`-1e300`) overflowed
+  the server's clock check: a panic of its link in a debug build.
+- A page's offline queue that couldn't be read twice kept only the second
+  (`<key>.corrupt` was written over), and one the browser refused to keep
+  (storage full) was said to be kept. A second goes to `<key>.corrupt-2`
+  (then `-3`…), and a refused one is said as not kept.
 
 ## [0.4.2] - 2026-11-11
 

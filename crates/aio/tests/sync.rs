@@ -1306,6 +1306,59 @@ async fn a_queue_this_build_cant_send_is_kept_aside_and_said() {
     );
 }
 
+/// A saved copy that can't be read (torn by a disk fault, edited by hand,
+/// written by an aio-rs whose format this one can't read) is moved aside
+/// and said, as a page keeps its `.corrupt` one: never saved over, since
+/// the calls waiting in it are the user's.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreadable_saved_copy_is_kept_aside_never_saved_over() {
+    let (_h, addr) = server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("copy.json");
+    let torn = r#"{"cell":"board","v":1,"seq":4,"view":{},"pending":[{"op":"a1","method":"add","args":["made offl"#;
+    std::fs::write(&file, torn).unwrap();
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let into = heard.clone();
+    let _bus = aio::report::subscribe(move |d| {
+        if d.kind == "sync:unreadable-copy" {
+            into.lock().unwrap().push(d.message.clone());
+        }
+    });
+    let link = aio::sync::Link { addr, token: "secret".into(), root: None };
+    let a = Remote::<Board>::connect_saved(link, "ana", &file).await.unwrap();
+    let saved = |f: &std::path::Path| std::fs::read_to_string(f).unwrap_or_default();
+    until_long("saved anew", || saved(&file).starts_with("{\"cell\":\"board\"") && saved(&file) != torn).await;
+    let kept = asides(dir.path(), "copy.unreadable-");
+    assert_eq!(kept.len(), 1, "kept aside");
+    assert_eq!(saved(&kept[0]), torn, "as it was");
+    let said = heard.lock().unwrap().clone();
+    assert!(said.iter().any(|m| m.contains("can't be read") && m.contains("copy.unreadable-")), "{said:?}");
+    drop(a);
+}
+
+/// A save that failed (the disk full, the folder unwritable a moment) is
+/// written again by the next one, the drop's or the exit's: a call made
+/// offline then is never lost once the disk takes writes again.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_save_that_failed_is_written_again_at_the_drop() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let (folder, file) = (dir.path().join("d"), dir.path().join("d/copy.json"));
+    std::fs::create_dir(&folder).unwrap();
+    let saved = |f: &std::path::Path| std::fs::read_to_string(f).unwrap_or_default();
+    let (a, _) = Remote::<Board>::connect_later(None, "ana", &file).await.unwrap();
+    until_long("saved", || !saved(&file).is_empty()).await;
+    let mode = |m: u32| std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o500);
+    a.add("while the disk refused".into()).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    mode(0o700);
+    assert!(!saved(&file).contains("while the disk refused"), "the folder took a write: nothing failed");
+    drop(a);
+    assert!(saved(&file).contains("while the disk refused"), "written at the drop");
+}
+
 /// The files in `dir` whose name starts with `prefix`, sorted.
 fn asides(dir: &std::path::Path, prefix: &str) -> Vec<std::path::PathBuf> {
     let mut all: Vec<_> = std::fs::read_dir(dir)

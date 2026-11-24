@@ -89,7 +89,7 @@ impl Hlc {
 
     /// A page's stamp moves the clock on, unless it is too far off or not one.
     fn receive(&mut self, (physical, counter): (i64, i64), now: i64) {
-        if (physical - now).abs() > MAX_DRIFT_MS || !(0..=MAX_COUNTER).contains(&counter) {
+        if physical.abs_diff(now) > MAX_DRIFT_MS.unsigned_abs() || !(0..=MAX_COUNTER).contains(&counter) {
             return;
         }
         if now > self.physical && now > physical {
@@ -367,6 +367,9 @@ mod tests {
         c.receive((150, -1), 120);
         assert_eq!(c.counter, 10, "not a stamp");
         c.receive((10, 0), 200);
+        assert_eq!(c, Hlc { physical: 200, counter: 0 });
+        // A page's `-1e300` (saturated): ignored, never an overflow.
+        c.receive((i64::MIN, 0), 200);
         assert_eq!(c, Hlc { physical: 200, counter: 0 });
     }
 
