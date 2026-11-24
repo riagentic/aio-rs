@@ -1425,6 +1425,48 @@ mod tests {
         assert_eq!(v["result"]["result"]["value"], "Grüße", "{answer}");
     }
 
+    /// The runtime's readers of the app's frames and control lines, in
+    /// Node: whole frames and lines however the reads fall, and a long one
+    /// joined once, not again at every read (a 16 MB frame copied 8 GB).
+    #[test]
+    fn the_runtime_joins_a_long_frame_or_line_once() {
+        let js = include_str!("main.js");
+        let def = |name: &str| {
+            let at = js.find(&format!("function {name}(")).unwrap();
+            &js[at..at + js[at..].find("\n}\n").unwrap() + 2]
+        };
+        let test = format!(
+            "{}\n{}\n
+             const concat = Buffer.concat, cut = String.prototype.split;
+             let copied = 0, scanned = 0;
+             Buffer.concat = (l, t) => {{ const b = concat(l, t); copied += b.length; return b; }};
+             String.prototype.split = function (...a) {{ scanned += this.length; return cut.apply(this, a); }};
+             const frame = (n) => {{ const b = Buffer.alloc(4 + n, 7); b.writeUInt32BE(n); return b; }};
+             const got = [];
+             const f = frames((x) => got.push(x.length));
+             const big = frame(16 << 20);
+             for (let i = 0; i < big.length; i += 65536) f(big.subarray(i, i + 65536));
+             const small = concat([frame(3), frame(0), frame(5)]);
+             f(small.subarray(0, 2)); f(small.subarray(2, 9)); f(small.subarray(9, 13)); f(small.subarray(13));
+             const said = [];
+             const l = lines((x) => said.push(x));
+             for (let i = 0; i < 2000; i++) l('x'.repeat(8192));
+             l('y\\n{{\"a\":'); l('1}}\\n\\nz');
+             console.log(JSON.stringify({{ got, copied, said: said.map((s) => s.length < 20 ? s : s.length), scanned }}));",
+            def("frames"),
+            def("lines")
+        );
+        let Ok(out) = std::process::Command::new("node").args(["-e", &test]).output() else {
+            return eprintln!("skipped: no node");
+        };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let v: aio::serde_json::Value = aio::serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["got"], aio::serde_json::json!([16 << 20, 3, 0, 5]));
+        assert!(v["copied"].as_u64().unwrap() < 17 << 20, "{v}");
+        assert_eq!(v["said"], aio::serde_json::json!([2000 * 8192 + 1, "{\"a\":1}", ""]));
+        assert!(v["scanned"].as_u64().unwrap() < 17 << 20, "{v}");
+    }
+
     /// A syntax error in the shell is a window that never opens (aio tests
     /// the generated main parses).
     #[test]

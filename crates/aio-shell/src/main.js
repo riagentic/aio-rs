@@ -229,16 +229,37 @@ function socketFetch(reqPath, method, headers, body) {
 }
 
 // Frames from the app socket, split by their 4-byte big-endian length.
+// A frame's reads are joined once, when it is whole: joined at each read,
+// a 16 MB frame held the main process 0.6 s (64 KB reads), 64 MB 8 s.
 function frames(onFrame) {
-  let buf = Buffer.alloc(0)
+  let parts = []
+  let have = 0
   return (chunk) => {
-    buf = Buffer.concat([buf, chunk])
-    while (buf.length >= 4) {
-      const n = buf.readUInt32BE(0)
-      if (buf.length < 4 + n) break
+    parts.push(chunk)
+    have += chunk.length
+    while (have >= 4) {
+      if (parts[0].length < 4) parts = [Buffer.concat(parts, have)]
+      const n = parts[0].readUInt32BE(0)
+      if (have < 4 + n) break
+      const buf = parts.length === 1 ? parts[0] : Buffer.concat(parts, have)
       onFrame(buf.subarray(4, 4 + n))
-      buf = buf.subarray(4 + n)
+      const rest = buf.subarray(4 + n)
+      parts = rest.length ? [rest] : []
+      have = rest.length
     }
+  }
+}
+
+// Lines of text from the control socket (its encoding set), split at
+// once only when a read ends one: a long line is never re-split per read.
+function lines(onLine) {
+  let pending = ''
+  return (text) => {
+    pending += text
+    if (!text.includes('\n')) return
+    const all = pending.split('\n')
+    pending = all.pop()
+    all.forEach(onLine)
   }
 }
 
@@ -352,14 +373,9 @@ app.whenReady().then(() => {
   }))
   let w = null
   let icon
-  let pending = ''
   // Text whole: a character the socket splits in two waits for its rest.
   ctl.setEncoding('utf8')
-  ctl.on('data', (d) => {
-    const lines = (pending + d).split('\n')
-    pending = lines.pop()
-    lines.forEach(line)
-  })
+  ctl.on('data', lines(line))
   // One line from the app (the print key says one too).
   function line(l) {
     if (l.startsWith('{')) {

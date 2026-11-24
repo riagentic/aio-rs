@@ -163,6 +163,11 @@ version may break things.
 
 ### Fixed
 
+- A large frame from the app (a big first render, an image as a `data:`
+  URL) held the window's runtime: it joined the frame's reads again at
+  every read, so 16 MB copied 2 GB and froze every window 0.6 s, 64 MB
+  8 s. Each frame is joined once, as is a long control line (an
+  animated icon), which was split again at every read.
 - `desktop::tooltip` called before the window was up (in `main`, at
   start) was lost: the tray kept its declared tooltip. The runtime gets
   it when it connects and the tray shows it when it is made; an icon set
