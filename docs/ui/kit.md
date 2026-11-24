@@ -302,10 +302,11 @@ assert!(ui.absent("close"), "Escape closed the dialog");
 | `Confirm` | `open`, `onconfirm`, `oncancel` (also Escape and the backdrop), `title`, `message`, `confirm_label` (`"Confirm"`), `cancel_label` (`"Cancel"`), `danger`. Handles `confirmOk`, `confirmCancel`. |
 | `ConfirmButton` | `confirm` (the question), `onconfirm` (only once confirmed), `confirm_title`, `confirm_label`, `cancel_label`, `variant` (`Danger` makes the confirm button danger too), `disabled`, children; focus returns to it when the dialog closes |
 | `ToastHost` | once, in the root: a polite live region (an error toast is an alert) |
-| `toast(text, tone)` | shows for 4 s |
-| `toast_for(text, tone, stay)` | `stay: Option<Duration>`; `None`: until dismissed (its ×, `toastDismiss`) |
-| `toast_handle(text, tone, stay)` | `toast_for`, giving a `Toast` whose `.dismiss()` takes it away early (a "Saving…" until the save ends) |
-| `toasts()` | the messages showing, oldest first (for tests and agents) |
+| `toast(text, tone)` | the usual notice: shows for 4 s |
+| `toast_for(text, tone, stay)` | for another time: `stay: Option<Duration>`; `None`: until dismissed (its ×, `toastDismiss`) |
+| `toast_handle(text, tone, stay)` | one your code takes away: `toast_for`, giving a `Toast` whose `.dismiss()` takes it away early (a "Saving…" until the save ends) |
+| `toast_view(view, tone, stay)` | markup instead of text (a link, a bold word) |
+| `toasts()` | the messages showing, oldest first (for tests and agents; a `toast_view` is `""`) |
 | `Portal { children }` / `PortalHost` | draws its children in the host (put it around the app once) while it lives: a popover that must escape an `overflow: hidden` box ([islands](islands.md)); `Portal { target: "side" }` draws in the `PortalHost { name: "side" }` showing anywhere on the page (aio's `target`; none showing: in place) |
 
 Call `toast` on the UI thread (a handler, a view's task). From a method
