@@ -1667,6 +1667,38 @@ fn kept_aside<T: Cell>(file: &std::path::Path, s: &Saved) -> bool {
     false
 }
 
+/// The copy saved in `file`, if any. One that can't be read (torn by a
+/// disk fault, edited by hand, another aio-rs's format) is moved aside as
+/// `<file>.unreadable-<ms>` and said, never saved over: the calls waiting
+/// in it are the user's.
+fn read_saved<T: Cell>(file: &std::path::Path) -> Option<Saved> {
+    let why = match std::fs::read(file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => e.to_string(),
+        Ok(b) => match serde_json::from_slice(&b) {
+            Ok(s) => return Some(s),
+            Err(e) => e.to_string(),
+        },
+    };
+    let mut at = crate::store::now_ms();
+    let kept = loop {
+        let p = file.with_extension(format!("unreadable-{at}"));
+        if p.exists() {
+            at += 1;
+            continue;
+        }
+        break std::fs::rename(file, &p).map_or_else(|e| format!("not moved: {e}"), |()| format!("kept as {}", p.display()));
+    };
+    let msg = format!(
+        "{}: the saved copy {} can't be read ({why}): calls made offline in it are not sent; {kept}",
+        T::ID,
+        file.display()
+    );
+    eprintln!("[aio] WARN {msg}");
+    crate::report::tell_kept("sync:unreadable-copy", &msg);
+    None
+}
+
 /// Keep `s` beside `file` as `<file>.<tag>-<ms>` (0600), never over an
 /// earlier one: where it went.
 fn aside(file: &std::path::Path, tag: &str, s: &Saved) -> std::io::Result<std::path::PathBuf> {
@@ -2332,7 +2364,7 @@ impl<T: Cell> Remote<T> {
         // A save still on its way (a copy dropped just now) is newer than the file.
         let saved: Option<Saved> = match claimed.as_ref().and_then(|(_, _, n)| n.as_deref()) {
             Some(n) => Some(n.clone()),
-            None => file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()),
+            None => file.as_deref().and_then(read_saved::<T>),
         }
         .filter(|s| file.as_deref().is_none_or(|f| kept_aside::<T>(f, s)));
         // A saved copy holds what it held.
