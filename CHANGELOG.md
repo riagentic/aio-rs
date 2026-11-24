@@ -213,6 +213,10 @@ version may break things.
 
 ### Fixed
 
+- `ax dev`'s `[aio] boot: … settings in the log` line is said once the
+  boot report ends: it waited for the app's next line, so it came after a
+  hot patch or at stop. `aio::boot::say` writes its rows in one write
+  (`aio::boot::said`, added, the lines).
 - `[app] version` is checked as `aio.toml` is read (`aio::config!()`,
   `ax config`, `ax dev`, `ax test`, the app's start): `version =
   "banana"` passed everything but `ax build`. Its form lives in
