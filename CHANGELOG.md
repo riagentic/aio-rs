@@ -88,7 +88,9 @@ version may break things.
 
 - `aio::testing::TestBrowser` (a web build's tests) had no WebGL: it
   started Chromium with `--disable-gpu`; it draws WebGL on the CPU
-  (SwiftShader) now, as `TestUi`'s window always did.
+  (SwiftShader) now, as `TestUi`'s window does.
+- `TestUi` had no WebGL on macOS: the runtime's SwiftShader makes no
+  context there; a Mac's test window draws WebGL with ANGLE's Metal.
 - A `TestUi` wait that times out (`until…`, `expect_cell`) and `the
   views and their page never settle` name the components still rendering
   (`still rendering: Gallery/Thumb`), such as one that remounts on its own

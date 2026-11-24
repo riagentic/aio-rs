@@ -676,7 +676,8 @@ shows in a cell and its decisions in plain functions, and test those:
   them with [`TestCells`](cells.md), then assert that the view's controls
   change them (`ui.drag_by("css=canvas", 40.0, 0.0)`, then `expect_cell`).
 - **The drawing is checked by its pixels.** WebGL runs in the test page
-  (drawn on the CPU), so a canvas app starts and draws in a `TestUi`.
+  (drawn on the CPU; on a Mac by its GPU, through Metal), so a canvas app
+  starts and draws in a `TestUi`.
   Check it with `shot()` against a saved image, or read a pixel with
   `ui.eval("…getImageData(…)…")`; on a running app, `ax shot <app> --check
   base.png` and `ax eval <app> <code>`.
