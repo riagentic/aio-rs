@@ -121,7 +121,8 @@ is refused with exit 2 and the right usage, never guessed or dropped:
   `instances` names `ax apps`, `publish` `ax release <app> …`, `compile`
   `ax build`, `watch` `ax dev`, `actions` `ax events`, `client` `ax
   components`, `migrate` `ax lint --from`, `link` `ax pin <app> <dir>`,
-  `dispatch` `ax call`, a bare `theme` `ax theme adopt`. `check` is `ax
+  `dispatch` `ax call`, a bare `theme` `ax theme adopt`; cargo's `new`
+  (and `init`) `ax create`. `check` is `ax
   check`: aio's static checks, and the rest of what CI runs; `where` is
   `ax where`.
 

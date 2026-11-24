@@ -434,6 +434,8 @@ version may break things.
   every other verb takes: a script adding `--text` to each `ax` call (as
   0.4.0's note on piped JSON says) failed its lint step. `--text` is as
   it is; `--quiet` prints nothing without an error.
+- `ax new notes` (cargo's habit) answered "did you mean dev?": `new` and
+  `init` name `ax create <name>`.
 
 ## [0.4.2] - 2026-11-11
 
