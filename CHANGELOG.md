@@ -400,11 +400,6 @@ version may break things.
   dictionary from the internet past the network rule, and one that landed
   as a word was typed hung the page. The test browser spellchecks nothing
   now and fetches no dictionary.
-- A `TestUi` step (a `click` on a submit, a key) that sent files could
-  end before the views heard it: the page reads an event's files apart
-  and sends it once they are read, and a step's settle didn't wait for
-  that (a form's `onsubmit` with files ran only on a loaded machine's
-  next step). A settle waits for the files its events carry.
 - A `TestUi` wait that times out (`until…`, `expect_cell`) and `the
   views and their page never settle` name the components still rendering
   (`still rendering: Gallery/Thumb`), such as one that remounts on its own

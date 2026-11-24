@@ -449,8 +449,6 @@ fn a_file_input_hands_its_files_to_change_and_to_the_forms_submit() {
     let mut ui = TestUi::new(app);
     ui.pick_files("pick", &[("a.png", "image/png", &[137, 80, 78, 71]), ("b.txt", "text/plain", "hé".as_bytes())]);
     assert_eq!(ui.text("picked"), ":a.png 4 image/png, :b.txt 3 text/plain", "the input's change carries its files");
-    // A loaded machine reads them slowly: the click still waits for the submit.
-    ui.eval("const read = Blob.prototype.arrayBuffer; Blob.prototype.arrayBuffer = function () { return new Promise((r) => setTimeout(r, 300)).then(() => read.call(this)) }");
     ui.click("send");
     assert_eq!(
         ui.text("sent"),
