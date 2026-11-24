@@ -32,5 +32,5 @@ fn a_call_storm_is_said_and_the_breaker_refuses_it() {
     assert_eq!(refused.why, "watcher.changed: refused during a call storm ([perf.storm] breaker)");
     let seen = seen.lock().unwrap().clone();
     assert!(seen.iter().any(|l| l.starts_with("storm: watcher.changed called ")), "{seen:?}");
-    assert_eq!(aio::report::Code::of("storm"), aio::report::Code::Storm);
+    assert_eq!(aio::report::Problem::of("storm"), aio::report::Problem::Storm);
 }

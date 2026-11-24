@@ -1006,7 +1006,7 @@ aio::http::Http::route: fn route(self, r: Route) -> Self
 aio::http::Http::server_fn: fn server_fn<A, R, F, Fut>(self, f: crate::fns::ServerFn<A, R>, access: crate::fns::Access, run: F) -> Self where A: serde::de::DeserializeOwned + Send + 'static, R: Serialize + 'static, F: Fn(crate::fns::Req, A) -> Fut + Send + Sync + 'static, Fut: Future<Output = crate::Result<R>> + Send + 'static
 aio::http::Http::server_fn_streamed: fn server_fn_streamed<A, R, F, Fut>(self, f: crate::fns::ServerFn<A, R>, access: crate::fns::Access, run: F) -> Self where A: serde::de::DeserializeOwned + Send + 'static, R: Serialize + 'static, F: Fn(crate::fns::Req, A, crate::fns::Chunks) -> Fut + Send + Sync + 'static, Fut: Future<Output = crate::Result<R>> + Send + 'static
 aio::http::Http::shell: fn shell(self, dir: impl Into<PathBuf>) -> Self
-aio::http::Http::ui: fn ui<F, Fut>(self, page: impl Into<String>, tab: F) -> Self where F: Fn(Tab) -> Fut + Send + Sync + 'static, Fut: Future<Output = ()> + Send + 'static
+aio::http::Http::ui: fn ui<F, Fut>(self, page: impl Into<String>, tab: F) -> Self where F: Fn(TabWire) -> Fut + Send + Sync + 'static, Fut: Future<Output = ()> + Send + 'static
 aio::http::Http::users: fn users(self, users: crate::auth::Users) -> Self
 aio::http::Paint.body: String
 aio::http::Paint.head: String
@@ -1047,8 +1047,8 @@ aio::http::Route::streamed: fn streamed(self) -> Self
 aio::http::SameSite::Lax
 aio::http::SameSite::None
 aio::http::SameSite::Strict
-aio::http::Tab.user: Option<String>
-aio::http::Tab.wire: tokio::io::DuplexStream
+aio::http::TabWire.user: Option<String>
+aio::http::TabWire.wire: tokio::io::DuplexStream
 aio::http::Viewer.linked: bool
 aio::http::Viewer.path: String
 aio::http::Viewer.role: Option<String>
@@ -2016,23 +2016,6 @@ aio::report::About.id: String
 aio::report::About.keep: usize
 aio::report::About.log: std::path::PathBuf
 aio::report::About.version: String
-aio::report::Code::BudgetEffect
-aio::report::Code::BudgetMethod
-aio::report::Code::Degraded
-aio::report::Code::EffectTimeout
-aio::report::Code::Memory
-aio::report::Code::Other
-aio::report::Code::Panic
-aio::report::Code::Recovered
-aio::report::Code::Refused
-aio::report::Code::Storm
-aio::report::Code::Tripped
-aio::report::Code::UpdateFailed
-aio::report::Code::User
-aio::report::Code::Vitals
-aio::report::Code::Window
-aio::report::Code::of: fn of(kind: &str) -> Self
-aio::report::Code::tip: fn tip(self) -> Option<&'static str>
 aio::report::Context.call: u64
 aio::report::Context.contact: Option<String>
 aio::report::Context.diagnostics: Vec<Diagnostic>
@@ -2049,8 +2032,25 @@ aio::report::Diagnostic.numbers: Vec<(&'static str, i64)>
 aio::report::Diagnostic.severity: Severity
 aio::report::Diagnostic.state: Option<serde_json::Value>
 aio::report::Diagnostic.tip: Option<&'static str>
-aio::report::Diagnostic::code: fn code(&self) -> Code
 aio::report::Diagnostic::error_code: fn error_code(&self) -> Option<crate::Code>
+aio::report::Diagnostic::problem: fn problem(&self) -> Problem
+aio::report::Problem::BudgetEffect
+aio::report::Problem::BudgetMethod
+aio::report::Problem::Degraded
+aio::report::Problem::EffectTimeout
+aio::report::Problem::Memory
+aio::report::Problem::Other
+aio::report::Problem::Panic
+aio::report::Problem::Recovered
+aio::report::Problem::Refused
+aio::report::Problem::Storm
+aio::report::Problem::Tripped
+aio::report::Problem::UpdateFailed
+aio::report::Problem::User
+aio::report::Problem::Vitals
+aio::report::Problem::Window
+aio::report::Problem::of: fn of(kind: &str) -> Self
+aio::report::Problem::tip: fn tip(self) -> Option<&'static str>
 aio::report::Subscription(_)
 aio::report::about: fn about() -> Option<About>
 aio::report::build: fn build(about: &About, id: &str, at: i64, kind: &str, title: &str, body: Option<&str>, logs: &[String], x: &Context) -> serde_json::Value
@@ -2425,6 +2425,10 @@ aio::tls::permitted: fn permitted(ip: std::net::IpAddr) -> bool
 aio::tls::root: fn root(dir: &std::path::Path) -> io::Result<(String, rcgen::KeyPair)>
 aio::tls::sans: fn sans(addrs: impl IntoIterator<Item = std::net::IpAddr>) -> Vec<rcgen::SanType>
 aio::tls::server: fn server(dir: &std::path::Path, id: &str) -> io::Result<Tls>
+aio::ui::BrowserTab.user: Option<String>
+aio::ui::BrowserTab::new: fn new(user: Option<String>) -> Self
+aio::ui::BrowserTab::source: fn source<T: crate::Cell>(&self) -> Option<crate::Source<T>>
+aio::ui::BrowserTab::with: fn with<T: crate::Cell>(self, s: crate::Source<T>) -> Self
 aio::ui::Eval(_)
 aio::ui::Eval::join: async fn join<T: DeserializeOwned>(self) -> Result<T, EvalError>
 aio::ui::Eval::recv: async fn recv<T: DeserializeOwned>(&mut self) -> Result<T, EvalError>
@@ -2438,10 +2442,6 @@ aio::ui::Part::with: fn with<O>(&self, g: impl FnOnce(&R) -> O) -> O
 aio::ui::Part::with_untracked: fn with_untracked<O>(&self, g: impl FnOnce(&R) -> O) -> O
 aio::ui::Seed::cell: fn cell<T: crate::Cell>(self, h: &crate::Handle<T>) -> Self
 aio::ui::Seed::new: fn new(viewer: &Viewer) -> Self
-aio::ui::Tab.user: Option<String>
-aio::ui::Tab::new: fn new(user: Option<String>) -> Self
-aio::ui::Tab::source: fn source<T: crate::Cell>(&self) -> Option<crate::Source<T>>
-aio::ui::Tab::with: fn with<T: crate::Cell>(self, s: crate::Source<T>) -> Self
 aio::ui::auto_name: fn auto_name(tag: &str, role: &str, name: &str) -> Option<String>
 aio::ui::back_pressed: fn back_pressed() -> impl std::future::Future<Output = bool>
 aio::ui::back_presses: fn back_presses() -> tokio::sync::mpsc::UnboundedReceiver<BackAsk>
@@ -2901,7 +2901,7 @@ enum aio::prelude::By
 enum aio::prelude::Code
 enum aio::prelude::Mode
 enum aio::process::Stream
-enum aio::report::Code
+enum aio::report::Problem
 enum aio::tell::Tell
 enum aio::testing::AskedFor
 enum aio::ui::EvalError
@@ -2939,6 +2939,7 @@ impl Clone for Block
 impl Clone for Blocked
 impl Clone for Breach
 impl Clone for BreadcrumbProps
+impl Clone for BrowserTab
 impl Clone for Budget
 impl Clone for ButtonProps
 impl Clone for By
@@ -3059,6 +3060,7 @@ impl Clone for Placement
 impl Clone for Plan
 impl Clone for Position
 impl Clone for Presence
+impl Clone for Problem
 impl Clone for Profile
 impl Clone for ProgressOf
 impl Clone for ProgressProps
@@ -3142,7 +3144,6 @@ impl Clone for WindowEvent
 impl Clone for ZoomView
 impl Copy for Align
 impl Copy for Backoff
-impl Copy for Code
 impl Copy for Col
 impl Copy for Columns
 impl Copy for Conn
@@ -3165,6 +3166,7 @@ impl Copy for Phase
 impl Copy for Phases
 impl Copy for Placement
 impl Copy for Position
+impl Copy for Problem
 impl Copy for ProgressOf
 impl Copy for SameSite
 impl Copy for Seen
@@ -3304,6 +3306,7 @@ impl Debug for Placement
 impl Debug for Plan
 impl Debug for Position
 impl Debug for Presence
+impl Debug for Problem
 impl Debug for Profile
 impl Debug for ProgressOf
 impl Debug for Queued
@@ -3378,6 +3381,7 @@ impl Default for Args
 impl Default for Ask
 impl Default for Backs
 impl Default for Blocked
+impl Default for BrowserTab
 impl Default for Budgets
 impl Default for By
 impl Default for Caller
@@ -3435,7 +3439,6 @@ impl Default for Spec
 impl Default for Spring
 impl Default for Status
 impl Default for Storms
-impl Default for Tab
 impl Default for TestApps
 impl Default for TestCells
 impl Default for Timing
@@ -3532,6 +3535,7 @@ impl Eq for Placement
 impl Eq for Plan
 impl Eq for Position
 impl Eq for Presence
+impl Eq for Problem
 impl Eq for ProgressOf
 impl Eq for Reading
 impl Eq for Ready
@@ -3691,6 +3695,7 @@ impl PartialEq for Placement
 impl PartialEq for Plan
 impl PartialEq for Position
 impl PartialEq for Presence
+impl PartialEq for Problem
 impl PartialEq for Profile
 impl PartialEq for ProgressOf
 impl PartialEq for Queued
@@ -3921,6 +3926,7 @@ impl StructuralPartialEq for Placement
 impl StructuralPartialEq for Plan
 impl StructuralPartialEq for Position
 impl StructuralPartialEq for Presence
+impl StructuralPartialEq for Problem
 impl StructuralPartialEq for Profile
 impl StructuralPartialEq for ProgressOf
 impl StructuralPartialEq for Queued
@@ -4307,7 +4313,7 @@ struct aio::http::Presence
 struct aio::http::Reply
 struct aio::http::Req
 struct aio::http::Route
-struct aio::http::Tab
+struct aio::http::TabWire
 struct aio::http::Viewer
 struct aio::http::side::Closed
 struct aio::http::side::Frame
@@ -4438,10 +4444,10 @@ struct aio::testing::TestPage<'a, T: Cell>
 struct aio::testing::TestServer<T: Cell>
 struct aio::testing::TestUi
 struct aio::tls::Tls
+struct aio::ui::BrowserTab
 struct aio::ui::Eval
 struct aio::ui::Part<T: 'static, R: ?Sized, F>
 struct aio::ui::Seed
-struct aio::ui::Tab
 struct aio::ui::prelude::Eval
 struct aio::update::Blocked
 struct aio::update::Contract
@@ -4559,7 +4565,6 @@ use aio::time::sleep_until = tokio::time::sleep::sleep_until
 use aio::time::timeout = tokio::time::timeout::timeout
 use aio::ui::Attribute = air::props::Attribute
 use aio::ui::Callback = air::reactive::Callback
-use aio::ui::Code = keyboard_types::code::Code
 use aio::ui::Component = air::Component
 use aio::ui::Effect = air::reactive::Effect
 use aio::ui::ErrorBoundary = air::dom::ErrorBoundary
@@ -4571,6 +4576,7 @@ use aio::ui::Global = air::global::Global
 use aio::ui::GlobalMemo = air::global::GlobalMemo
 use aio::ui::H = air::h::H
 use aio::ui::Key = keyboard_types::key::Key
+use aio::ui::KeyCode = keyboard_types::code::Code
 use aio::ui::Location = keyboard_types::location::Location
 use aio::ui::Memo = air::reactive::Memo
 use aio::ui::Modifiers = keyboard_types::modifiers::Modifiers
@@ -4646,13 +4652,11 @@ use aio::ui::prelude::AnimationEvent = air::event::AnimationEvent
 use aio::ui::prelude::Attribute = air::props::Attribute
 use aio::ui::prelude::Callback = air::reactive::Callback
 use aio::ui::prelude::ClipboardEvent = air::event::ClipboardEvent
-use aio::ui::prelude::Code = keyboard_types::code::Code
 use aio::ui::prelude::Component = air::Component
 use aio::ui::prelude::CompositionEvent = air::event::CompositionEvent
 use aio::ui::prelude::DataTransfer = air::event::DataTransfer
 use aio::ui::prelude::DragData = air::event::DragData
 use aio::ui::prelude::DragEvent = air::event::DragEvent
-use aio::ui::prelude::Effect = air::reactive::Effect
 use aio::ui::prelude::ErrorBoundary = air::dom::ErrorBoundary
 use aio::ui::prelude::ErrorBoundaryProps = air::dom::ErrorBoundaryProps
 use aio::ui::prelude::Event = air::event::Event
@@ -4669,6 +4673,7 @@ use aio::ui::prelude::GlobalMemo = air::global::GlobalMemo
 use aio::ui::prelude::H = air::h::H
 use aio::ui::prelude::ImageEvent = air::event::ImageEvent
 use aio::ui::prelude::Key = keyboard_types::key::Key
+use aio::ui::prelude::KeyCode = keyboard_types::code::Code
 use aio::ui::prelude::KeyboardData = air::event::KeyboardData
 use aio::ui::prelude::KeyboardEvent = air::event::KeyboardEvent
 use aio::ui::prelude::Location = keyboard_types::location::Location

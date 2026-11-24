@@ -32,7 +32,7 @@ const COPIES_MAX: usize = 256;
 /// key, no session: a public sign-in page) gets none: its views show empty
 /// cells.
 pub struct Seed {
-    tab: super::Tab,
+    tab: super::BrowserTab,
     seer: Option<crate::Caller>,
     cells: Vec<(&'static str, Arc<str>)>,
 }
@@ -42,7 +42,7 @@ impl Seed {
     pub fn new(viewer: &Viewer) -> Self {
         let by = crate::By::User(viewer.user.clone().unwrap_or_else(|| "peer".into()));
         let seer = viewer.linked.then(|| crate::Caller { by, role: viewer.role.clone() });
-        Self { tab: super::Tab::new(viewer.user.clone()), seer, cells: Vec::new() }
+        Self { tab: super::BrowserTab::new(viewer.user.clone()), seer, cells: Vec::new() }
     }
 
     /// With cell `h`, as the viewer sees it now.

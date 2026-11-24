@@ -656,13 +656,13 @@ mod tests {
         let h = heard.clone();
         let _sub = crate::report::subscribe(move |d| {
             if d.kind == "vitals:test-layer" {
-                h.lock().unwrap().push((d.severity, d.message.clone(), d.code()));
+                h.lock().unwrap().push((d.severity, d.message.clone(), d.problem()));
             }
         });
         stepped("test-layer", Status::Frozen, "test-layer frozen: 9 ms");
         let got = heard.lock().unwrap().clone();
         assert_eq!(got.len(), 1);
-        assert_eq!((got[0].0, got[0].2), (crate::log::Level::Warn, crate::report::Code::Vitals));
+        assert_eq!((got[0].0, got[0].2), (crate::log::Level::Warn, crate::report::Problem::Vitals));
         assert!(got[0].1.starts_with("test-layer frozen: 9 ms"), "{got:?}");
     }
 

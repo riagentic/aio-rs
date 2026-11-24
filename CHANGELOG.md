@@ -160,6 +160,15 @@ version may break things.
 - **Breaking: `Rejected::code()` is gone**: the field says the same
   (`e.code`, as `e.why`): `e.code() == Some(Code::X)` is
   `e.code == Some(Code::X)`.
+- **Breaking: no name means two things in one app's scope**: with
+  `aio::prelude::*` and `aio::ui::prelude::*` both in, `Code` and `Effect`
+  were ambiguous (an error where named). The view prelude's key code is
+  `KeyCode` (`e.code() == KeyCode::KeyA`), and air's `Effect` handle
+  stays out of it (`aio::ui::Effect`): `Code` and `Effect` are the cell's.
+  `aio::report::Code` is `aio::report::Problem` (`Problem::of(kind)`,
+  `Diagnostic::problem()`), so `Code` is only a refusal's wire code;
+  `aio::ui::Tab` is `aio::ui::BrowserTab` and `aio::http::Tab`
+  `aio::http::TabWire`, so `Tab` is only the kit's tab.
 - **Breaking:** `[build] budget_mb` takes a fraction (`14.5`) or a size
   as `[budgets]` writes one (`"14.5MB"`): `Build::budget_mb` is
   `Option<f64>`.

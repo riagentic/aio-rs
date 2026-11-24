@@ -57,19 +57,27 @@ pub fn hot_markup(params: &serde_json::Value) -> Result<(Vec<String>, Vec<air::h
     Ok((files.ok_or("a file is not text")?, markup))
 }
 
-/// Everything a view file needs.
+/// Everything a view file needs. It and `aio::prelude` go together: no
+/// name means two things.
+///
+/// ```
+/// use aio::prelude::*;
+/// use aio::ui::prelude::*;
+/// let refused: Option<Code> = Rejected::new("no").code;
+/// assert_eq!((refused, KeyCode::KeyA.to_string()), (None, "KeyA".to_string()));
+/// ```
 #[cfg(feature = "kit")]
 pub mod prelude {
     pub use super::on_air::events::*;
     pub use super::on_air::{
-        Attribute, Callback, Code, Component, ErrorBoundary, ErrorBoundaryProps, Eval, EvalError, EventHandler,
-        Fragment, FragmentProps, Global, GlobalMemo, H, Key, Location, Memo, Modifiers, MouseButton, Optimistic, Prop,
+        Attribute, Callback, Component, ErrorBoundary, ErrorBoundaryProps, Eval, EvalError, EventHandler, Fragment,
+        FragmentProps, Global, GlobalMemo, H, Key, KeyCode, Location, Memo, Modifiers, MouseButton, Optimistic, Prop,
         Props, Resource, Signal, Suspense, SuspenseProps, Task, TrackedMemo, View, ViewError, callback, comp,
         component, context, effect, eval, geometry, h, in_views, key_event, memo, on_cleanup, once, provide,
         provide_root, resource, rsx, seeded_resource, signal, spawn, spawn_forever, task, try_context, untrack,
         use_optimistic, watch,
     };
-    pub use super::on_air::{Effect, Retry, effect_quiet, on_change, retry};
+    pub use super::on_air::{Retry, effect_quiet, on_change, retry};
     pub use crate::{act, use_css};
     /// `rsx!`'s paths start at `air`: an app needs no dependency of its own.
     #[doc(hidden)]
@@ -667,13 +675,13 @@ pub fn back_taken(handlers: &[&dyn Fn() -> bool]) -> bool {
 /// [`crate::client!`] reads only these: a cell the tab has no copy of is an empty
 /// one, never the process's (which holds every user's data).
 #[derive(Clone, Default)]
-pub struct Tab {
+pub struct BrowserTab {
     /// Who it is signed in as; `None`: the key's holder, or nobody yet.
     pub user: Option<String>,
     sources: std::collections::HashMap<std::any::TypeId, std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
-impl Tab {
+impl BrowserTab {
     pub fn new(user: Option<String>) -> Self {
         Self { user, sources: Default::default() }
     }
@@ -933,9 +941,9 @@ macro_rules! client {
         pub static HANDLE: $crate::ui::Global<$crate::Source<$cell>> =
             $crate::ui::Global::named(
                 || match (SOURCE.get(), DB.get()) {
-                    // A browser tab's own copy ([`$crate::ui::Tab`]): its
+                    // A browser tab's own copy ([`$crate::ui::BrowserTab`]): its
                     // user's view, never the process's; none: an empty one.
-                    _ if let Some(t) = $crate::ui::try_context::<$crate::ui::Tab>() => t
+                    _ if let Some(t) = $crate::ui::try_context::<$crate::ui::BrowserTab>() => t
                         .source::<$cell>()
                         .unwrap_or_else(|| $crate::Source::Local($crate::Handle::memory())),
                     (Some(s), _) => s.clone(),

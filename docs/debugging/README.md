@@ -196,7 +196,7 @@ More: [feedback](feedback.md), [production](production.md), every kind in
   only the user's own reports. `aio::feedback` is the "Report a problem"
   button's cell (sending, saved, delivered or why not).
 - `aio::report::on_problem(|kind, msg| ..)` hears every problem as it
-  happens, also warnings that are not reports; `aio::report::Code::of(kind)`
+  happens, also warnings that are not reports; `aio::report::Problem::of(kind)`
   types it (`panic`, `tripped`, `refused`, `effect:timeout`,
   `budget:method`, `storm`, `degraded:<part>`, `memory:high`,
   `window:crashed`, `update:failed`, `user`, `degraded-recovered:<part>`,
@@ -205,7 +205,7 @@ More: [feedback](feedback.md), [production](production.md), every kind in
 - `aio::report::subscribe(|d| ..)` hears the same as a typed event (aio's
   `onDiagnostic`): `d.kind`, `d.message`, `d.severity` (`Error` for a
   problem, `Warn` for a warning or a vitals step up, `Info` for a
-  recovery), `d.tip`, `d.code()`, `d.held` (repeats held back);
+  recovery), `d.tip`, `d.problem()`, `d.held` (repeats held back);
   `aio::report::recent()` keeps the newest 200.
 - `data/health.json` says each part's state every 10 s; `ax health <app>`
   reads it and fails for a degraded, stuck or stopped app. A served app

@@ -149,10 +149,10 @@ window)` ([lifecycle](../state/lifecycle.md)).
 
 A problem is anything worth a person's look: written as a report (most
 kinds), said to the [`on_problem` hook](#hearing-problems-in-code), put on
-the diagnostic bus. `aio::report::Code::of(kind)` types the kind and
+the diagnostic bus. `aio::report::Problem::of(kind)` types the kind and
 `tip()` says what to do.
 
-| Kind | `report::Code` | Report? | Made when | Tip |
+| Kind | `report::Problem` | Report? | Made when | Tip |
 |---|---|---|---|---|
 | `panic` | `Panic` | yes | any panic: a method's (its call refused), an effect's, a thread's | return `Err` (`reject!`) for an expected failure |
 | `tripped` | `Tripped` | yes | [the breaker](#the-breaker) disabled a cell | fix the failing calls, then enable the cell |
@@ -185,7 +185,7 @@ let tx = std::sync::Mutex::new(tx);
 // Runs where the problem happened, maybe while a cell is mid-call: hand
 // the work off (a channel, a task), never call a cell from here.
 aio::report::on_problem(move |kind, msg| {
-    let tip = aio::report::Code::of(kind).tip().unwrap_or("see the report");
+    let tip = aio::report::Problem::of(kind).tip().unwrap_or("see the report");
     _ = tx.lock().unwrap().send(format!("{kind}: {msg} ({tip})"));
 });
 
@@ -354,7 +354,7 @@ What aio has and aio-rs doesn't, with what to use instead:
 - **`onError`'s `original`.** A panic's text and place are in the
   diagnostic's message; there is no thrown value to keep.
 - **aio's `MEMORY_*`, `BUDGET_*` and test harness codes**: a budget or
-  memory step is a problem kind on the bus (`report::Code`), and the
+  memory step is a problem kind on the bus (`report::Problem`), and the
   test harnesses fail with words.
 
 ## API

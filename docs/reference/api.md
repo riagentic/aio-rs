@@ -130,7 +130,7 @@ In `aio`: `aio::boot` (the boot report), `aio::paths` (where files are),
 | `aio::head` | the page's title and meta tags |
 | `aio::colors`, `aio::kit::theme` | the colours from one hue, the `--aio-*` tokens |
 | `aio::page` | the page the views are drawn in (with `kit` or `web`) |
-| `aio::ui::prelude` | the view API (with `kit`): `rsx!`, `#[component]`, `View`, `Signal`, `signal`, `memo`, `effect`, `watch`, `once`, `on_cleanup`, `provide`/`context`, `callback`, `task`, `spawn`, `resource`, `Global`, `ErrorBoundary`, `Suspense`, `eval`, the event types, `Key`, `Modifiers` ([views](../ui/views.md)) |
+| `aio::ui::prelude` | the view API (with `kit`): `rsx!`, `#[component]`, `View`, `Signal`, `signal`, `memo`, `effect`, `watch`, `once`, `on_cleanup`, `provide`/`context`, `callback`, `task`, `spawn`, `resource`, `Global`, `ErrorBoundary`, `Suspense`, `eval`, the event types, `Key`, `KeyCode` (a key's place: `e.code()`), `Modifiers` ([views](../ui/views.md)) |
 | `aio::ui::clock` | the views' clock (`Instant`, `sleep`): a view's own timer on it moves with `TestUi::advance` |
 | `aio::web` | the app in the browser's own page (feature `web`, `ax build --web`) |
 
