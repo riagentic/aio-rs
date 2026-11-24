@@ -1227,7 +1227,9 @@ finds the other one's.
 ax shot <app> [file] [--cdp port] [--window n] [--check base] [--update base] [--threshold n] [--max-diff r] [--selector css] [--full] [--size WxH] [--video file] [--duration s] [--markers]
 ```
 
-A PNG of the window (default `<id>-<time>.png`). `--json`: `{file, bytes,
+A PNG of the window (default `<id>-<time>.png`), at rest: a CSS transition
+or animation that ends is put at its end first (an endless one, a
+spinner, stays where it is). `--json`: `{file, bytes,
 width, height, did}`; with `--video`, `{"event":"recording","file","t0"}`
 on stderr once its first frame is taken (`t0`: its epoch ms, the video's
 clock), then the video's `{file, bytes, frames, seconds, t0, markers}`.

@@ -27,6 +27,9 @@ pub struct Raw {
     pub repeat: bool,
     pub composing: bool,
     pub checked: bool,
+    /// The target takes typing: a text `input`, a `textarea`, a `select`,
+    /// an editable element (`contenteditable`).
+    pub field: bool,
     /// `MouseEvent.button`; `None`: not a mouse event.
     pub button: Option<u8>,
     pub buttons: u16,
@@ -126,7 +129,8 @@ impl Raw {
         w.u8(self.location);
         let flags =
             [self.shift, self.ctrl, self.alt, self.meta, self.repeat, self.composing, self.checked, self.primary];
-        w.u8(flags.iter().enumerate().fold(0, |f, (i, b)| f | (*b as u8) << i));
+        let flags = flags.iter().chain([&self.field]).enumerate();
+        w.u16(flags.fold(0, |f, (i, b)| f | (*b as u16) << i));
         w.u8(self.button.unwrap_or(255));
         w.u16(self.buttons);
         self.points.iter().chain(&self.delta).for_each(|v| w.f64(*v));
@@ -161,7 +165,7 @@ impl Raw {
         let ids = (0..n).map(|_| r.u32()).collect::<Option<Vec<_>>>()?;
         let (name, key, code) = (r.str()?, r.str()?, r.str()?);
         let location = r.u8()?;
-        let f = r.u8()?;
+        let f = r.u16()?;
         let bit = |i: u8| f & (1 << i) != 0;
         let button = Some(r.u8()?).filter(|b| *b != 255);
         let buttons = r.u16()?;
@@ -204,6 +208,7 @@ impl Raw {
             composing: bit(5),
             checked: bit(6),
             primary: bit(7),
+            field: bit(8),
             button,
             buttons,
             points,
@@ -480,6 +485,7 @@ pub struct KeyboardData {
     modifiers: Modifiers,
     repeat: bool,
     composing: bool,
+    field: bool,
 }
 
 impl KeyboardData {
@@ -491,7 +497,15 @@ impl KeyboardData {
             Location::Right => 2,
             Location::Numpad => 3,
         };
-        Self { key: key.to_string(), code: code.to_string(), location, modifiers, repeat, composing: false }
+        Self {
+            key: key.to_string(),
+            code: code.to_string(),
+            location,
+            modifiers,
+            repeat,
+            composing: false,
+            field: false,
+        }
     }
     pub fn key(&self) -> Key {
         Key::from_str(&self.key).unwrap_or(Key::Unidentified)
@@ -516,6 +530,12 @@ impl KeyboardData {
     pub fn is_composing(&self) -> bool {
         self.composing
     }
+    /// Pressed in a field that takes typing: a text `input` (not a
+    /// checkbox, radio, button, range, color or file one), a `textarea`, a
+    /// `select`, a `contenteditable` element.
+    pub fn in_field(&self) -> bool {
+        self.field
+    }
 }
 
 impl FromRaw for KeyboardData {
@@ -527,6 +547,7 @@ impl FromRaw for KeyboardData {
             modifiers: r.modifiers(),
             repeat: r.repeat,
             composing: r.composing,
+            field: r.field,
         }
     }
 }
@@ -887,6 +908,7 @@ mod tests {
             value: "é".into(),
             shift: true,
             checked: true,
+            field: true,
             button: Some(2),
             points: [1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             values: vec![("name".into(), "Ann".into())],

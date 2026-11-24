@@ -253,7 +253,7 @@ async fn ask_export(id: Uuid, title: String) {
     match aio_shell::page::save(&ask).await {
         Ok(Some(path)) => _ = act!(export(id, path)),
         Ok(None) => {}
-        Err(e) => _ = toast(format!("No save dialog: {e}"), Tone::Error),
+        Err(e) => toast(format!("No save dialog: {e}"), Tone::Error),
     }
 }
 
@@ -262,7 +262,7 @@ async fn ask_import() {
     match aio_shell::page::pick(&ask).await {
         Ok(Some(path)) => _ = act!(import(path)),
         Ok(None) => {}
-        Err(e) => _ = toast(format!("No open dialog: {e}"), Tone::Error),
+        Err(e) => toast(format!("No open dialog: {e}"), Tone::Error),
     }
 }
 

@@ -20,7 +20,7 @@ tokens: put the theme on the page first
 | Layout | `Card`, `Stack`, `Row`, `Tabs`, `Table`, `Pagination`, `Breadcrumb`, `Direction` |
 | Status | `Spinner`, `Progress`, `Skeleton`, `Alert`, `EmptyState`, `ConnectionStatus`, `Avatar` |
 | Lists | `VirtualList`, `window(..)`, `Transition`, `TransitionGroup` |
-| Keys | `GlobalKeys`, `use_global_key`, `use_key_claim`, `Chord` |
+| Keys | `GlobalKeys`, `use_global_key`, `use_global_keys`, `use_key_claim`, `Chord` |
 | Other | `Markdown`, `ZoomPan`, `Browser` (a guest web page), `Island` / `WebIsland` (plain JS inside a view), `SignIn`, `ConnectPage`, `TimeTravelPanel`, `Defer`, `use_held`, `use_spring`, `use_frame`, `use_interval`, `use_window_event`, `use_window_listener`, `use_back_button` |
 
 The parts a person uses inside a control carry handles of their own for
@@ -302,8 +302,9 @@ assert!(ui.absent("close"), "Escape closed the dialog");
 | `Confirm` | `open`, `onconfirm`, `oncancel` (also Escape and the backdrop), `title`, `message`, `confirm_label` (`"Confirm"`), `cancel_label` (`"Cancel"`), `danger`. Handles `confirmOk`, `confirmCancel`. |
 | `ConfirmButton` | `confirm` (the question), `onconfirm` (only once confirmed), `confirm_title`, `confirm_label`, `cancel_label`, `variant` (`Danger` makes the confirm button danger too), `disabled`, children; focus returns to it when the dialog closes |
 | `ToastHost` | once, in the root: a polite live region (an error toast is an alert) |
-| `toast(text, tone)` | shows for 4 s; gives a `Toast` with `.dismiss()` |
+| `toast(text, tone)` | shows for 4 s |
 | `toast_for(text, tone, stay)` | `stay: Option<Duration>`; `None`: until dismissed (its ×, `toastDismiss`) |
+| `toast_handle(text, tone, stay)` | `toast_for`, giving a `Toast` whose `.dismiss()` takes it away early (a "Saving…" until the save ends) |
 | `toasts()` | the messages showing, oldest first (for tests and agents) |
 | `Portal { children }` / `PortalHost` | draws its children in the host (put it around the app once) while it lives: a popover that must escape an `overflow: hidden` box ([islands](islands.md)); `Portal { target: "side" }` draws in the `PortalHost { name: "side" }` showing anywhere on the page (aio's `target`; none showing: in place) |
 
@@ -314,7 +315,7 @@ or an effect, tell people with `cx.tell(..)` instead
 ## Keys
 
 ```rust
-use aio::kit::{Chord, GlobalKeys, use_global_key, use_key_claim};
+use aio::kit::{Chord, GlobalKeys, use_global_key, use_global_keys, use_key_claim};
 use aio::ui::prelude::*;
 
 static COUNT: Global<i32> = Global::new(|| 0);
@@ -330,6 +331,8 @@ fn Editor() -> View {
     use_global_key("mod+s", |_| *COUNT.write() += 1);
     use_global_key("ArrowDown", |_| *COUNT.write() += 1); // repeats
     use_global_key(Chord::parse("mod+z").unwrap().repeating(true), |_| *COUNT.write() -= 1);
+    // A list in one hook (hooks can't be called in a loop): 1…9 set the count.
+    use_global_keys((1..=9).map(|n| (n.to_string(), move |_| *COUNT.write() = n)));
     // Taken before any element hears it (aio's capture listener).
     use_key_claim("Tab", |_| {});
     rsx! {
@@ -348,8 +351,11 @@ assert_eq!(ui.text("editor"), "1");
   `meta`, `mod` (Ctrl, or ⌘ on macOS), then a character or a DOM key name
   (`Enter`, `esc`, `space`, `ArrowUp`/`up`, `F1`). `TestUi::press` and
   `ax trigger <app> window press ctrl+n` take the same words.
-- Bindings don't fire while typing in a field unless they say so; a key
-  pressed with nothing focused reaches them too.
+- Bindings don't fire while typing in a field (a text `input`, a
+  `textarea`, a `select`, a `contenteditable` element; not a checkbox or a
+  button) unless they say so (`Chord::in_fields`); a key pressed with
+  nothing focused reaches them too. An element that types though it is no
+  field (a canvas editor) calls `aio::kit::field_key(&e)` in its `onkeydown`.
 - `e.prevent_default()` in a handler comes too late in a window (the
   browser moved on before the view hears the key): put
   `data-aio-prevent` on the element instead.

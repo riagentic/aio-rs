@@ -246,7 +246,8 @@ once at the root · data-t on what tests drive",
   unless it is movement or Chord::repeating(true). WindowEvent::MouseMove
   comes at most every 100 ms.
 - Keys app-wide: aio::kit::GlobalKeys around the app, use_global_key(chord,
-  f) (keys pressed with nothing focused reach it too); use_key_claim(chord,
+  f) (keys pressed with nothing focused reach it too; not keys typed in a
+  field), use_global_keys(list) for many in one hook; use_key_claim(chord,
   f) takes a chord before any element hears it (aio's capture listener).
   A chord: modifiers then a key, joined by + (ctrl, shift, alt, meta, mod =
   Ctrl or ⌘ on macOS; a character or a DOM key name: Enter, esc, space,

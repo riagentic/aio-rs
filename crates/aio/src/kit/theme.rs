@@ -165,7 +165,7 @@ const DANGER_INK: &str = r#"/* The ink ON a danger fill, solved from the fill it
 const KIT_START: &str = ":root {\n  --aio-ui-accent:";
 
 /// The look's layout regions (start and end banners; aio's `SHELL_REGIONS`):
-/// the `<main>` page shell and the layout classes.
+/// the `.container` page shell and the layout classes.
 const LAYOUT: [(&str, &str); 2] =
     [("/* ── page shell ", "/* ── type "), ("/* ── the six classes worth having ", "/* ── the three environments ")];
 
@@ -215,15 +215,19 @@ mod tests {
         let ui = |theme, hue, layout| Ui { theme, hue, layout, ..Ui::default() };
         let full = sheet(&ui(Look::Full, None, true), "kit", false);
         assert_eq!(full, super::super::theme_css(hue("kit")), "the whole theme");
+        assert!(
+            full.contains(":where(.container)") && !full.contains(":where(main)"),
+            "the page shell is opt-in: a bare <main> is the app's"
+        );
         assert_eq!(sheet(&ui(Look::Auto, None, true), "kit", false), full, "auto: the look while the app has no CSS");
         let tokens = sheet(&ui(Look::Tokens, None, true), "kit", false);
         assert_eq!(sheet(&ui(Look::Auto, None, true), "kit", true), tokens, "and steps aside when it has");
         assert!(tokens.contains("--aio-hue:") && tokens.contains(".aio-btn {"), "tokens and the kit's controls");
-        assert!(!tokens.contains("body{") && !tokens.contains(":where(main)"), "nothing paints a bare element");
+        assert!(!tokens.contains("body{") && !tokens.contains(":where(.container)"), "nothing paints a bare element");
         assert_eq!(sheet(&ui(Look::None, None, true), "kit", false), "");
         assert!(sheet(&ui(Look::Full, Some(210), true), "kit", true).contains("--aio-hue:210;"), "the hue knob");
         let bare = sheet(&ui(Look::Full, None, false), "kit", false);
-        assert!(!bare.contains(":where(main)") && !bare.contains(":where(.card)"), "no layout");
+        assert!(!bare.contains(":where(.container)") && !bare.contains(":where(.card)"), "no layout");
         assert!(
             bare.contains(":where(h1,h2,h3,h4,h5,h6)") && bare.contains("prefers-reduced-motion"),
             "the look stays"

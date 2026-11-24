@@ -95,8 +95,16 @@ async fn capture(
     png
 }
 
-/// The shot of the window `s` drives, once it painted.
+/// Every running CSS transition and animation that ends, put at its end:
+/// the page as it rests, at once (an entrance's opacity half-way, or held
+/// at its start by a display that draws no frames yet, would dim the
+/// shot). An endless one (a spinner) stays where it is.
+const ENDED: &str = "document.getAnimations().forEach((a) => { \
+     if (a.playState === 'running' && Number.isFinite(a.effect?.getComputedTiming().endTime)) a.finish() })";
+
+/// The shot of the window `s` drives, once it painted, at rest ([`ENDED`]).
 async fn frame(s: &mut crate::cdp::Session, selector: Option<&str>, full: bool) -> Result<Vec<u8>, String> {
+    s.eval(ENDED).await?;
     s.eval(crate::cdp::PAINTED).await?;
     let mut params = json!({ "format": "png", "captureBeyondViewport": full });
     if let Some(sel) = selector {
@@ -168,6 +176,28 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aio::ui::prelude::*;
+
+    const MOVING: &str = "@keyframes enter { from { opacity: 0 } } .in { animation: enter 60s } \
+                          .spin { animation: enter 1s infinite }";
+
+    fn entering() -> View {
+        rsx! {
+            style { {MOVING} }
+            p { class: "in", "data-t": "in", "entered" }
+            p { class: "spin", "data-t": "spin", "spinning" }
+        }
+    }
+
+    #[test]
+    fn a_shot_shows_the_page_at_rest_an_endless_animation_where_it_is() {
+        let mut ui = aio::testing::TestUi::new(entering);
+        ui.eval(ENDED);
+        let opacity = ui.eval("getComputedStyle(document.querySelector('.in')).opacity");
+        assert_eq!(opacity, "1", "an entrance put at its end");
+        let spin = ui.eval("document.querySelector('.spin').getAnimations()[0].playState");
+        assert_eq!(spin, "running");
+    }
 
     fn img(w: u32, h: u32, px: [u8; 4]) -> RgbaImage {
         RgbaImage::from_pixel(w, h, image::Rgba(px))
