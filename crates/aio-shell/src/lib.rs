@@ -1506,6 +1506,32 @@ mod tests {
         assert_eq!(v["posix"], aio::serde_json::json!(["/srv/a.png", null, null, null]), "{v}");
     }
 
+    /// A notification is held for its click until it is done, at most
+    /// `NOTES_HELD` of them: Windows may never say `close` for one moved
+    /// to the Action Center, and each held its native toast for good.
+    #[test]
+    fn the_runtime_holds_a_bounded_number_of_notifications() {
+        let js = include_str!("main.js");
+        let at = js.find("function hold(").unwrap();
+        let def = &js[at..at + js[at..].find("\n}\n").unwrap() + 2];
+        let test = format!(
+            "{def}\n
+             const m = new Map();
+             for (let i = 1; i <= 100; i++) hold(m, `#${{i}}`, i, 64);
+             hold(m, 'tag', 'a', 64); hold(m, '#50', 'again', 64); hold(m, 'tag', 'b', 64);
+             console.log(JSON.stringify({{ size: m.size, first: [...m.keys()][0], last: [...m.entries()].slice(-2) }}));"
+        );
+        let Ok(out) = std::process::Command::new("node").args(["-e", &test]).output() else {
+            return eprintln!("skipped: no node");
+        };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let v: aio::serde_json::Value = aio::serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["size"], 64, "{v}");
+        assert_eq!(v["first"], "#38", "the oldest let go first: {v}");
+        assert_eq!(v["last"], aio::serde_json::json!([["#50", "again"], ["tag", "b"]]), "a reused key is the newest");
+        assert!(js.contains("hold(notes, key, n, NOTES_HELD)"));
+    }
+
     /// A syntax error in the shell is a window that never opens (aio tests
     /// the generated main parses).
     #[test]

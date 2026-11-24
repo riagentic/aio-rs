@@ -184,6 +184,10 @@ version may break things.
 
 ### Fixed
 
+- A desktop notification is held for its click until it is clicked,
+  closed or failed, the last 64 at most: Windows may never say `close`
+  for one moved to the Action Center, so every one shown stayed in the
+  runtime's memory for good.
 - A cell's diagnostic (a refused reaction, a timed-out effect, a refused
   `#[on_stop]`, a cell disabled after failures) sometimes came without
   its cell's name and state: when another thread was showing a commit of

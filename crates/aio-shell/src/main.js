@@ -279,6 +279,20 @@ function localFile(pathname, P) {
   return /\.(png|jpe?g|gif|webp|avif|svg|bmp|ico|mp4|m4v|webm|ogv|ogg|oga|mp3|wav|m4a|flac|aac|opus)$/i.test(p) ? p : null
 }
 
+// Notification `n` held under `key` (a reused key's is the newest), the
+// oldest let go past `max`: Windows may never say `close` for one moved to
+// the Action Center, so a held one could stay for good. One let go keeps
+// showing; only its click is lost.
+const NOTES_HELD = 64
+function hold(notes, key, n, max) {
+  notes.delete(key)
+  notes.set(key, n)
+  for (const k of notes.keys()) {
+    if (notes.size <= max) break
+    notes.delete(k)
+  }
+}
+
 app.whenReady().then(() => {
   openSplash()
   // No menu (Electron's default carries DevTools and reload), except on
@@ -654,8 +668,8 @@ app.whenReady().then(() => {
 
   // Notifications from the main process: no permission to ask, the app's
   // icon, and a click that works while the window is hidden. Each is held
-  // until it is done (one nothing holds is collected, its click lost); a
-  // tag replaces the one before it.
+  // until it is done (one nothing holds is collected, its click lost), the
+  // last NOTES_HELD at most (hold); a tag replaces the one before it.
   const notes = new Map()
   let noteSeq = 0
   let unsupportedSaid = false
@@ -668,7 +682,7 @@ app.whenReady().then(() => {
     const key = m.tag || `#${++noteSeq}`
     notes.get(key)?.close()
     const n = new Notification({ title: m.title, body: m.body, silent: !!m.silent, icon })
-    notes.set(key, n)
+    hold(notes, key, n, NOTES_HELD)
     const done = () => { if (notes.get(key) === n) notes.delete(key) }
     n.on('click', () => {
       done()
