@@ -153,6 +153,13 @@ version may break things.
 - `act!(method(args))` needs only the client's `Ui` in scope, no
   `<Cell>Calls` import: it calls through the cell's typed calls, which
   `#[methods]` also makes as a type of their own.
+- `aio::feedback::cell()` opens the `feedback` cell on its first ask
+  (once `aio::boot` has set up reports), no longer at boot: an app that
+  never asks (a service) carries none of it. `open()` gives the one open.
+- Smaller binaries: a link's session, the local door's operator asks, the
+  HTTP fallback and JSON objects' builders are made once, not once per
+  served cell or per call site. With the lazy `feedback` cell, the
+  template service (`[updates]` on) is 6,994,136 -> 6,680,280 bytes.
 - Disposing a probe (a prop worked out at mount, a server render's hole)
   skips the owner walk: mounting rows with props is a little faster.
 

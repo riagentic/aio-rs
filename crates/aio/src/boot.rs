@@ -240,7 +240,6 @@ pub fn begin(cfg: &Config, version: &str, dirs: &crate::paths::AppDirs) -> std::
         crate::warn!(cat: "ui", "{msg}");
         crate::report::tell(kind, msg);
     });
-    crate::feedback::open();
     eprintln!("[aio] {} {version} starting (pid {})", cfg.app.id, std::process::id());
     say(&rows(cfg, version, dirs, &|k| std::env::var(k).ok(), &|p| p.exists()));
     // What it opened and serves is known once it is up: said a second on.
