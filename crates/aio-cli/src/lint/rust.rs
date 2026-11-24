@@ -1110,6 +1110,15 @@ fn a11y(nodes: &[Node], within: Within, out: &mut Found) {
                         "\"data-drag\": \"{id}\" on the element (the drop reads it with data_transfer().get_as_text())",
                     ));
                 }
+                for name in a.iter().filter_map(|(k, _)| unset(k)) {
+                    out.push((
+                        line,
+                        Severity::Warn,
+                        "render",
+                        format!("<{tag}>'s {name} is a property no attribute sets: air writes an attribute, which does nothing"),
+                        "text as a child; else set it from a page script (`aio::ui::eval` with `aio.node(id)`)",
+                    ));
+                }
                 let within = Within { label: within.label || tag == "label", form: within.form || tag == "form" };
                 a11y(children, within, out);
             }
@@ -1125,6 +1134,20 @@ fn a11y(nodes: &[Node], within: Within, out: &mut Found) {
             Node::Match { arms, .. } => arms.iter().for_each(|(_, _, arm)| a11y(arm, within, out)),
             _ => {}
         }
+    }
+}
+
+/// A DOM property no attribute sets and air doesn't set as one (it does
+/// `muted`, `volume`, `current_time`, `playback_rate`, `indeterminate`,
+/// `dangerous_inner_html`), by the name an attribute of it gets.
+fn unset(name: &str) -> Option<&'static str> {
+    match name {
+        "srcObject" | "src-object" => Some("srcObject"),
+        "textContent" | "text-content" => Some("textContent"),
+        "innerText" | "inner-text" => Some("innerText"),
+        "scrollTop" | "scroll-top" => Some("scrollTop"),
+        "scrollLeft" | "scroll-left" => Some("scrollLeft"),
+        _ => None,
     }
 }
 

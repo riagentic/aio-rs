@@ -2415,6 +2415,7 @@ aio::testing::TestUi::press: fn press(&mut self, t: &str, key: &str)
 aio::testing::TestUi::press_key: fn press_key(&mut self, key: Key, mods: Modifiers)
 aio::testing::TestUi::press_with: fn press_with(&mut self, t: &str, key: &str, mods: Modifiers)
 aio::testing::TestUi::pressed: fn pressed(&self, t: &str) -> bool
+aio::testing::TestUi::prop: fn prop(&self, t: &str, name: &str) -> Value
 aio::testing::TestUi::read: fn read<T: Clone + 'static>(&self, g: &'static crate::ui::Global<T>) -> T
 aio::testing::TestUi::readonly: fn readonly(&self, t: &str) -> bool
 aio::testing::TestUi::rect: fn rect(&self, t: &str) -> Rect

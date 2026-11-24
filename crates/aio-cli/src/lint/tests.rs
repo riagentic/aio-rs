@@ -461,6 +461,27 @@ fn App() -> Element {
 }
 
 #[test]
+fn a_property_no_attribute_sets_is_a_warning_and_one_air_sets_is_not() {
+    let d = project(&[(
+        "src/ui.rs",
+        r#"
+fn App() -> Element {
+    rsx! {
+        video { src_object: stream, muted: true, volume: 0.5, current_time: 3 }
+        p { "textContent": "hi" }
+    }
+}
+"#,
+    )]);
+    let r = lint(d.path());
+    let got: Vec<_> =
+        r.issues.iter().filter(|i| i.area == "render").map(|i| (i.line.unwrap(), i.message.as_str())).collect();
+    assert_eq!(got.len(), 2, "{:?}", r.issues);
+    assert_eq!(got[0].0, 4);
+    assert!(got[0].1.contains("srcObject") && got[1].1.contains("textContent"), "{got:?}");
+}
+
+#[test]
 fn a_signal_read_kept_through_a_block_that_writes_is_a_warning() {
     let d = project(&[(
         "src/ui.rs",

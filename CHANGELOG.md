@@ -40,6 +40,11 @@ version may break things.
 
 - `aio::log::parse_stamp`: an RFC 3339 time (as `aio::log::stamp` writes
   it, or with an offset) as ms since the epoch.
+- `TestUi::prop(t, name)`: a property as a script reads it (`muted`,
+  `volume`, `indeterminate`), where `attr` reads the attribute.
+- `ax lint` warns on a DOM property no attribute sets and air doesn't set
+  (`src_object`, `text_content`, `inner_text`, `scroll_top`,
+  `scroll_left`): written as an attribute, it did nothing.
 
 ### Changed
 
@@ -66,6 +71,16 @@ version may break things.
 
 ### Fixed
 
+- An event that doesn't bubble reached no handler unless air listed it:
+  a media element's (`onloadeddata`, `onplay`, `ontimeupdate`, …),
+  `ontoggle`, `oncancel`, `onclose`, `oninvalid`, `onscrollend` never ran.
+  air now listens in the capture phase too and asks the event whether it
+  bubbles; a test drives every event a handler takes through the page.
+- `muted` set by a view was the element's `defaultMuted` alone (sound
+  played), and `volume`, `current_time`, `playback_rate` and a constant
+  `indeterminate` did nothing: they are set as properties (an element
+  without one, a custom element, takes the attribute). The server's paint
+  writes `muted`, and hydration hands them to the painted node.
 - A memo of a memo could still glitch: an effect older than the outer
   memo, reading it and a signal the inner one follows, ran once with the
   outer memo's old value and once more with the new one. A read now

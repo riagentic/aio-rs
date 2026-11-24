@@ -426,10 +426,11 @@
     return { ok: [...new Set(out)] };
   }
   // Reading needs no showing element: what is there, and its state.
-  if (["el", "attr", "style", "rect"].includes(op)) {
+  if (["el", "attr", "prop", "style", "rect"].includes(op)) {
     const el = find(arg.path);
     if (!el) return missing(arg.path);
     if (op === "attr") return { ok: el.getAttribute(arg.name) };
+    if (op === "prop") { const v = el[arg.name]; return { ok: ["string", "number", "boolean"].includes(typeof v) ? v : null }; }
     if (op === "style") return { ok: getComputedStyle(el).getPropertyValue(arg.name).trim() };
     if (op === "rect") { const r = el.getBoundingClientRect(); return { ok: { x: r.x, y: r.y, width: r.width, height: r.height } }; }
     const native = el.localName === "input" && ["checkbox", "radio"].includes(el.type);
