@@ -70,7 +70,7 @@ RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p aio-rs -p aio-rs-shell -p aio-
 if cargo hack --version >/dev/null 2>&1; then
   cargo hack clippy -p aio-rs --lib --each-feature --locked -- -D warnings
 else
-  for f in "" outbound server tls oidc br net kit air imbl updates web dev testing video compat; do
+  for f in "" outbound server tls oidc br net kit air imbl updates web dev testing video compat secrets; do
     cargo clippy -p aio-rs --lib --no-default-features --features "$f" --locked -- -D warnings
   done
 fi
@@ -132,6 +132,25 @@ cargo test --workspace --all-features --locked
 # same under ax dev's build, ax test and --release; shown failing first on
 # a plain debug build, which doesn't.
 scripts/parity --self-test
+# aio::secrets against a real Secret Service: a throwaway GNOME Keyring on a
+# private session bus, its files in a temp dir (never the person's keyring).
+# Without one here it is skipped, said here and last (with AIO_CI_WEB set:
+# GitHub CI, which installs it, it fails).
+if command -v gnome-keyring-daemon >/dev/null 2>&1 && command -v dbus-run-session >/dev/null 2>&1; then
+  cargo test -p aio-rs --all-features --lib --locked --no-run
+  kr=$(mktemp -d)
+  mkdir -m 700 "$kr/run"
+  ch="${CARGO_HOME:-$HOME/.cargo}"
+  rh="${RUSTUP_HOME:-$HOME/.rustup}"
+  HOME="$kr" XDG_DATA_HOME="$kr/share" XDG_CONFIG_HOME="$kr/config" XDG_RUNTIME_DIR="$kr/run" CARGO_HOME="$ch" \
+    RUSTUP_HOME="$rh" AIO_CI_SECRETS=1 dbus-run-session -- sh -c \
+    'printf ci | gnome-keyring-daemon --unlock --components=secrets >/dev/null && cargo test -p aio-rs --all-features --lib --locked secrets::'
+  rm -rf "$kr"
+else
+  secrets_skip="ci: aio::secrets' Secret Service test SKIPPED: no gnome-keyring-daemon or dbus-run-session (apt install gnome-keyring dbus)"
+  echo "$secrets_skip" >&2
+  [ -z "${AIO_CI_WEB:-}" ] || exit 1
+fi
 # The tests on a real Windows when one is named
 # (`AIO_CI_WINDOWS="user@host [ssh options]"`; Wine misruns threaded tests).
 if [ -n "${AIO_CI_WINDOWS:-}" ]; then
@@ -158,7 +177,7 @@ else
   echo "$apk_skip" >&2
 fi
 fi
-for skip in "$web_skip" "$apk_skip" "${js_skip:-}"; do
+for skip in "$web_skip" "$apk_skip" "${js_skip:-}" "${secrets_skip:-}"; do
   if [ -n "$skip" ]; then
     echo "$skip" >&2
   fi
