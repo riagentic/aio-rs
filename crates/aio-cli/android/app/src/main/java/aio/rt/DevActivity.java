@@ -46,6 +46,12 @@ public final class DevActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
                 Uri u = r.getUrl();
                 if (u.getAuthority() != null && u.getAuthority().equals(origin.getAuthority())) return false;
+                // As the app's own activity: only its page's, after a tap.
+                if (!r.isForMainFrame() || !r.hasGesture()) {
+                    Log.w("aio", "link NOT opened: " + (r.isForMainFrame() ? "no tap in the page" : "a frame's")
+                            + " (" + u.getScheme() + ")");
+                    return true;
+                }
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, u));
                 } catch (ActivityNotFoundException e) {

@@ -109,7 +109,14 @@ public final class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
-                // A link leaves the app: the app that opens it does.
+                // A link leaves the app: the app that opens it does. Only the
+                // page's own, after a tap (as on the desktop): a frame's, or
+                // one a script starts by itself, goes nowhere.
+                if (!r.isForMainFrame() || !r.hasGesture()) {
+                    Log.w("aio", "link NOT opened: " + (r.isForMainFrame() ? "no tap in the page" : "a frame's")
+                            + " (" + r.getUrl().getScheme() + ")");
+                    return true;
+                }
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, r.getUrl()));
                 } catch (ActivityNotFoundException e) {
