@@ -429,6 +429,17 @@ fn readme(n: &New, ui: bool) -> String {
         }
         false => "",
     };
+    let from = match &n.aio {
+        Aio::Path(_) => format!(
+            "Cargo.toml takes aio-rs from a checkout ({}): a clone builds only with that\n\
+             checkout beside it.",
+            n.aio
+        ),
+        _ => format!(
+            "A fresh clone builds as it is: Cargo.toml takes aio-rs from git ({}), Cargo.lock\npins its commit.",
+            n.aio
+        ),
+    };
     format!(
         "# {name}\n\n\
          An [aio-rs]({REPO}) app ({}): {what}.\n\n\
@@ -439,8 +450,7 @@ fn readme(n: &New, ui: bool) -> String {
          {more}\
          ax release {name}             # a signed release for its users' updates\n\
          ```\n\n\
-         A fresh clone builds as it is: Cargo.toml takes aio-rs from git ({}), Cargo.lock\n\
-         pins its commit. `ax pin` says which; `ax pin <version>` (or `main`, `latest`,\n\
+         {from} `ax pin` says which; `ax pin <version>` (or `main`, `latest`,\n\
          an aio-rs checkout's folder) moves the app to another.\n\
          Needs: `ax` (aio-rs's install script, or `cargo install --locked --git {REPO} aio-rs-cli`),\n\
          then `ax setup` once per machine.\n\n\
@@ -450,7 +460,6 @@ fn readme(n: &New, ui: bool) -> String {
          The app is `src/lib.rs`; `app/` is its launcher; aio.toml its one config.\n\
          The guide: {}/README.md\n",
         n.template,
-        n.aio,
         n.aio.docs()
     )
 }
@@ -1018,6 +1027,12 @@ mod tests {
         assert!(APP_LIB.contains("#[wasm_bindgen::prelude::wasm_bindgen(start)]") && APP_LIB.contains("launch(App)"));
         assert!(!get(&of("x", "cli"), "Cargo.toml").contains("wasm32"), "a tool has no page");
         assert!(!get(&of("x", "cli"), "Cargo.toml").contains("kit"), "a tool has no views");
+        // A checkout's README says a clone needs it beside, never that it builds anywhere from git.
+        let readme = files(&New { aio: Aio::Path("../a".into()), ..New::of("x") }).unwrap();
+        let readme = get(&readme, "README.md");
+        assert!(!readme.contains("from git") && !readme.contains("builds as it is"), "{readme}");
+        assert!(readme.contains("a clone builds only with that"), "{readme}");
+        assert!(get(&of("x", "app"), "README.md").contains("A fresh clone builds as it is"));
         let game = files(&New { template: "game", ..New::of("x") });
         assert!(game.unwrap_err().contains("one of app, cli, service, todo, canvas"));
     }

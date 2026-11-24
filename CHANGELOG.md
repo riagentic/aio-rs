@@ -415,6 +415,10 @@ version may break things.
   left its `<id>-<time>.png` there, untracked: the next `ax build` was
   `-dirty` and `ax release` refused it. An `ax create` app's `.gitignore`
   leaves the shots out (`/<id>-*.png`).
+- The README of an app made with `ax create --aio <checkout>` said a
+  fresh clone builds as it is, taking aio-rs from git: it takes it from
+  the checkout, so a clone builds only with that checkout beside it, as
+  its `Cargo.toml` says.
 
 ## [0.4.2] - 2026-11-11
 
