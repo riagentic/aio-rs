@@ -254,6 +254,10 @@ version may break things.
 
 ### Fixed
 
+- A `TestUi` step waits for the files its event reads: a form's submit
+  read its files as the event went out, and a click that submitted it
+  could end before they were read (the submit unheard on a loaded
+  machine). `pick_files` waited for its own; every settle does now.
 - `TestBrowser` and `TestUi`'s runtime start with
   `--disable-renderer-backgrounding`, `--disable-background-timer-throttling`
   and `--disable-backgrounding-occluded-windows`, as test browsers do: a
