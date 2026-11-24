@@ -171,6 +171,11 @@ version may break things.
 
 ### Fixed
 
+- A page's synced copy no longer serialises its whole view and writes
+  the browser's storage on every patch: a call made is kept at once, the
+  server's patches at most every 250 ms (a burst is one write) and as
+  the page hides or closes, so nothing is lost on close.
+
 - A cron line with a `*`-led day step beside another given day field
   (`0 0 */2 * 1`) is said once in the log, as aio said it: here either
   day field matching is enough, where Vixie cron needs both.
