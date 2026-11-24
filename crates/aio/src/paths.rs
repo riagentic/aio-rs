@@ -1112,9 +1112,11 @@ mod tests {
         assert_eq!(user_home(), s.root().join("home"));
         assert_eq!(xdg_data_home(), s.root().join("home/.local/share"), "never the person's XDG_DATA_HOME");
         drop(s);
-        if !in_sandbox() {
-            assert_eq!(user_home(), home_in(&real_env));
-        }
+        // Outside it, the person's: `HOME`, else `USERPROFILE` (read through a
+        // given environment: other tests' sandboxes come and go meanwhile).
+        let of = |vars: &'static [(&str, &str)]| move |k: &str| vars.iter().find(|v| v.0 == k).map(|v| PathBuf::from(v.1));
+        assert_eq!(home_in(&of(&[("HOME", "/h"), ("USERPROFILE", "/u")])), PathBuf::from("/h"));
+        assert_eq!(home_in(&of(&[("USERPROFILE", "/u")])), PathBuf::from("/u"));
     }
 
     fn args(a: &[&str]) -> Vec<String> {
