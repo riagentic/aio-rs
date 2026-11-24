@@ -244,17 +244,16 @@ fn wall(offset: &impl Fn(i64) -> Option<i64>, ms: i64) -> Option<Wall> {
 /// force within a day of it tried, kept when that instant reads back as `w`.
 fn instants(offset: &impl Fn(i64) -> Option<i64>, w: Wall) -> Instants {
     let naive = w * 60_000;
-    let mut found: Vec<i64> = [naive - 86_400_000, naive, naive + 86_400_000]
+    // The earliest and the latest (no sort: a slice sort of i64 is ~3 KB of a web build).
+    let found = [naive - 86_400_000, naive, naive + 86_400_000]
         .into_iter()
         .filter_map(|at| Some(naive - offset(at)? * 1000))
         .filter(|&t| wall(offset, t) == Some(w))
-        .collect();
-    found.sort_unstable();
-    found.dedup();
-    match found[..] {
-        [] => Instants::None,
-        [t] => Instants::One(t),
-        [a, .., b] => Instants::Two(a, b),
+        .fold(None, |b: Option<(i64, i64)>, t| Some(b.map_or((t, t), |(a, z)| (a.min(t), z.max(t)))));
+    match found {
+        None => Instants::None,
+        Some((a, b)) if a == b => Instants::One(a),
+        Some((a, b)) => Instants::Two(a, b),
     }
 }
 
