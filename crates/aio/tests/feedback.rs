@@ -60,8 +60,9 @@ async fn a_user_report_is_saved_then_delivered_budgeted_and_kept_to_keep() {
         }
     });
     let titles = || sent.lock().unwrap().iter().map(|r| r["title"].as_str().unwrap_or_default().to_string()).collect();
-    let h = aio::feedback::open().unwrap();
-    assert!(aio::feedback::cell().is_some());
+    // Opened on the first ask, once reports are set up; the same one after.
+    let h = aio::feedback::cell().unwrap();
+    assert!(aio::feedback::open().is_some_and(|o| Arc::ptr_eq(&o.state(), &h.state())));
     assert_eq!((h.state().enabled, h.state().pending), (true, 0));
     assert!(h.report("  ".into(), None, None).unwrap_err().why.contains("one-line description"));
 

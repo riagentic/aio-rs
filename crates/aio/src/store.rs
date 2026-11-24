@@ -988,7 +988,7 @@ fn json<T: Cell>(st: &T) -> Result<Value, Error> {
 /// `"bool"`, `"null"`), a list by the shape of its first item (pure).
 pub fn shape_of(v: &Value) -> Value {
     match v {
-        Value::Object(m) => Value::Object(m.iter().map(|(k, v)| (k.clone(), shape_of(v))).collect()),
+        Value::Object(m) => Value::Object(crate::object(m.iter().map(|(k, v)| (k.clone(), shape_of(v))))),
         Value::Array(a) => Value::Array(a.first().map(shape_of).into_iter().collect()),
         Value::String(_) => "string".into(),
         Value::Number(_) => "number".into(),

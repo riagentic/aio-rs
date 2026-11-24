@@ -147,15 +147,23 @@ impl Feedback {
 
 static CELL: RwLock<Option<Handle<Feedback>>> = RwLock::new(None);
 
-/// The app's `feedback` cell, once reports are set up (`aio::boot`).
+/// The app's `feedback` cell, once reports are set up (`aio::boot`):
+/// opened on the first ask, so an app that never asks (a service) carries
+/// none of it.
 pub fn cell() -> Option<Handle<Feedback>> {
-    CELL.read().unwrap_or_else(|e| e.into_inner()).clone()
+    let open = CELL.read().unwrap_or_else(|e| e.into_inner()).clone();
+    open.or_else(self::open)
 }
 
-/// Open the `feedback` cell on the reports [`crate::report::init`] set up.
+/// Open the `feedback` cell on the reports [`crate::report::init`] set up
+/// (the one open already, if any).
 pub fn open() -> Option<Handle<Feedback>> {
+    let mut cell = CELL.write().unwrap_or_else(|e| e.into_inner());
+    if let Some(h) = &*cell {
+        return Some(h.clone());
+    }
     let h = Handle::<Feedback>::memory();
     h.ready(count().ok()?).ok()?;
-    *CELL.write().unwrap_or_else(|e| e.into_inner()) = Some(h.clone());
+    *cell = Some(h.clone());
     Some(h)
 }

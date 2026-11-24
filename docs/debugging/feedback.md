@@ -145,8 +145,9 @@ a report holds the app's state, which is their data.
 
 ## A "Report a problem" button
 
-`aio::feedback` is the cell such a button uses (aio's `feedback` cell),
-open from boot: `aio::feedback::cell()` is its handle.
+`aio::feedback` is the cell such a button uses (aio's `feedback` cell):
+`aio::feedback::cell()` is its handle, opened on the first ask once
+`aio::boot` has set up reports.
 
 | Field | Means |
 |---|---|

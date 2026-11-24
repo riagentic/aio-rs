@@ -398,7 +398,7 @@ pub fn served(links: &[Link], cells: &[(&str, usize, bool)], t: &Vitals) -> serd
             row
         })
         .collect();
-    let sizes: serde_json::Map<_, _> = cells.iter().map(|(id, n, _)| (id.to_string(), (*n).into())).collect();
+    let sizes = crate::object(cells.iter().map(|(id, n, _)| (id.to_string(), (*n).into())));
     let breakers: Vec<_> = cells.iter().filter(|(_, _, on)| !on).map(|(id, ..)| *id).collect();
     json!({ "clients": clients, "cellSizes": sizes, "breakers": breakers })
 }
