@@ -26,6 +26,7 @@
 //! Not yet: a binary wire.
 use crate::patch::{self, Op};
 use crate::handle::Raw;
+use crate::kind::{AnyCell, Kind, KindOf, St, own, typed};
 use crate::{By, Cell, Cx, Door, Handle, Inputs, Rejected, Result};
 use crate::link::{Gate, MAX_MESSAGE, Pace, Sock, clients, limits_from_wire, live, session};
 #[cfg(feature = "compat")]
@@ -1491,7 +1492,7 @@ async fn users_ended(u: crate::auth::Users, token: String, mut was: crate::auth:
     }
 }
 
-type Listener<T> = Arc<dyn Fn(&Arc<T>) + Send + Sync>;
+type Listener = Arc<dyn Fn(&St) + Send + Sync>;
 type Refusal = Arc<dyn Fn(&str, &Rejected) + Send + Sync>;
 type OnSync = Arc<dyn Fn(&Synced) + Send + Sync>;
 type OnConflict = Arc<dyn Fn(&[crate::merge::Conflict]) + Send + Sync>;
@@ -1547,7 +1548,7 @@ fn evictable(oldest: Option<i64>, keep: Option<Duration>, now: i64) -> Option<Du
 
 /// A call made on the copy, waiting for the server.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct Pending {
+pub(crate) struct Pending {
     op: String,
     method: String,
     args: Value,
@@ -1571,17 +1572,18 @@ impl Pending {
     }
 }
 
-struct Copy<T> {
+struct Copy {
+    kind: &'static Kind,
     seq: u64,
     /// The server's view as sent (patches apply to this).
     view: Value,
-    confirmed: Arc<T>,
+    confirmed: St,
     pending: Vec<Pending>,
-    shown: Arc<T>,
+    shown: St,
     /// Who the waiting calls are by.
     by: By,
     /// The server's view (and state) the oldest waiting call was made on.
-    base: Option<(Value, Arc<T>)>,
+    base: Option<(Value, St)>,
     /// Fields shown merged ([`Remote::merge`]).
     merges: Vec<(String, crate::merge::Merge)>,
     /// The parts it holds ([`Remote::subscribe`]; empty: all of it).
@@ -1590,11 +1592,32 @@ struct Copy<T> {
     seen: String,
 }
 
-impl<T: Cell> Copy<T> {
-    fn new(seq: u64, view: Value, st: Arc<T>, pending: Vec<Pending>, by: By, paths: Vec<String>, seen: String) -> Self {
+impl Copy {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        kind: &'static Kind,
+        seq: u64,
+        view: Value,
+        st: St,
+        pending: Vec<Pending>,
+        by: By,
+        paths: Vec<String>,
+        seen: String,
+    ) -> Self {
         let base = (!pending.is_empty()).then(|| (view.clone(), st.clone()));
-        let mut c =
-            Self { seq, view, confirmed: st.clone(), pending, shown: st, by, base, merges: Vec::new(), paths, seen };
+        let mut c = Self {
+            kind,
+            seq,
+            view,
+            confirmed: st.clone(),
+            pending,
+            shown: st,
+            by,
+            base,
+            merges: Vec::new(),
+            paths,
+            seen,
+        };
         c.reshow();
         c
     }
@@ -1602,8 +1625,8 @@ impl<T: Cell> Copy<T> {
     /// What is kept on disk of it.
     fn saved(&self) -> Saved {
         Saved {
-            cell: T::ID.into(),
-            v: T::VERSION,
+            cell: self.kind.id.into(),
+            v: self.kind.version,
             user: match &self.by {
                 By::User(u) => u.clone(),
                 _ => String::new(),
@@ -1623,44 +1646,36 @@ impl<T: Cell> Copy<T> {
         if self.pending.is_empty() {
             self.base = None;
         }
-        let mut st = self.replayed(&self.confirmed);
+        let mut st = self.replayed(&*self.confirmed);
         // A predicted call shows only in the parts the copy holds: the rest
         // stay the defaults, never a guess made from them.
         if !self.paths.is_empty()
             && !self.pending.is_empty()
-            && let Some(h) = serde_json::to_value(&st).ok().and_then(|v| crate::held::<T>(&self.paths, &v).ok())
+            && let Some(h) = st.to_json().ok().and_then(|v| held(self.kind, &self.paths, &v).ok())
         {
             st = h;
         }
-        self.shown = Arc::new(match &self.base {
+        self.shown = match &self.base {
             Some((view, base)) if !self.merges.is_empty() => {
-                let local = serde_json::to_value(self.replayed(base));
-                match (local, serde_json::to_value(&st)) {
+                let local = self.replayed(&**base).to_json();
+                match (local, st.to_json()) {
                     (Ok(local), Ok(mut shown)) => {
                         crate::merge::show(&self.merges, view, &local, &self.view, &mut shown);
-                        crate::copy_of::<T>(shown).unwrap_or(st)
+                        (self.kind.copy_of)(shown).unwrap_or(st)
                     }
                     _ => st,
                 }
             }
             _ => st,
-        });
+        };
     }
 
     /// The calls still waiting, replayed on `from`.
-    fn replayed(&self, from: &T) -> T {
-        let mut st = from.clone();
-        for p in self.pending.iter().filter(|p| !p.waits) {
-            let cx = Cx::replay(p.at, p.inputs.clone(), &self.by);
-            let mut next = st.clone();
-            let applied =
-                crate::store::apply_guarded(&mut next, &cx, &p.method, p.args.clone()).map_err(Rejected::from);
-            if applied.and_then(|_| next.check()).is_ok() {
-                st = next;
-            }
-        }
-        st
+    fn replayed(&self, from: &dyn AnyCell) -> St {
+        (self.kind.replayed)(from, &self.pending, &self.by)
     }
+
+
 
     /// Own call `op` is in the confirmed copy (the server sends its change
     /// before its reply): no longer replayed on top of it.
@@ -1677,8 +1692,25 @@ impl<T: Cell> Copy<T> {
         if self.pending.is_empty() || self.pending.iter().any(|p| own.as_str() == Some(p.op.as_str())) {
             return None;
         }
-        Some((self.view.clone(), serde_json::to_value(&*self.shown).ok()?))
+        Some((self.view.clone(), self.shown.to_json().ok()?))
     }
+}
+
+/// `pending` (by `by`) replayed on cell `T`'s state `from`: a call that
+/// no longer applies is skipped (the server will refuse it). Typed: it runs
+/// for each waiting call on every call made ([`Kind::replayed`]).
+pub(crate) fn replayed<T: Cell>(from: &dyn AnyCell, pending: &[Pending], by: &By) -> St {
+    let mut st = crate::kind::typed_ref::<T>(from).clone();
+    for p in pending.iter().filter(|p| !p.waits) {
+        let cx = Cx::replay(p.at, p.inputs.clone(), by);
+        let mut next = st.clone();
+        let applied =
+            crate::store::apply_guarded(&mut next, &cx, &p.method, p.args.clone()).map_err(Rejected::from);
+        if applied.and_then(|_| next.check()).is_ok() {
+            st = next;
+        }
+    }
+    Arc::new(st)
 }
 
 /// What a copy keeps on disk (`Remote::connect_saved`): the server's view it
@@ -1706,8 +1738,8 @@ struct Saved {
 /// and calls still wait in it, the file is kept aside, never dropped, and
 /// said (aio's `sync-orphan-queue`): those calls were made on another
 /// shape of the cell; send them by hand, or delete the file to drop them.
-fn kept_aside<T: Cell>(file: &std::path::Path, s: &Saved) -> bool {
-    if s.cell == T::ID && s.v == T::VERSION {
+fn kept_aside(k: &Kind, file: &std::path::Path, s: &Saved) -> bool {
+    if s.cell == k.id && s.v == k.version {
         return true;
     }
     if !s.pending.is_empty() {
@@ -1717,12 +1749,12 @@ fn kept_aside<T: Cell>(file: &std::path::Path, s: &Saved) -> bool {
         let msg = format!(
             "{}: {} calls made offline on {} version {} never reached the server and this build can't send them \
              ({} version {}): {kept}",
-            T::ID,
+            k.id,
             s.pending.len(),
             s.cell,
             s.v,
-            T::ID,
-            T::VERSION
+            k.id,
+            k.version
         );
         eprintln!("[aio] WARN {msg}");
         crate::report::tell_kept("sync:orphan-queue", &msg);
@@ -1734,7 +1766,7 @@ fn kept_aside<T: Cell>(file: &std::path::Path, s: &Saved) -> bool {
 /// once the server said who this copy is (`said`), seen as them? Another
 /// user's is never shown and its calls never sent as this one: with calls
 /// waiting it is kept aside (`<file>.other-user-<ms>`) and said.
-fn of_user<T: Cell>(file: &std::path::Path, s: &Saved, user: &str, said: Option<&str>) -> bool {
+fn of_user(k: &Kind, file: &std::path::Path, s: &Saved, user: &str, said: Option<&str>) -> bool {
     if s.user == user && (s.seen.is_empty() || said.is_none_or(|u| u == s.seen)) {
         return true;
     }
@@ -1744,7 +1776,7 @@ fn of_user<T: Cell>(file: &std::path::Path, s: &Saved, user: &str, said: Option<
             .map_or_else(|e| format!("not moved: {e}"), |p| format!("kept as {}", p.display()));
         let msg = format!(
             "{}: {} calls made offline by another user were not sent, and their copy is not shown: {kept}",
-            T::ID,
+            k.id,
             s.pending.len()
         );
         eprintln!("[aio] WARN {msg}");
@@ -1759,7 +1791,7 @@ fn of_user<T: Cell>(file: &std::path::Path, s: &Saved, user: &str, said: Option<
 /// waiting in it are the user's. A file that can't be read now (held by
 /// another program, refused, a disk error) is tried again briefly, then
 /// an error naming it: it is left where it is, never started over.
-fn read_saved<T: Cell>(file: &std::path::Path) -> std::io::Result<Option<Saved>> {
+fn read_saved(k: &Kind, file: &std::path::Path) -> std::io::Result<Option<Saved>> {
     let bytes = match read_retried(file, &|ms| std::thread::sleep(Duration::from_millis(ms))) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
@@ -1785,7 +1817,7 @@ fn read_saved<T: Cell>(file: &std::path::Path) -> std::io::Result<Option<Saved>>
     };
     let msg = format!(
         "{}: the saved copy {} can't be read ({why}): calls made offline in it are not sent; {kept}",
-        T::ID,
+        k.id,
         file.display()
     );
     eprintln!("[aio] WARN {msg}");
@@ -2057,7 +2089,9 @@ impl std::error::Error for WrongKey {}
 /// A server fn call's answer to come, and whether a person is deciding.
 type Running = (tokio::sync::oneshot::Sender<Result<Value>>, tokio::sync::watch::Sender<bool>);
 
-struct Inner<T: Cell> {
+struct Inner {
+    /// Its cell's constants.
+    kind: &'static Kind,
     /// Who this copy calls as (the server sees the same).
     by: By,
     /// Where the copy is kept: its file's writer, and this copy's mark.
@@ -2066,7 +2100,7 @@ struct Inner<T: Cell> {
     file: Option<std::path::PathBuf>,
     /// The server's limits, once heard.
     limits: Mutex<Option<Limits>>,
-    copy: Mutex<Copy<T>>,
+    copy: Mutex<Copy>,
     out: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>,
     waiting: Mutex<HashMap<String, mpsc::Sender<Result<Value>>>>,
     /// Async methods' callers waiting for their end (`end` frames), by call.
@@ -2089,7 +2123,7 @@ struct Inner<T: Cell> {
     timeouts: Mutex<HashMap<String, Option<Duration>>>,
     /// The last ping's round trip, in ms (0: none answered on this link).
     rtt: std::sync::atomic::AtomicU64,
-    listeners: Mutex<Vec<Listener<T>>>,
+    listeners: Mutex<Vec<Listener>>,
     in_order: crate::handle::InOrder,
     refusals: Mutex<Vec<Refusal>>,
     tells: Mutex<Vec<crate::tell::Show>>,
@@ -2140,9 +2174,9 @@ fn flush_last(save: &Option<(Arc<Saver>, u64)>, cell: &str) {
 }
 
 /// The copy gone: what its link (closing) saved since is written too.
-impl<T: Cell> Drop for Inner<T> {
+impl Drop for Inner {
     fn drop(&mut self) {
-        flush_last(&self.save, T::ID);
+        flush_last(&self.save, self.kind.id);
     }
 }
 
@@ -2163,15 +2197,22 @@ impl Drop for Handles {
 /// A synced copy of a cell on a server: reads and calls are local at once,
 /// the server confirms. Reconnects on its own.
 pub struct Remote<T: Cell> {
-    inner: Arc<Inner<T>>,
-    /// The app's handles (none: the copy's own tasks).
-    handles: Option<Arc<Handles>>,
+    pub(crate) raw: RawRemote,
+    cell: std::marker::PhantomData<T>,
 }
 
 impl<T: Cell> Clone for Remote<T> {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone(), handles: self.handles.clone() }
+        Self::of(self.raw.clone())
     }
+}
+
+/// A [`Remote`], its cell's type erased: the client, compiled once.
+#[derive(Clone)]
+pub(crate) struct RawRemote {
+    inner: Arc<Inner>,
+    /// The app's handles (none: the copy's own tasks), held for their drop.
+    _handles: Option<Arc<Handles>>,
 }
 
 /// Where a copy's server is, and how to trust it.
@@ -2434,62 +2475,28 @@ fn can_of(first: &Value) -> Vec<String> {
 /// `open_raw` for a copy of `T` holding `paths` of it (empty: all): the
 /// server's state must fit it. `peer`: as another app on a local door
 /// ([`crate::peer`]).
-async fn open<T: Cell>(link: &Link, user: &str, peer: bool, paths: &[String]) -> std::io::Result<(Wire, Value)> {
-    let mut hello = json!({ "t": "hello", "cell": T::ID, "v": T::VERSION, "user": user, "peer": peer });
+async fn open(k: &Kind, link: &Link, user: &str, peer: bool, paths: &[String]) -> std::io::Result<(Wire, Value)> {
+    let mut hello = json!({ "t": "hello", "cell": k.id, "v": k.version, "user": user, "peer": peer });
     if !paths.is_empty() {
         hello["paths"] = json!(paths);
     }
     let (w, first) = open_raw(link, &hello).await?;
-    crate::held::<T>(paths, &first["state"]).map_err(std::io::Error::other)?;
+    held(k, paths, &first["state"]).map_err(std::io::Error::other)?;
     Ok((w, first))
 }
 
-impl<T: Cell> Remote<T> {
-    /// Connect, show the token, take the first state; then stay connected
-    /// (reconnecting with backoff and jitter) until every clone is dropped.
-    pub async fn connect(addr: &str, token: &str, user: &str) -> std::io::Result<Self> {
-        Self::connect_to(Link { addr: addr.into(), token: token.into(), root: None }, user).await
+/// The state a copy that holds `paths` of cell `k` makes of the server's
+/// `view`: the parts it doesn't hold are the cell's defaults.
+fn held(k: &Kind, paths: &[String], view: &Value) -> serde_json::Result<St> {
+    match paths.is_empty() {
+        true => (k.copy_of)(view.clone()),
+        false => (k.copy_of)(crate::filter::fill(view, &(k.default)().to_json()?, paths)),
     }
+}
 
-    /// `connect`, over TLS when `link` has a root to pin.
-    pub async fn connect_to(link: Link, user: &str) -> std::io::Result<Self> {
-        Self::start(Some(link), user, None, false, false, vec![]).await.map(|(r, _)| r)
-    }
-
-    /// `connect_to`, holding only `paths` of the cell (dot paths, as
-    /// [`Self::subscribe`]): the server sends this copy those parts and only
-    /// their patches, from the first state on.
-    pub async fn connect_paths(link: Link, user: &str, paths: &[&str]) -> std::io::Result<Self> {
-        let paths = paths.iter().map(|p| p.to_string()).collect();
-        Self::start(Some(link), user, None, false, false, paths).await.map(|(r, _)| r)
-    }
-
-    /// `connect_to` another app's local door as a peer ([`crate::peer`]).
-    pub(crate) async fn peer(link: Link, user: &str) -> std::io::Result<Self> {
-        Self::start(Some(link), user, None, true, false, vec![]).await.map(|(r, _)| r)
-    }
-
-    /// `connect_to`, keeping the copy in `file` (0600): when the server can't
-    /// be reached it starts from the saved copy (offline-first), and calls
-    /// still waiting for the server survive a restart and are sent later.
-    pub async fn connect_saved(link: Link, user: &str, file: &std::path::Path) -> std::io::Result<Self> {
-        Self::start(Some(link), user, Some(file.to_path_buf()), false, false, vec![]).await.map(|(r, _)| r)
-    }
-
-    /// [`Self::connect_saved`] that never fails to start (a window's
-    /// client, whose connect page asks where its server is): with no
-    /// `link`, or one that can't be reached or refuses, the copy starts
-    /// offline (from the saved copy, else the cell's default) and waits for
-    /// [`Self::relink`]. Why its first connect failed comes back beside it.
-    pub async fn connect_later(
-        link: Option<Link>,
-        user: &str,
-        file: &std::path::Path,
-    ) -> std::io::Result<(Self, Option<std::io::Error>)> {
-        Self::start(link, user, Some(file.to_path_buf()), false, true, vec![]).await
-    }
-
+impl RawRemote {
     async fn start(
+        k: &'static Kind,
         link: Option<Link>,
         user: &str,
         file: Option<std::path::PathBuf>,
@@ -2501,16 +2508,16 @@ impl<T: Cell> Remote<T> {
         // A save still on its way (a copy dropped just now) is newer than the file.
         let saved: Option<Saved> = match claimed.as_ref().and_then(|(_, _, n)| n.as_deref()) {
             Some(n) => Some(n.clone()),
-            None => file.as_deref().map(read_saved::<T>).transpose()?.flatten(),
+            None => file.as_deref().map(|f| read_saved(k, f)).transpose()?.flatten(),
         }
-        .filter(|s| file.as_deref().is_none_or(|f| kept_aside::<T>(f, s) && of_user::<T>(f, s, user, None)));
+        .filter(|s| file.as_deref().is_none_or(|f| kept_aside(k, f, s) && of_user(k, f, s, user, None)));
         // A saved copy holds what it held.
         let paths = match &saved {
             Some(s) if paths.is_empty() => s.paths.clone(),
             _ => paths,
         };
         let first = match &link {
-            Some(link) => open::<T>(link, user, peer, &paths).await.map(Some),
+            Some(link) => open(k, link, user, peer, &paths).await.map(Some),
             None => Ok(None),
         };
         let (first, failed) = match first {
@@ -2520,14 +2527,14 @@ impl<T: Cell> Remote<T> {
                 if saved.is_some()
                     && !matches!(e.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported) =>
             {
-                eprintln!("[aio] sync {}: {e}; starting offline from the saved copy", T::ID);
+                eprintln!("[aio] sync {}: {e}; starting offline from the saved copy", k.id);
                 (None, Some(e))
             }
             Err(e) if later => (None, Some(e)),
             Err(e) => return Err(e),
         };
         let said = first.as_ref().and_then(|(_, m)| m["user"].as_str()).map(String::from);
-        let saved = saved.filter(|s| file.as_deref().is_none_or(|f| of_user::<T>(f, s, user, said.as_deref())));
+        let saved = saved.filter(|s| file.as_deref().is_none_or(|f| of_user(k, f, s, user, said.as_deref())));
         let seen = said.or_else(|| saved.as_ref().map(|s| s.seen.clone())).unwrap_or_default();
         let pending = saved.as_ref().map(|s| s.pending.clone()).unwrap_or_default();
         let limits = first.as_ref().map(|(_, m)| m["limits"].clone());
@@ -2536,13 +2543,14 @@ impl<T: Cell> Remote<T> {
             (Some((w, m)), _) => (Some(w), m["seq"].as_u64().unwrap_or(0), m["state"].clone()),
             (None, Some(s)) => (None, s.seq, s.view),
             // A copy waiting for its server: the cell's default until it comes.
-            (None, None) => (None, 0, serde_json::to_value(T::default()).map_err(std::io::Error::other)?),
+            (None, None) => (None, 0, (k.default)().to_json().map_err(std::io::Error::other)?),
         };
-        let st: Arc<T> = Arc::new(crate::held(&paths, &view).map_err(std::io::Error::other)?);
+        let st = held(k, &paths, &view).map_err(std::io::Error::other)?;
         let save = claimed.map(|(s, owner, _)| (s, owner));
         let connected = w.is_some();
-        let copy = Copy::new(seq, view, st, pending, By::User(user.into()), paths, seen);
+        let copy = Copy::new(k, seq, view, st, pending, By::User(user.into()), paths, seen);
         let inner = Arc::new(Inner {
+            kind: k,
             by: By::User(user.into()),
             save,
             file,
@@ -2598,13 +2606,13 @@ impl<T: Cell> Remote<T> {
                             None => link,
                         };
                         let paths = weak.upgrade().map(|i| lock(&i.copy).paths.clone()).unwrap_or_default();
-                        match (tokio::time::Instant::now(), open::<T>(&link, &user, peer, &paths).await) {
+                        match (tokio::time::Instant::now(), open(k, &link, &user, peer, &paths).await) {
                             (asked, Ok((w, first))) => {
                                 let Some(inner) = weak.upgrade() else { return };
                                 *lock(&inner.asked) = Some(asked);
                                 *lock(&inner.can) = can_of(&first);
                                 inner.signed_out.store(false, Ordering::SeqCst);
-                                let r = Remote { inner, handles: None };
+                                let r = RawRemote { inner, _handles: None };
                                 r.seen_as(&first);
                                 r.take(first);
                                 w
@@ -2618,12 +2626,12 @@ impl<T: Cell> Remote<T> {
                                 let dead = e.get_ref().is_some_and(|e| e.is::<WrongKey>());
                                 let fresh = dead && lock(&inner.token).is_some();
                                 if dead {
-                                    Remote { inner, handles: None }.signed_out_now(&e.to_string());
+                                    RawRemote { inner, _handles: None }.signed_out_now(&e.to_string());
                                 } else {
                                     drop(inner);
                                 }
                                 if refused && !fresh {
-                                    eprintln!("[aio] sync {}: {e}; not retrying", T::ID);
+                                    eprintln!("[aio] sync {}: {e}; not retrying", k.id);
                                     if !slot.later {
                                         return;
                                     }
@@ -2633,7 +2641,7 @@ impl<T: Cell> Remote<T> {
                                 }
                                 // A version skew may end (the server is updated or rolled back): say it once, keep trying.
                                 if e.kind() == std::io::ErrorKind::Unsupported && !told {
-                                    eprintln!("[aio] sync {}: {e}", T::ID);
+                                    eprintln!("[aio] sync {}: {e}", k.id);
                                     told = true;
                                 }
                                 // Jittered backoff, so many clients don't return at once (a token
@@ -2653,7 +2661,7 @@ impl<T: Cell> Remote<T> {
                 };
                 wait = Duration::from_millis(250);
                 let Some(inner) = weak.upgrade() else { return };
-                let r = Remote { inner, handles: None };
+                let r = RawRemote { inner, _handles: None };
                 r.pump(w, at).await;
                 if weak.strong_count() <= 1 {
                     return;
@@ -2661,8 +2669,8 @@ impl<T: Cell> Remote<T> {
             }
         });
         // Online once the pump runs.
-        let handles = Some(Arc::new(Handles { save: inner.save.clone(), cell: T::ID }));
-        let r = Self { inner, handles };
+        let handles = Some(Arc::new(Handles { save: inner.save.clone(), cell: k.id }));
+        let r = Self { inner, _handles: handles };
         // Saved from the start, so the next run can open offline.
         r.update(|_| {});
         for _ in 0..if connected { 200 } else { 0 } {
@@ -2674,6 +2682,11 @@ impl<T: Cell> Remote<T> {
         Ok((r, failed))
     }
 
+    /// Its cell's id.
+    fn id(&self) -> &'static str {
+        self.inner.kind.id
+    }
+
     /// The server it links to now, if it has one.
     #[cfg(feature = "kit")]
     pub(crate) fn link_now(&self) -> Option<Link> {
@@ -2682,7 +2695,7 @@ impl<T: Cell> Remote<T> {
 
     /// Point the copy at another server (a client's connect page): its next
     /// connect goes there, at once: a link it holds now is dropped.
-    pub fn relink(&self, link: Link) {
+    pub(crate) fn relink(&self, link: Link) {
         *lock(&self.inner.slot.link) = Some(link);
         self.inner.slot.moves.fetch_add(1, Ordering::SeqCst);
         self.inner.slot.wake.notify_one();
@@ -2690,7 +2703,7 @@ impl<T: Cell> Remote<T> {
 
     /// Call `f` with why each connect to the server failed (unreachable,
     /// refused, another app's server): what a connect page shows.
-    pub fn on_unreached(&self, f: impl Fn(&std::io::Error) + Send + Sync + 'static) {
+    pub(crate) fn on_unreached(&self, f: impl Fn(&std::io::Error) + Send + Sync + 'static) {
         lock(&self.inner.unreached).push(Arc::new(f));
     }
 
@@ -2705,7 +2718,7 @@ impl<T: Cell> Remote<T> {
             let c = lock(&self.inner.copy);
             c.pending.iter().for_each(|p| _ = tx.send(p.msg()));
             let linking = *lock(&LINKING);
-            linking.inspect(|f| f(T::ID));
+            linking.inspect(|f| f(self.id()));
             *lock(&self.inner.out) = Some(tx);
         }
         // What this process's bus hears, for the server's (a relayed one is
@@ -2772,7 +2785,7 @@ impl<T: Cell> Remote<T> {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 let quiet = start.elapsed().as_millis() as u64 - heard.load(Ordering::Relaxed);
                 if quiet > DEAD.as_millis() as u64 {
-                    eprintln!("[aio] sync {}: no answer for {} ms; reconnecting", T::ID, quiet);
+                    eprintln!("[aio] sync {}: no answer for {} ms; reconnecting", self.id(), quiet);
                     break;
                 }
                 // Every handle is gone: close the link (don't hold a server slot).
@@ -2835,7 +2848,7 @@ impl<T: Cell> Remote<T> {
             fs.iter().for_each(|f| f(&m));
         }
         match m["t"].as_str() {
-            Some("state") => match crate::held::<T>(&self.paths(), &m["state"]) {
+            Some("state") => match held(self.inner.kind, &self.paths(), &m["state"]) {
                 Ok(st) => {
                     let mut events = 0;
                     let before = lock(&self.inner.copy).before(&m["op"]);
@@ -2850,7 +2863,7 @@ impl<T: Cell> Remote<T> {
                         events = seq.saturating_sub(c.seq);
                         c.seq = seq;
                         c.view = m["state"].clone();
-                        c.confirmed = Arc::new(st);
+                        c.confirmed = st;
                         c.ran(&m["op"]);
                     });
                     let elapsed = lock(&self.inner.asked).take().map_or(Duration::ZERO, |t| t.elapsed());
@@ -2859,7 +2872,7 @@ impl<T: Cell> Remote<T> {
                     let fs = lock(&self.inner.syncs).clone();
                     fs.iter().for_each(|f| f(&synced));
                 }
-                Err(e) => eprintln!("[aio] sync {}: bad state: {e}", T::ID),
+                Err(e) => eprintln!("[aio] sync {}: bad state: {e}", self.id()),
             },
             Some("patch") => {
                 let (prev, seq) = (m["prev"].as_u64().unwrap_or(0), m["seq"].as_u64().unwrap_or(0));
@@ -2874,7 +2887,7 @@ impl<T: Cell> Remote<T> {
                     return self.resync(); // a gap: never guess
                 }
                 let st = patched(&view, &m)
-                    .and_then(|v| crate::held::<T>(&paths, &v).map(|st| (v, st)).map_err(|e| e.to_string()));
+                    .and_then(|v| held(self.inner.kind, &paths, &v).map(|st| (v, st)).map_err(|e| e.to_string()));
                 match st {
                     Ok((view, st)) => {
                         let met = self.met(before, &view);
@@ -2882,13 +2895,13 @@ impl<T: Cell> Remote<T> {
                         self.update(|c| {
                             c.seq = seq;
                             c.view = view;
-                            c.confirmed = Arc::new(st);
+                            c.confirmed = st;
                             c.ran(&m["op"]);
                         });
                         self.conflicted(&met);
                     }
                     Err(e) => {
-                        eprintln!("[aio] sync {}: patch to {seq} doesn't fit ({e}): resync", T::ID);
+                        eprintln!("[aio] sync {}: patch to {seq} doesn't fit ({e}): resync", self.id());
                         self.resync();
                     }
                 }
@@ -2902,7 +2915,7 @@ impl<T: Cell> Remote<T> {
                 let method = lock(&self.inner.copy).pending.iter().find(|p| p.op == op).map(|p| p.method.clone());
                 self.update(|c| c.pending.retain(|p| p.op != op));
                 if let (Err(e), Some(method)) = (&r, &method) {
-                    eprintln!("[aio] sync {}: the server refused {method}: {e}", T::ID);
+                    eprintln!("[aio] sync {}: the server refused {method}: {e}", self.id());
                     let fs = lock(&self.inner.refusals).clone();
                     fs.iter().for_each(|f| f(method, e));
                 }
@@ -2983,9 +2996,9 @@ impl<T: Cell> Remote<T> {
                         crate::info!(cat: "cli", "{}", t.line());
                     }
                 }
-                Err(e) => eprintln!("[aio] sync {}: a tell this build can't read: {e}", T::ID),
+                Err(e) => eprintln!("[aio] sync {}: a tell this build can't read: {e}", self.id()),
             },
-            _ => eprintln!("[aio] sync {}: unknown message {m}", T::ID),
+            _ => eprintln!("[aio] sync {}: unknown message {m}", self.id()),
         }
     }
 
@@ -3027,7 +3040,7 @@ impl<T: Cell> Remote<T> {
     /// server sends a lagging one changes less often (aio's render-staleness
     /// backpressure): a slow screen gets fewer, folded patches. A copy
     /// nothing renders never says, and is never slowed.
-    pub fn rendered(&self) {
+    pub(crate) fn rendered(&self) {
         let mut s = lock(&self.inner.screen);
         s.on = true;
         if let Some(t) = s.since.take() {
@@ -3041,7 +3054,7 @@ impl<T: Cell> Remote<T> {
     }
 
     /// Change the copy, recompute what's shown, tell the listeners.
-    fn update(&self, f: impl FnOnce(&mut Copy<T>)) {
+    fn update(&self, f: impl FnOnce(&mut Copy)) {
         {
             let mut c = lock(&self.inner.copy);
             f(&mut c);
@@ -3063,49 +3076,49 @@ impl<T: Cell> Remote<T> {
     }
 
     /// What the client shows: confirmed + its calls still waiting.
-    pub fn state(&self) -> Arc<T> {
+    pub(crate) fn state(&self) -> St {
         lock(&self.inner.copy).shown.clone()
     }
 
     /// The server's state as last heard.
-    pub fn confirmed(&self) -> Arc<T> {
+    pub(crate) fn confirmed(&self) -> St {
         lock(&self.inner.copy).confirmed.clone()
     }
 
     /// The last server event in the copy.
-    pub fn seq(&self) -> u64 {
+    pub(crate) fn seq(&self) -> u64 {
         lock(&self.inner.copy).seq
     }
 
     /// Calls waiting for the server (for spinners and "syncing…").
     /// The link's last measured round trip (a ping every [`PING`]), if one
     /// was answered on it.
-    pub fn rtt(&self) -> Option<Duration> {
+    pub(crate) fn rtt(&self) -> Option<Duration> {
         match self.inner.rtt.load(Ordering::Relaxed) {
             0 => None,
             ms => Some(Duration::from_millis(ms)),
         }
     }
 
-    pub fn pending(&self) -> usize {
+    pub(crate) fn pending(&self) -> usize {
         lock(&self.inner.copy).pending.len()
     }
 
     /// Calls to `method` waiting for the server (a spinner on its button).
-    pub fn pending_of(&self, method: &str) -> usize {
+    pub(crate) fn pending_of(&self, method: &str) -> usize {
         lock(&self.inner.copy).pending.iter().filter(|p| p.method == method).count()
     }
 
     /// Ask `f` for the token before each reconnect (aio's `token` as a
     /// function: a short-lived JWT, a session refreshed elsewhere). With
     /// it, a refused credential is tried again with what `f` gives next.
-    pub fn token_with(&self, f: impl Fn() -> String + Send + Sync + 'static) {
+    pub(crate) fn token_with(&self, f: impl Fn() -> String + Send + Sync + 'static) {
         *lock(&self.inner.token) = Some(Arc::new(f));
     }
 
     /// Has the server refused this copy's credential (signed out: a
     /// revoked key or a dead session)? New calls are refused meanwhile.
-    pub fn signed_out(&self) -> bool {
+    pub(crate) fn signed_out(&self) -> bool {
         self.inner.signed_out.load(Ordering::SeqCst)
     }
 
@@ -3143,7 +3156,7 @@ impl<T: Cell> Remote<T> {
         let kept = match self.inner.file.as_deref().map(|f| aside(f, tag, &saved)) {
             Some(Ok(p)) => format!("; kept as {}", p.display()),
             Some(Err(e)) if stay => {
-                let msg = format!("{}: {why}: {} calls made offline can't be kept aside ({e}): they stay waiting", T::ID, saved.pending.len());
+                let msg = format!("{}: {why}: {} calls made offline can't be kept aside ({e}): they stay waiting", self.id(), saved.pending.len());
                 eprintln!("[aio] WARN {msg}");
                 return crate::report::tell(kind, &msg);
             }
@@ -3152,7 +3165,7 @@ impl<T: Cell> Remote<T> {
         };
         let gone = saved.pending;
         self.update(|c| c.pending.clear());
-        let msg = format!("{}: {why}: {} calls made offline were not sent{kept}", T::ID, gone.len());
+        let msg = format!("{}: {why}: {} calls made offline were not sent{kept}", self.id(), gone.len());
         eprintln!("[aio] WARN {msg}");
         crate::report::tell_kept(kind, &msg);
         let why = Rejected::coded(crate::Code::AccessDenied, format!("{why}: not sent{kept}"));
@@ -3169,12 +3182,12 @@ impl<T: Cell> Remote<T> {
         }
     }
 
-    pub fn online(&self) -> bool {
+    pub(crate) fn online(&self) -> bool {
         self.inner.online.load(Ordering::SeqCst)
     }
 
     /// How the copy stands, for the UI (`Source::status`).
-    pub fn status(&self) -> crate::Status {
+    pub(crate) fn status(&self) -> crate::Status {
         let online = self.online();
         let (pending, oldest) = {
             let c = lock(&self.inner.copy);
@@ -3196,20 +3209,20 @@ impl<T: Cell> Remote<T> {
     /// e.g. `[client] retention = "7d"`); the drop is told to `on_refused`.
     /// Unset (the default): nothing is ever dropped, and a full queue refuses
     /// new calls.
-    pub fn retain(&self, keep: Option<Duration>) {
+    pub(crate) fn retain(&self, keep: Option<Duration>) {
         *lock(&self.inner.keep) = keep;
         self.tell();
     }
 
     /// How long `call_confirmed` waits for `method` (aio's `callTimeouts`):
     /// `None` = as long as it takes. Unset: `CALL_TIMEOUT`.
-    pub fn timeout(&self, method: &str, wait: Option<Duration>) {
+    pub(crate) fn timeout(&self, method: &str, wait: Option<Duration>) {
         lock(&self.inner.timeouts).insert(method.into(), wait);
     }
 
     /// Call `f` after each catch-up: the server's whole view reached the copy
     /// (on a reconnect, or after a gap).
-    pub fn on_sync(&self, f: impl Fn(&Synced) + Send + Sync + 'static) {
+    pub(crate) fn on_sync(&self, f: impl Fn(&Synced) + Send + Sync + 'static) {
         lock(&self.inner.syncs).push(Arc::new(f));
     }
 
@@ -3217,23 +3230,23 @@ impl<T: Cell> Remote<T> {
     /// `onPatch`): a `{"t":"patch","seq","prev","ops"}` delta, or a
     /// `{"t":"state"}` whole state (the first, a resync). The state is
     /// their sum; this is the stream, so a test can see what was sent.
-    pub fn on_patch(&self, f: impl Fn(&Value) + Send + Sync + 'static) {
+    pub(crate) fn on_patch(&self, f: impl Fn(&Value) + Send + Sync + 'static) {
         lock(&self.inner.patches).push(Arc::new(f));
     }
 
     /// Call `f` with the shown state after each change.
-    pub fn listen(&self, f: impl Fn(&Arc<T>) + Send + Sync + 'static) {
-        lock(&self.inner.listeners).push(Arc::new(f));
+    pub(crate) fn listen(&self, f: Listener) {
+        lock(&self.inner.listeners).push(f);
     }
 
     /// Call `f` with what the server's calls tell the people using the app
     /// (`cx.tell`), as it arrives; it is shown here as well ([`crate::tell::show`]).
-    pub fn on_tell(&self, f: impl Fn(&crate::tell::Tell) + Send + Sync + 'static) {
+    pub(crate) fn on_tell(&self, f: impl Fn(&crate::tell::Tell) + Send + Sync + 'static) {
         lock(&self.inner.tells).push(Arc::new(f));
     }
 
     /// Call `f(method, why)` when the server refuses a predicted call.
-    pub fn on_refused(&self, f: impl Fn(&str, &Rejected) + Send + Sync + 'static) {
+    pub(crate) fn on_refused(&self, f: impl Fn(&str, &Rejected) + Send + Sync + 'static) {
         lock(&self.inner.refusals).push(Arc::new(f));
     }
 
@@ -3242,7 +3255,7 @@ impl<T: Cell> Remote<T> {
     /// reconnect's catch-up (counted in [`Synced::conflicts`]). The copy then
     /// shows its calls replayed on the server's state, the server keeps
     /// what its methods make. Its own call's change is never one.
-    pub fn on_conflict(&self, f: impl Fn(&[crate::merge::Conflict]) + Send + Sync + 'static) {
+    pub(crate) fn on_conflict(&self, f: impl Fn(&[crate::merge::Conflict]) + Send + Sync + 'static) {
         lock(&self.inner.conflicts).push(Arc::new(f));
     }
 
@@ -3254,7 +3267,7 @@ impl<T: Cell> Remote<T> {
     /// there depends on a part it doesn't hold is shown as the server's
     /// answer makes it. Kept for each reconnect (and in a saved copy). A
     /// list that isn't 1 to 1024 dot paths is refused.
-    pub fn subscribe(&self, paths: &[&str]) -> Result<()> {
+    pub(crate) fn subscribe(&self, paths: &[&str]) -> Result<()> {
         let paths = match paths.is_empty() {
             true => Arc::from([]),
             false => crate::filter::paths_of(&json!(paths)).map_err(Rejected::new)?,
@@ -3262,8 +3275,8 @@ impl<T: Cell> Remote<T> {
         self.update(|c| {
             c.paths = paths.to_vec();
             // Narrower: at once. Wider: once the server's view of it comes.
-            if let Ok(s) = crate::held::<T>(&c.paths, &c.view) {
-                c.confirmed = Arc::new(s);
+            if let Ok(s) = held(self.inner.kind, &c.paths, &c.view) {
+                c.confirmed = s;
             }
         });
         // An older server sends the whole cell anyway: it is held as said.
@@ -3279,12 +3292,12 @@ impl<T: Cell> Remote<T> {
     /// answer comes. The server keeps what its methods make: a method that
     /// edits (`n += d`, a push, a patched text) keeps both there too. A
     /// field the cell doesn't have panics, naming the ones it has (aio's typo check).
-    pub fn merge(&self, field: &str, how: crate::merge::Merge) {
-        let saved = serde_json::to_value(T::default()).unwrap_or_default();
-        let has = saved.get(field).is_some() || T::FIELDS.iter().any(|f| f.name == field);
+    pub(crate) fn merge(&self, field: &str, how: crate::merge::Merge) {
+        let saved = (self.inner.kind.default)().to_json().unwrap_or_default();
+        let has = saved.get(field).is_some() || self.inner.kind.fields.iter().any(|f| f.name == field);
         if !has {
             let names: Vec<&str> = saved.as_object().map(|o| o.keys().map(String::as_str).collect()).unwrap_or_default();
-            panic!("{}: merge(\"{field}\"): no such field (it has {})", T::ID, names.join(", "));
+            panic!("{}: merge(\"{field}\"): no such field (it has {})", self.id(), names.join(", "));
         }
         self.update(|c| {
             c.merges.retain(|(f, _)| f != field);
@@ -3314,15 +3327,15 @@ impl<T: Cell> Remote<T> {
                 return Err(crate::Rejected::coded(crate::Code::QueueOverflow, format!("blocked: {PENDING_MAX} calls wait for the server")));
             }
             let op = crate::cx::Op::new();
-            let cx = Cx::synced(crate::store::now_ms(), T::ID, &self.inner.by, &op);
-            let waits = T::UNPREDICTED.contains(&method);
+            let cx = Cx::synced(crate::store::now_ms(), self.id(), &self.inner.by, &op);
+            let waits = self.inner.kind.unpredicted.contains(&method);
             let out = match waits {
                 // Sent as is: the server alone runs it (and may refuse it).
                 true => Value::Null,
                 false => {
-                    let mut next = (*c.shown).clone();
-                    let out =
-                        crate::store::apply_guarded(&mut next, &cx, method, args.clone()).map_err(Rejected::from)?;
+                    let mut next = c.shown.dup();
+                    let out = crate::store::apply_guarded(own(&mut next), &cx, method, args.clone())
+                        .map_err(Rejected::from)?;
                     next.check()?;
                     out
                 }
@@ -3357,7 +3370,7 @@ impl<T: Cell> Remote<T> {
                  have it (an answer can be lost with the link), and it isn't sent again",
                 waited.as_secs()
             ));
-            eprintln!("[aio] sync {}: {}: {}", T::ID, gone.method, why.why);
+            eprintln!("[aio] sync {}: {}: {}", self.id(), gone.method, why.why);
             lock(&self.inner.streams).remove(&gone.op);
             if let Some(tx) = lock(&self.inner.waiting).remove(&gone.op) {
                 _ = tx.send(Err(why.clone()));
@@ -3388,7 +3401,7 @@ impl<T: Cell> Remote<T> {
     /// within `f`'s timeout, not counting while a person is at a picker the
     /// server opened (then a full window again). Never queued: offline, it
     /// fails at once, and a link that drops fails what was waiting.
-    pub async fn run<A: serde::Serialize, R: serde::de::DeserializeOwned>(
+    pub(crate) async fn run<A: serde::Serialize, R: serde::de::DeserializeOwned>(
         &self,
         f: crate::fns::ServerFn<A, R>,
         args: A,
@@ -3400,7 +3413,7 @@ impl<T: Cell> Remote<T> {
     /// `on_part` (typed `C`), in order, before the answer. The timeout counts
     /// from the last part, so a long answer that keeps coming never times out.
     /// A part that isn't a `C` fails the call.
-    pub async fn run_streamed<A: serde::Serialize, R: serde::de::DeserializeOwned, C: serde::de::DeserializeOwned>(
+    pub(crate) async fn run_streamed<A: serde::Serialize, R: serde::de::DeserializeOwned, C: serde::de::DeserializeOwned>(
         &self,
         f: crate::fns::ServerFn<A, R>,
         args: A,
@@ -3504,9 +3517,9 @@ impl<T: Cell> Remote<T> {
     /// confirmed. A link that drops meanwhile doesn't fail it: the call is
     /// sent again on reconnect and applies once. Don't call it on an async
     /// task's thread without `spawn_blocking`.
-    pub fn call_confirmed(&self, method: &str, args: Value) -> Result<Value> {
+    pub(crate) fn call_confirmed(&self, method: &str, args: Value) -> Result<Value> {
         let wait = lock(&self.inner.timeouts).get(method).copied().unwrap_or(Some(CALL_TIMEOUT));
-        if T::async_mode(method).is_some() {
+        if (self.inner.kind.async_mode)(method).is_some() {
             // An async method's answer is its end: up to its wait for the
             // reply, and the call ceiling for its awaits.
             let (end, answer) = crate::Reply::new(method);
@@ -3534,19 +3547,19 @@ impl<T: Cell> Remote<T> {
     }
 }
 
-impl<T: Cell> Remote<T> {
+impl RawRemote {
     /// Call async method `method` and get its pieces as it sends them
     /// (`cx.part(v)` in it; aio's `peer().stream()` and `emitChunk`): each
     /// reaches `on_part`, typed `C`, in order, all before its end. Predicted
     /// and queued like any call; only the server's run sends pieces, a
     /// piece that isn't a `C` is skipped.
-    pub fn stream<C: serde::de::DeserializeOwned>(
+    pub(crate) fn stream<C: serde::de::DeserializeOwned>(
         &self,
         method: &str,
         args: Value,
         mut on_part: impl FnMut(C) + Send + 'static,
     ) -> Result<crate::Answer> {
-        crate::ensure!(T::async_mode(method).is_some(), "{method}: only an async method sends pieces");
+        crate::ensure!((self.inner.kind.async_mode)(method).is_some(), "{method}: only an async method sends pieces");
         let (end, answer) = crate::Reply::new(method);
         let each: OnPart = Box::new(move |v| {
             if let Ok(c) = serde_json::from_value(v) {
@@ -3558,13 +3571,263 @@ impl<T: Cell> Remote<T> {
     }
 }
 
+impl<T: Cell> Remote<T> {
+    pub(crate) fn of(raw: RawRemote) -> Self {
+        Self { raw, cell: std::marker::PhantomData }
+    }
+
+    /// Connect, show the token, take the first state; then stay connected
+    /// (reconnecting with backoff and jitter) until every clone is dropped.
+    pub async fn connect(addr: &str, token: &str, user: &str) -> std::io::Result<Self> {
+        Self::connect_to(Link { addr: addr.into(), token: token.into(), root: None }, user).await
+    }
+
+    /// `connect`, over TLS when `link` has a root to pin.
+    pub async fn connect_to(link: Link, user: &str) -> std::io::Result<Self> {
+        RawRemote::start(T::KIND, Some(link), user, None, false, false, vec![]).await.map(|(r, _)| Self::of(r))
+    }
+
+    /// `connect_to`, holding only `paths` of the cell (dot paths, as
+    /// [`Self::subscribe`]): the server sends this copy those parts and only
+    /// their patches, from the first state on.
+    pub async fn connect_paths(link: Link, user: &str, paths: &[&str]) -> std::io::Result<Self> {
+        let paths = paths.iter().map(|p| p.to_string()).collect();
+        RawRemote::start(T::KIND, Some(link), user, None, false, false, paths).await.map(|(r, _)| Self::of(r))
+    }
+
+    /// `connect_to` another app's local door as a peer ([`crate::peer`]).
+    pub(crate) async fn peer(link: Link, user: &str) -> std::io::Result<Self> {
+        RawRemote::start(T::KIND, Some(link), user, None, true, false, vec![]).await.map(|(r, _)| Self::of(r))
+    }
+
+    /// `connect_to`, keeping the copy in `file` (0600): when the server can't
+    /// be reached it starts from the saved copy (offline-first), and calls
+    /// still waiting for the server survive a restart and are sent later.
+    pub async fn connect_saved(link: Link, user: &str, file: &std::path::Path) -> std::io::Result<Self> {
+        RawRemote::start(T::KIND, Some(link), user, Some(file.to_path_buf()), false, false, vec![]).await.map(|(r, _)| Self::of(r))
+    }
+
+    /// [`Self::connect_saved`] that never fails to start (a window's
+    /// client, whose connect page asks where its server is): with no
+    /// `link`, or one that can't be reached or refuses, the copy starts
+    /// offline (from the saved copy, else the cell's default) and waits for
+    /// [`Self::relink`]. Why its first connect failed comes back beside it.
+    pub async fn connect_later(
+        link: Option<Link>,
+        user: &str,
+        file: &std::path::Path,
+    ) -> std::io::Result<(Self, Option<std::io::Error>)> {
+        let (r, failed) = RawRemote::start(T::KIND, link, user, Some(file.to_path_buf()), false, true, vec![]).await?;
+        Ok((Self::of(r), failed))
+    }
+
+    /// What the client shows: confirmed + its calls still waiting.
+    pub fn state(&self) -> Arc<T> {
+        typed(self.raw.state())
+    }
+
+    /// The server's state as last heard.
+    pub fn confirmed(&self) -> Arc<T> {
+        typed(self.raw.confirmed())
+    }
+
+    /// Call `f` with the shown state after each change.
+    pub fn listen(&self, f: impl Fn(&Arc<T>) + Send + Sync + 'static) {
+        self.raw.listen(Arc::new(move |st: &St| f(&typed(st.clone()))));
+    }
+
+    /// Point the copy at another server (a client's connect page): its next
+    /// connect goes there, at once: a link it holds now is dropped.
+    pub fn relink(&self, link: Link) {
+        self.raw.relink(link)
+    }
+
+    /// Call `f` with why each connect to the server failed (unreachable,
+    /// refused, another app's server): what a connect page shows.
+    pub fn on_unreached(&self, f: impl Fn(&std::io::Error) + Send + Sync + 'static) {
+        self.raw.on_unreached(f)
+    }
+
+    /// Its screen showed the copy as it is now (the views call this after
+    /// each render; a custom renderer may too). From the first call on, the
+    /// copy tells its server how far the screen lags, each second, and a
+    /// server sends a lagging one changes less often (aio's render-staleness
+    /// backpressure): a slow screen gets fewer, folded patches. A copy
+    /// nothing renders never says, and is never slowed.
+    pub fn rendered(&self) {
+        self.raw.rendered()
+    }
+
+    /// The last server event in the copy.
+    pub fn seq(&self) -> u64 {
+        self.raw.seq()
+    }
+
+    /// Calls waiting for the server (for spinners and "syncing…").
+    /// The link's last measured round trip (a ping every [`PING`]), if one
+    /// was answered on it.
+    pub fn rtt(&self) -> Option<Duration> {
+        self.raw.rtt()
+    }
+
+    pub fn pending(&self) -> usize {
+        self.raw.pending()
+    }
+
+    /// Calls to `method` waiting for the server (a spinner on its button).
+    pub fn pending_of(&self, method: &str) -> usize {
+        self.raw.pending_of(method)
+    }
+
+    /// Ask `f` for the token before each reconnect (aio's `token` as a
+    /// function: a short-lived JWT, a session refreshed elsewhere). With
+    /// it, a refused credential is tried again with what `f` gives next.
+    pub fn token_with(&self, f: impl Fn() -> String + Send + Sync + 'static) {
+        self.raw.token_with(f)
+    }
+
+    /// Has the server refused this copy's credential (signed out: a
+    /// revoked key or a dead session)? New calls are refused meanwhile.
+    pub fn signed_out(&self) -> bool {
+        self.raw.signed_out()
+    }
+
+    pub fn online(&self) -> bool {
+        self.raw.online()
+    }
+
+    /// How the copy stands, for the UI (`Source::status`).
+    pub fn status(&self) -> crate::Status {
+        self.raw.status()
+    }
+
+    /// Once `PENDING_MAX` calls wait, a new call makes room by dropping the
+    /// oldest one that has waited longer than `keep` (aio's `offline.retention`,
+    /// e.g. `[client] retention = "7d"`); the drop is told to `on_refused`.
+    /// Unset (the default): nothing is ever dropped, and a full queue refuses
+    /// new calls.
+    pub fn retain(&self, keep: Option<Duration>) {
+        self.raw.retain(keep)
+    }
+
+    /// How long `call_confirmed` waits for `method` (aio's `callTimeouts`):
+    /// `None` = as long as it takes. Unset: `CALL_TIMEOUT`.
+    pub fn timeout(&self, method: &str, wait: Option<Duration>) {
+        self.raw.timeout(method, wait)
+    }
+
+    /// Call `f` after each catch-up: the server's whole view reached the copy
+    /// (on a reconnect, or after a gap).
+    pub fn on_sync(&self, f: impl Fn(&Synced) + Send + Sync + 'static) {
+        self.raw.on_sync(f)
+    }
+
+    /// Call `f` with each update the server sends, as it arrives (aio's
+    /// `onPatch`): a `{"t":"patch","seq","prev","ops"}` delta, or a
+    /// `{"t":"state"}` whole state (the first, a resync). The state is
+    /// their sum; this is the stream, so a test can see what was sent.
+    pub fn on_patch(&self, f: impl Fn(&Value) + Send + Sync + 'static) {
+        self.raw.on_patch(f)
+    }
+
+    /// Call `f` with what the server's calls tell the people using the app
+    /// (`cx.tell`), as it arrives; it is shown here as well ([`crate::tell::show`]).
+    pub fn on_tell(&self, f: impl Fn(&crate::tell::Tell) + Send + Sync + 'static) {
+        self.raw.on_tell(f)
+    }
+
+    /// Call `f(method, why)` when the server refuses a predicted call.
+    pub fn on_refused(&self, f: impl Fn(&str, &Rejected) + Send + Sync + 'static) {
+        self.raw.on_refused(f)
+    }
+
+    /// Hear where a server change met a call of this copy's still waiting,
+    /// the two different (aio's `sync.onConflict`): live, and in a
+    /// reconnect's catch-up (counted in [`Synced::conflicts`]). The copy then
+    /// shows its calls replayed on the server's state, the server keeps
+    /// what its methods make. Its own call's change is never one.
+    pub fn on_conflict(&self, f: impl Fn(&[crate::merge::Conflict]) + Send + Sync + 'static) {
+        self.raw.on_conflict(f)
+    }
+
+    /// Hold only `paths` of the cell (aio's `subs`, finer: dot paths inside
+    /// it, as `persist(include)` names them; `[]` or `["*"]`: all of it).
+    /// The server then sends this copy those parts and only their patches;
+    /// the parts it doesn't hold read as the cell's defaults. A call is
+    /// still predicted, and shown in the parts it holds; one whose outcome
+    /// there depends on a part it doesn't hold is shown as the server's
+    /// answer makes it. Kept for each reconnect (and in a saved copy). A
+    /// list that isn't 1 to 1024 dot paths is refused.
+    pub fn subscribe(&self, paths: &[&str]) -> Result<()> {
+        self.raw.subscribe(paths)
+    }
+
+    /// Show top-level `field` merged as `how` says while a waiting call of
+    /// this copy and the server both changed it (aio's `sync.merge`), not
+    /// the call replayed alone: what the copy shows until the server's
+    /// answer comes. The server keeps what its methods make: a method that
+    /// edits (`n += d`, a push, a patched text) keeps both there too. A
+    /// field the cell doesn't have panics, naming the ones it has (aio's typo check).
+    pub fn merge(&self, field: &str, how: crate::merge::Merge) {
+        self.raw.merge(field, how)
+    }
+
+    /// Run the server function `f` on the server ([`crate::fns`]): its answer,
+    /// within `f`'s timeout, not counting while a person is at a picker the
+    /// server opened (then a full window again). Never queued: offline, it
+    /// fails at once, and a link that drops fails what was waiting.
+    pub async fn run<A: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &self,
+        f: crate::fns::ServerFn<A, R>,
+        args: A,
+    ) -> Result<R> {
+        self.raw.run(f, args).await
+    }
+
+    /// [`Self::run`] for a streamed server fn: each part it sends reaches
+    /// `on_part` (typed `C`), in order, before the answer. The timeout counts
+    /// from the last part, so a long answer that keeps coming never times out.
+    /// A part that isn't a `C` fails the call.
+    pub async fn run_streamed<A: serde::Serialize, R: serde::de::DeserializeOwned, C: serde::de::DeserializeOwned>(
+        &self,
+        f: crate::fns::ServerFn<A, R>,
+        args: A,
+        on_part: impl FnMut(C),
+    ) -> Result<R> {
+        self.raw.run_streamed(f, args, on_part).await
+    }
+
+    /// Call and wait for the server's answer (up to the method's `timeout`,
+    /// else `CALL_TIMEOUT`); for calls that must not be shown before they're
+    /// confirmed. A link that drops meanwhile doesn't fail it: the call is
+    /// sent again on reconnect and applies once. Don't call it on an async
+    /// task's thread without `spawn_blocking`.
+    pub fn call_confirmed(&self, method: &str, args: Value) -> Result<Value> {
+        self.raw.call_confirmed(method, args)
+    }
+
+    /// Call async method `method` and get its pieces as it sends them
+    /// (`cx.part(v)` in it; aio's `peer().stream()` and `emitChunk`): each
+    /// reaches `on_part`, typed `C`, in order, all before its end. Predicted
+    /// and queued like any call; only the server's run sends pieces, a
+    /// piece that isn't a `C` is skipped.
+    pub fn stream<C: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        args: Value,
+        on_part: impl FnMut(C) + Send + 'static,
+    ) -> Result<crate::Answer> {
+        self.raw.stream(method, args, on_part)
+    }
+}
+
 impl<T: Cell> Door<T> for Remote<T> {
     /// Predicted: applied to the copy at once and sent; the server confirms
     /// or refuses later (`on_refused`). Works offline (queued). A
     /// `predict = false` method is only sent: it shows once the server ran it
     /// (`pending_of` counts it until then).
     fn call(&self, method: &str, args: Value) -> Result<Value> {
-        self.predict(method, args, None, None, None).map(|(_, out)| out)
+        self.raw.predict(method, args, None, None, None).map(|(_, out)| out)
     }
 
     /// Predicted like `call`; an async method's end comes from the server
@@ -3574,7 +3837,7 @@ impl<T: Cell> Door<T> for Remote<T> {
             return self.call(method, args).map(|v| crate::Answer::ready(Ok(v)));
         }
         let (end, answer) = crate::Reply::new(method);
-        self.predict(method, args, None, Some(end), None)?;
+        self.raw.predict(method, args, None, Some(end), None)?;
         Ok(answer)
     }
 
@@ -3584,8 +3847,8 @@ impl<T: Cell> Door<T> for Remote<T> {
 
     fn own(&self, key: &str, res: Option<Box<dyn std::any::Any + Send>>) {
         let old = match res {
-            Some(r) => lock(&self.inner.owned).insert(key.into(), r),
-            None => lock(&self.inner.owned).remove(key),
+            Some(r) => lock(&self.raw.inner.owned).insert(key.into(), r),
+            None => lock(&self.raw.inner.owned).remove(key),
         };
         drop(old);
     }
