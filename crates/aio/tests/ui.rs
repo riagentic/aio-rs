@@ -914,3 +914,13 @@ fn a_scoped_rule_styles_its_class_only_and_is_put_in_the_page_once() {
     assert_eq!(rules.as_u64(), Some(1), "two uses, one rule");
     assert!(ui.run(aio::ui::collect_css).starts_with(".aio-"));
 }
+
+/// A constant `value` shows in a textarea and picks a select's option: its
+/// attribute alone shows nothing there, so it is set as the property.
+#[test]
+fn a_textareas_and_a_selects_constant_value_shows() {
+    let ui = TestUi::new(
+        || rsx! { textarea { "data-t": "t", "aria-label": "t", value: "hi" } select { "data-t": "s", "aria-label": "s", value: "b", option { value: "a", "a" } option { value: "b", "b" } } },
+    );
+    assert_eq!((ui.value("t"), ui.value("s")), ("hi".to_string(), "b".to_string()));
+}

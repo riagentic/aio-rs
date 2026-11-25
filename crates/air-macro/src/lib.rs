@@ -1975,7 +1975,7 @@ impl Tpl {
                 let stat: Vec<(&String, String)> = attrs
                     .iter()
                     .filter_map(|(k, v)| match v {
-                        Val::Static(_) | Val::Present(_) if prop_only(k) => None,
+                        Val::Static(_) | Val::Present(_) if prop_only(tag, k) => None,
                         Val::Static(s) => Some((k, s.clone())),
                         Val::Present(b) if text_bool(k) => Some((k, b.to_string())),
                         Val::Present(true) => Some((k, String::new())),
@@ -1991,17 +1991,17 @@ impl Tpl {
                 // A property no attribute sets (`innerHTML`, as the page's guard sees it;
                 // `muted`) is set at mount, not a template attribute.
                 let dynamic = !spreads.is_empty()
-                    || attrs.iter().any(|(k, v)| prop_only(k) || !matches!(v, Val::Static(_) | Val::Present(_)));
+                    || attrs.iter().any(|(k, v)| prop_only(tag, k) || !matches!(v, Val::Static(_) | Val::Present(_)));
                 self.bytes.push(dynamic as u8);
                 if dynamic || root {
                     let id = self.mark();
                     for (k, v) in attrs {
                         let hole = match v {
-                            Val::Static(s) if prop_only(k) => {
+                            Val::Static(s) if prop_only(tag, k) => {
                                 let (head, set) = attr_fn();
                                 quote!(air::__rt::attr(#id, #k, ::std::boxed::Box::new(#head #set(air::IntoAttr::into_attr(#s))));)
                             }
-                            Val::Present(b) if prop_only(k) => {
+                            Val::Present(b) if prop_only(tag, k) => {
                                 let (head, set) = attr_fn();
                                 quote!(air::__rt::attr(#id, #k, ::std::boxed::Box::new(#head #set(air::IntoAttr::into_attr(#b))));)
                             }
@@ -2322,9 +2322,11 @@ fn is_closure(v: &TokenStream) -> bool {
 /// The properties no attribute sets on an element a script made (the
 /// `muted` attribute is its `defaultMuted`): set at mount as properties,
 /// never template attributes (air's `is_prop` less `value`, `checked` and
-/// `selected`, whose attribute is what a new element shows).
-fn prop_only(name: &str) -> bool {
+/// `selected`, whose attribute is what a new element shows; but a
+/// `textarea`'s or a `select`'s `value` attribute shows nothing).
+fn prop_only(tag: &str, name: &str) -> bool {
     matches!(name, "innerHTML" | "indeterminate" | "muted" | "volume" | "currentTime" | "playbackRate")
+        || (name == "value" && matches!(tag, "textarea" | "select"))
 }
 
 /// air's `is_text_bool`: `true`/`false` is text for `aria-*`, `data-*` and

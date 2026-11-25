@@ -350,6 +350,9 @@ version may break things.
   `data-aio-prevent` (arrows scrolled the page, Tab left a list) and
   scrolled no `data-aio-reveal` row into view: its page scripts left both
   out. They are the window's now.
+- A constant `value` on a `textarea` or a `select` (`textarea { value:
+  "hi" }`) showed nothing: it was written as the attribute, which neither
+  shows. It is set as the property, as a changing one was.
 - With `theme = "full"` the look's button reached the kit's quiet ones:
   a `Menu`'s items were centred and shadowed, tabs had a shadow, rounded
   corners and a press nudge. They start from `.aio-plain` now.
