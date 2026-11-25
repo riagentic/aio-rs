@@ -192,10 +192,10 @@ pub fn render_probe(v: &crate::vitals::Vitals) -> String {
     } else {
         ""
     };
-    let t = v.render;
+    let (t, ms) = (v.render, |d: std::time::Duration| d.as_millis() as u64);
     format!(
         "const T = {}, HINT = {};",
-        serde_json::json!({ "degraded": t.degraded, "warning": t.warning, "frozen": t.frozen }),
+        serde_json::json!({ "degraded": ms(t.degraded), "warning": ms(t.warning), "frozen": ms(t.frozen) }),
         serde_json::json!(hint)
     )
 }

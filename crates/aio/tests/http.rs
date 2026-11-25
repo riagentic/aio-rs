@@ -606,7 +606,7 @@ async fn health_and_metrics_answer_this_machine_and_the_network_only_with_a_cred
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(s, 200);
     assert!(v["loop"]["status"].is_string() && v["render"]["status"].is_string(), "{v}");
-    assert_eq!(v["thresholds"]["loop"]["frozen"], aio::vitals::Vitals::default().event_loop.frozen);
+    assert_eq!(v["thresholds"]["loop"]["frozen"], aio::vitals::Vitals::default().event_loop.frozen.as_millis() as u64);
     for path in ["/__aio/health", "/__aio/metrics", "/__aio/vitals"] {
         assert_eq!(fetch(&addr, "GET", path, &[RELAYED], "").await.0, 401, "{path}");
         assert_eq!(fetch(&addr, "GET", path, &[RELAYED, ("Authorization", "Bearer wrong")], "").await.0, 401);
