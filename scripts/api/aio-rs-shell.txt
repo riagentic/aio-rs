@@ -35,6 +35,7 @@ aio_shell::Window.lang: Option<&'static str>
 aio_shell::Window.permissions: &'static [&'static str]
 aio_shell::Window.require_sandbox: bool
 aio_shell::Window.show_cap_ms: Option<u32>
+aio_shell::Window.spellcheck: Option<&'static str>
 aio_shell::Window.splash_show: Option<fn() -> SplashShow>
 aio_shell::Window.title: &'static str
 aio_shell::Window.tray: Option<desktop::Tray>

@@ -451,6 +451,31 @@ mod tests {
         assert!(Config::parse("[app]\nid = \"t\"\nlang = \"pt-BR\"").is_ok());
     }
 
+    #[test]
+    fn spellcheck_fetches_nothing_unless_the_app_names_where_and_reaches_it() {
+        let app = |v: &str, net: &str| {
+            Config::parse(&format!("[app]\nid = \"t\"\nspellcheck = \"{v}\"\n[capabilities]\nnetwork = {net}"))
+        };
+        assert_eq!(Config::parse("[app]\nid = \"t\"").unwrap().app.spellcheck, "os", "private by default");
+        for v in ["os", "off"] {
+            assert_eq!(app(v, "[]").unwrap().app.spellcheck, v);
+        }
+        let e = app("google", "[]").unwrap_err();
+        assert_eq!(e, "aio.toml: [app] spellcheck \"google\" reaches redirector.gvt1.com: add \"*.gvt1.com\" to [capabilities] network");
+        assert!(app("google", "[\"redirector.gvt1.com\"]").is_err(), "it redirects to another host");
+        assert!(app("google", "[\"*.gvt1.com\"]").is_ok());
+        assert!(app("google", "[\"*\"]").is_ok());
+        let own = "https://dl.example.org/dictionaries/";
+        let e = app(own, "[]").unwrap_err();
+        assert!(e.ends_with("reaches dl.example.org: add \"dl.example.org\" to [capabilities] network"), "{e}");
+        assert!(app(own, "[\"dl.example.org\"]").is_ok());
+        assert!(app("http://127.0.0.1:8080/d/", "[]").is_ok(), "this machine, for tests");
+        for bad in ["", "on", "Google", "https://dl.example.org/d", "http://dl.example.org/d/", "file:///d/", "https:///"] {
+            let e = app(bad, "[\"*\"]").unwrap_err();
+            assert!(e.contains("is \"os\" (nothing fetched), \"off\", \"google\" or the https:// folder"), "{bad:?}: {e}");
+        }
+    }
+
     /// `[app] version` is read as aio.toml is: `ax config`, `ax dev` and
     /// `ax test` refuse what `ax build` would, not only the build.
     #[test]

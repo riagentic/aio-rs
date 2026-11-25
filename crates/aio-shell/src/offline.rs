@@ -2,8 +2,8 @@
 //! (this crate's main.js, headless): every request off this machine goes
 //! through a proxy that only listens, from launch through typing. Chromium's
 //! spellchecker fetched its dictionary from Google's CDN on first launch
-//! (Linux), past the app's `[capabilities] network`. Skipped where the
-//! runtime is not installed.
+//! (Linux), past the app's `[capabilities] network`; now only from where
+//! `[app] spellcheck` says. Skipped where the runtime is not installed.
 use aio::serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -11,12 +11,16 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 const PATIENCE: Duration = Duration::from_secs(60);
 
-#[tokio::test(flavor = "multi_thread")]
-async fn the_window_reaches_no_other_host_on_launch_or_while_typing() {
+/// A window of `win` while a person types misspelled words: what it said
+/// about spellcheck on stderr and what reached the proxy, once it said
+/// `wait_for` (Linux, where Chromium fetches; elsewhere, or with nothing to
+/// wait for, a while for anything). `None`: no runtime.
+async fn typed_into(win: crate::Window, wait_for: Option<&str>) -> Option<(Vec<String>, Vec<String>)> {
     let rt = crate::runtime::dir();
     let exe = crate::runtime::exe(&rt);
     if !exe.exists() {
-        return eprintln!("skipped: no Electron runtime in {}", rt.display());
+        eprintln!("skipped: no Electron runtime in {}", rt.display());
+        return None;
     }
     // The proxy: what each connection asked for (its first line), never answered.
     let asked = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -39,7 +43,7 @@ async fn the_window_reaches_no_other_host_on_launch_or_while_typing() {
     }
     let d = tempfile::tempdir_in(aio::paths::short_temp()).unwrap();
     let dir = d.path().join("shell");
-    crate::install_with(&dir, "offline", &crate::Window { title: "Offline", ..Default::default() }, true).unwrap();
+    crate::install_with(&dir, "offline", &crate::Window { title: "Offline", ..win }, true).unwrap();
     let (sock, ctl_sock) = (aio::ipc::addr(d.path(), "wire"), aio::ipc::addr(d.path(), "ctl"));
     let mut wires = aio::ipc::Listener::bind(&sock).unwrap();
     let mut ctls = aio::ipc::Listener::bind(&ctl_sock).unwrap();
@@ -114,14 +118,14 @@ async fn the_window_reaches_no_other_host_on_launch_or_while_typing() {
     }
     let typed = cdp("Runtime.evaluate", eval("document.querySelector('textarea').value")).await;
     assert_eq!(typed["result"]["value"], "teh quikc brwon fox ");
-    // Linux: the dictionary's fetch ends, from no host, said once (or it
-    // reached the proxy). macOS and Windows check en-US natively: no fetch
-    // to wait for, so a while for any other to show.
-    let unchecked = "[aio-shell] spellcheck: no en-US dictionary on this machine, and [capabilities] network \
-                     does not reach Google's (*.gvt1.com): en-US words go unchecked";
-    let linux = cfg!(target_os = "linux");
+    // Linux: the dictionary's fetch ends, said once (or it reached the
+    // proxy). macOS and Windows check en-US natively: no fetch to wait for,
+    // so a while for any other to show.
+    let linux = cfg!(target_os = "linux") && wait_for.is_some();
     let end = std::time::Instant::now() + if linux { PATIENCE } else { Duration::from_secs(2) };
-    while !said.lock().unwrap().iter().any(|l| l == unchecked) && asked.lock().unwrap().is_empty() {
+    while !said.lock().unwrap().iter().any(|l| wait_for.is_some_and(|w| l.starts_with(w)))
+        && asked.lock().unwrap().is_empty()
+    {
         if std::time::Instant::now() >= end {
             assert!(!linux, "never said: {:?}", said.lock().unwrap());
             break;
@@ -129,11 +133,55 @@ async fn the_window_reaches_no_other_host_on_launch_or_while_typing() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     _ = child.kill().await;
-    assert_eq!(*asked.lock().unwrap(), Vec::<String>::new(), "requests off this machine");
-    assert_eq!(
-        said.lock().unwrap().iter().filter(|l| l.contains("spellcheck")).count(),
-        usize::from(linux),
-        "{:?}",
-        said.lock().unwrap()
-    );
+    let said = said.lock().unwrap().iter().filter(|l| l.contains("spellcheck")).cloned().collect();
+    Some((said, asked.lock().unwrap().clone()))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_window_reaches_no_other_host_on_launch_or_while_typing() {
+    let unchecked = "[aio-shell] spellcheck: no en-US dictionary on this machine: en-US words go unchecked. To \
+                     fetch one, set [app] spellcheck to the https:// folder of the app's own .bdic files";
+    let Some((said, asked)) = typed_into(crate::Window::default(), Some(unchecked)).await else { return };
+    assert_eq!(asked, Vec::<String>::new(), "requests off this machine");
+    assert_eq!(said.len(), usize::from(cfg!(target_os = "linux")), "{said:?}");
+}
+
+/// `[app] spellcheck = "<url>"`: the dictionary comes from the app's own
+/// folder (here on this machine, answering 404), never from Google.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_spellchecker_fetches_from_the_apps_own_folder() {
+    let got = Arc::new(Mutex::new(Vec::<String>::new()));
+    let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let folder = format!("http://{}/dictionaries/", server.local_addr().unwrap());
+    {
+        let got = got.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = server.accept().await {
+                let mut line = String::new();
+                _ = tokio::io::BufReader::new(&mut s).read_line(&mut line).await;
+                got.lock().unwrap().push(line.trim().to_string());
+                _ = s.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+            }
+        });
+    }
+    let win = crate::Window { spellcheck: Some(folder.clone().leak()), ..Default::default() };
+    let failed = format!("[aio-shell] spellcheck: the en-US dictionary could not be fetched from {folder}: en-US");
+    let Some((said, asked)) = typed_into(win, Some(&failed)).await else { return };
+    assert_eq!(asked, Vec::<String>::new(), "requests off this machine");
+    if cfg!(target_os = "linux") {
+        assert_eq!(said.len(), 1, "{said:?}");
+        let got = got.lock().unwrap();
+        assert!(
+            got.len() == 1 && got[0].starts_with("GET /dictionaries/en-us-") && got[0].ends_with(".bdic HTTP/1.1"),
+            "{got:?}"
+        );
+    }
+}
+
+/// `[app] spellcheck = "off"`: nothing checked, fetched or said.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_spellchecker_turned_off_looks_for_no_dictionary() {
+    let win = crate::Window { spellcheck: Some("off"), ..Default::default() };
+    let Some((said, asked)) = typed_into(win, None).await else { return };
+    assert_eq!((said, asked), (vec![], vec![]));
 }

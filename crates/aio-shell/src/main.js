@@ -321,23 +321,31 @@ function hold(notes, key, n, max) {
   }
 }
 
-// Chromium's spellchecker fetches a dictionary it lacks (Linux; Windows, a
-// language the OS has none for) from Google's CDN, in the browser process:
-// past the page's policy and the app's [capabilities] network. Only when
-// that list reaches the CDN (guest.rs fetches_dictionaries); else from no
-// host (a data: URL, no dictionary): one already in the profile's
-// Dictionaries folder still serves. A language left unchecked is said once.
+// Chromium checks a language the OS doesn't (Linux: every one; Windows: one
+// without a language pack; macOS checks all natively) with a dictionary it
+// fetches in the browser process, past the page's policy and the app's
+// [capabilities] network: only from where [app] spellcheck says (guest.rs
+// spellcheck, checked against that list), else from no host (`data:,`);
+// one already in the profile's Dictionaries folder still serves. `off`:
+// no checking at all. A language left unchecked is said once, with the fix.
 const unchecked = new Set()
-app.on('session-created', (s) => s.on('spellcheck-dictionary-download-failure', (_e, lang) => {
-  if (SHELL.dictionaries || unchecked.has(lang)) return
-  unchecked.add(lang)
-  console.error(`[aio-shell] spellcheck: no ${lang} dictionary on this machine, and [capabilities] network does not reach Google's (*.gvt1.com): ${lang} words go unchecked`)
-}))
+app.on('session-created', (s) => {
+  if (!SHELL.spellcheck) s.setSpellCheckerEnabled(false)
+  s.on('spellcheck-dictionary-download-failure', (_e, lang) => {
+    // Off, Chromium still looks for one (from no host): nothing to say.
+    if (!SHELL.spellcheck || unchecked.has(lang)) return
+    unchecked.add(lang)
+    const d = SHELL.dictionaries
+    console.error(d === 'data:,'
+      ? `[aio-shell] spellcheck: no ${lang} dictionary on this machine: ${lang} words go unchecked. To fetch one, set [app] spellcheck to the https:// folder of the app's own .bdic files (Electron's hunspell_dictionaries.zip), or to "google" with "*.gvt1.com" in [capabilities] network`
+      : `[aio-shell] spellcheck: the ${lang} dictionary could not be fetched from ${d ?? "Google's CDN"}: ${lang} words go unchecked this run. Check the network${d ? ", and that the folder serves Electron's .bdic files under lower-case names" : ''}`)
+  })
+})
 
 app.whenReady().then(() => {
   // One URL for every session (macOS checks natively, with no such call),
   // set before any session's first fetch.
-  if (!SHELL.dictionaries && process.platform !== 'darwin') session.defaultSession.setSpellCheckerDictionaryDownloadURL('data:,')
+  if (SHELL.dictionaries !== null && process.platform !== 'darwin') session.defaultSession.setSpellCheckerDictionaryDownloadURL(SHELL.dictionaries)
   openSplash()
   // No menu (Electron's default carries DevTools and reload), except on
   // macOS: there the standard keys are menu items (no Edit menu, no Cmd+C

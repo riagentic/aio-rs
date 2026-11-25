@@ -46,6 +46,7 @@ aio_config::config::App.name: String
 aio_config::config::App.port_of: Option<String>
 aio_config::config::App.profiles: bool
 aio_config::config::App.schemes: Vec<String>
+aio_config::config::App.spellcheck: String
 aio_config::config::App.tz: Tz
 aio_config::config::App.ui: Shown
 aio_config::config::App.version: Option<String>
@@ -281,6 +282,7 @@ aio_config::config::reserved: fn reserved(path: &str) -> bool
 aio_config::config::scheme_refused: fn scheme_refused(s: &str) -> Option<String>
 aio_config::config::span_ms: const fn span_ms(s: &str) -> Option<u64>
 aio_config::config::span_text: fn span_text(d: std::time::Duration) -> String
+aio_config::config::spellcheck_refused: fn spellcheck_refused(v: &str, network: &[String]) -> Option<String>
 aio_config::db::pragma_name: fn pragma_name(stmt: &str) -> Option<String>
 aio_config::icon::hue: fn hue(name: &str) -> u16
 aio_config::icon::icon_png: fn icon_png(name: &str, hue: u16, size: u32) -> Vec<u8>

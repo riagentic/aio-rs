@@ -622,21 +622,34 @@ from launch through typing (a test proves it, behind a proxy that only
 listens).
 
 - **Spellcheck.** macOS checks fields natively, and Windows does for the
-  languages it has installed: nothing is fetched. Chromium's spellchecker
-  on Linux (and on Windows for a language the OS lacks) would fetch the
-  person's dictionary from Google's CDN on first launch, telling Google
-  the machine's address and language. It does so only when the app's list
-  reaches that CDN:
+  languages it has a language pack for: nothing is fetched. A language the
+  OS doesn't check (on Linux, every one) needs Chromium's dictionary, a
+  `.bdic` file, which Chromium would fetch from Google's CDN on first
+  launch, telling Google the machine's address and language. `[app]
+  spellcheck` says where it may come from:
+
+  | Value | A language the OS doesn't check |
+  |---|---|
+  | `"os"` (default) | a dictionary already in the profile (`<data>/electron/profile/Dictionaries/en-US-10-1.bdic`, as Chrome names it), else unchecked, said once per launch in the app's log with the fix; nothing fetched |
+  | `"off"` | no spellchecking at all, on every OS |
+  | `"google"` | fetched from Google's CDN: `network = ["*.gvt1.com"]` too |
+  | `"https://example.org/dictionaries/"` | fetched from the app's own folder: its host in `network` too |
 
   ```toml
+  [app]
+  id = "notes"
+  spellcheck = "https://dl.example.org/dictionaries/"
+
   [capabilities]
-  network = ["*.gvt1.com"]   # spellcheck dictionaries from Google
+  network = ["dl.example.org"]
   ```
 
-  Without it none is fetched: one already in the profile
-  (`<data>/electron/profile/Dictionaries/en-US-10-1.bdic`, as Chrome
-  names it) is used, else the app's log says which language goes
-  unchecked, once per launch.
+  The folder serves the files of Electron's `hunspell_dictionaries.zip`
+  (one per Electron release, on its GitHub release page), under the
+  lower-case names Chromium asks for (`en-us-10-1.bdic`). A build whose
+  network list doesn't reach the source fails, saying the line to add.
+  Hunspell's `.dic`/`.aff` files on a Linux system are not read: Chromium
+  takes only its own `.bdic` form.
 
 ## Gaps
 
