@@ -183,7 +183,7 @@ fn a_dev_build_says_nothing_of_its_own_tools_reads() {
         let left = part(|p| &p.left);
         rsx! { aio::kit::ReduxDevTools {} span { "data-t": "left", "{left}" } }
     }
-    let (mut ui, lines) = aio::log::capture(|| {
+    let (ui, lines) = aio::log::capture(|| {
         let mut ui = TestUi::new(app);
         ui.run(|| act!(bump_left()));
         ui.settle();
