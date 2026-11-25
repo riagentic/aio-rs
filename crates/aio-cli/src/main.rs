@@ -7,6 +7,7 @@ mod android;
 mod auth;
 mod boxlab;
 mod build;
+mod builds;
 mod bundle;
 mod cdp;
 mod check;
@@ -1090,6 +1091,11 @@ fn run(args: &[String]) -> Result<String, Fail> {
     if let Some(d) = value("--out") {
         build::ask_out(d).map_err(usage)?;
     }
+    // A build into a full disk dies deep in cargo: the cap applied, the room checked first.
+    if matches!(args[0].as_str(), "dev" | "start" | "restart" | "build" | "run") && !has("--list") {
+        let now = std::time::SystemTime::now();
+        builds::before(&|days| prune::freed(&aio_shell::runtime::root(), days, now))?;
+    }
     let out: Out = match (args[0].as_str(), p.as_slice()) {
         ("dev", [name, "--android", rest @ ..]) => {
             let (mut device, mut native, mut it) = (None, false, rest.iter());
@@ -2042,7 +2048,9 @@ fn run(args: &[String]) -> Result<String, Fail> {
         ("prune", []) => {
             let f: Vec<&str> = flags.iter().map(String::as_str).collect();
             aio_shell::runtime::migrate();
-            let said = prune::run(&aio_shell::runtime::root(), &f, std::time::SystemTime::now())?;
+            let now = std::time::SystemTime::now();
+            let said = prune::run(&aio_shell::runtime::root(), &f, now)?;
+            let said = format!("{said}\n\n{}", builds::run(&builds::store(), &f, builds::cap(), now)?);
             let yes = has("--yes") || has("-y");
             match prune::legacy(&upgrade::legacy_target(&aio::paths::tool_home()), yes)? {
                 Some(old) => Ok(format!("{said}\n{old}")),
@@ -2050,6 +2058,7 @@ fn run(args: &[String]) -> Result<String, Fail> {
             }
         }
         ("runtime", []) => runtime(has("--fetch")),
+        ("setup", []) if value("--build-cap").is_some() => builds::set_cap(value("--build-cap").unwrap_or_default()),
         ("setup", []) if has("--warm") => {
             let said = setup::run(has("--check"))?;
             Ok(format!("{said}\n{}", setup_warm(value("--aio").map(Path::new))?))

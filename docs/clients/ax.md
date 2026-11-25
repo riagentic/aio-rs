@@ -194,7 +194,7 @@ for every app, and no build output lands in a repo.
 ### `ax setup`
 
 ```text
-ax setup [--check]
+ax setup [--check] [--build-cap size|off]
 ```
 
 What making apps needs. Checks Rust and the C toolchain it links with;
@@ -206,6 +206,7 @@ optional tools. Each missing one is said with the command that gets it.
 | Flag | Does |
 |---|---|
 | `--check` | look only, fetch nothing |
+| `--build-cap 40G` | keep ax's build folder under 40 GB: before each `ax dev`, `start` and `build`, the least recently used build profiles past it go (never one used today, never one a cargo builds in), each said; `off`: no cap |
 
 Exit 1 while a needed tool is missing. Run it once per machine, and again
 after upgrading aio-rs. [Setup](../basics/setup.md).
@@ -636,7 +637,9 @@ The aio-rs apps and private instances on this machine: each one's id,
 running or not, its pid, version and port when it runs, who started it
 (`ax start`, or `other`: `ax dev`, a launcher, a terminal), and the aio-rs
 it runs on when that isn't this `ax`'s (two checkouts on one machine is the
-usual dev setup, and a mismatch the first thing to rule out).
+usual dev setup, and a mismatch the first thing to rule out), and the size
+of its home (its data and logs; `"bytes"` in `--json`). Its builds are in
+ax's shared build folder, by profile: `ax prune` lists them with sizes.
 
 ### `ax open`
 
@@ -1646,7 +1649,19 @@ ax prune [--yes] [--days N] [--keep a,b]
   (30) days, it is the one this `ax` ships, it is a `--keep` one, or it is
   one aio didn't write. `--yes` (`-y`) deletes exactly what the plan names.
   It also names ax 0.2's build folder (`target/` in the tool home), unused
-  since builds moved to aio's cache home; `--yes` removes it.
+  since builds moved to aio's cache home, with its size; `--yes` removes it.
+- Then ax's build folder (one per toolchain in aio's cache home), each
+  profile with its size (`1.98.0/desktop-dev`,
+  `1.98.0/wasm32-unknown-unknown/debug`): one unused `--days` (30) days
+  goes, and past the cap `ax setup --build-cap` set, the least recently
+  used (not one used today). A profile a cargo builds in right now (it
+  holds cargo's lock) is never removed; an app's next build in a removed
+  one starts over. `AIORT_TARGET_DIR`, the person's own folder, is never
+  pruned.
+- Before `ax dev`, `ax start`, `ax build` and `ax run`, ax checks the disk
+  of its build folder: under 5 GB free it warns, under 1 GB it refuses
+  (cargo would stop mid-build with "No space left on device"), each time
+  with what `ax prune --yes` (and `--days 0`) would free.
 
 ### Common mistakes
 

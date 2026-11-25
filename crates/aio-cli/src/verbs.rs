@@ -215,7 +215,7 @@ ax lint, a web build's library checked for wasm32 (aio's am check), ax test
 <app>, stopping at the first that fails; --release: then ax build <app>
 --sizes and --smoke too",
     ),
-    v("apps", "apps", "the aio-rs apps and private instances on this machine, and which run"),
+    v("apps", "apps", "the aio-rs apps and private instances on this machine, which run, and each home's size"),
     v(
         "ui",
         "ui [--window] [--browser]",
@@ -570,14 +570,16 @@ one's says its log and last versions, no state",
     ),
     v(
         "setup",
-        "setup [--check] [--warm] [--aio dir]",
+        "setup [--check] [--warm] [--aio dir] [--build-cap size|off]",
         "what making apps needs: checks Rust and the C toolchain, fetches the
 shared runtime and wasm-bindgen (the web build's) prebuilt and checked, and
 lists the optional tools; each missing one with the command that gets it;
 exit 1 while a needed one is missing; --check: look only, fetch nothing;
 then, at a terminal, builds aio-rs and its dependencies as ax dev does,
 once for the machine (--warm: anywhere; on --aio's checkout, else this ax's
-release), so a new app's first ax dev builds only its own crates",
+release), so a new app's first ax dev builds only its own crates;
+--build-cap 40G: ax's build folder kept under it (before each ax dev, start
+and build, the least recently used builds go; never today's); off: none",
     ),
     v(
         "upgrade",
@@ -606,10 +608,12 @@ this device with that app's server by its code",
     v(
         "prune",
         "prune [--yes] [--days N] [--keep a,b]",
-        "what of the shared runtime store may go (also: ax runtime --prune):
-what no installed app names and nothing started from in N (30) days;
-the one this ax ships, --keep ones and unknown ones stay; --yes (-y)
-deletes what the plan names",
+        "what of the shared runtime store and ax's build folder may go, with
+each one's size (also: ax runtime --prune): runtimes no installed app names
+and nothing started from in N (30) days (the one this ax ships, --keep ones
+and unknown ones stay); build profiles (per toolchain, target and profile)
+unused N days, and past ax setup --build-cap the least recently used; one
+a cargo builds in stays; --yes (-y) deletes what the plan names",
     ),
     v(
         "theme adopt",

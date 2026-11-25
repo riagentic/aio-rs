@@ -213,6 +213,11 @@ with aio's apps, [desktop](../clients/desktop.md#one-store-with-aio)). `~` is
 
 - `ax data <app>` prints an app's folders and what to back up; `ax doctor
   <app>` says who chose them (a flag, a variable, the default).
+- The build folder grows with every toolchain, target and profile built
+  (tens of GB over months). `ax prune` lists each profile with its size and
+  offers the ones unused 30 days; `ax setup --build-cap 40G` keeps it under
+  a cap by itself. A build warns under 5 GB free on its disk and refuses
+  under 1 GB, with what `ax prune --yes` would free.
 - The socket folder's name carries a hash of the data folder, so two copies
   of one app with different data (a `--profile`, an `--instance`,
   `AIORT_DATA`) never ask for the same socket or pipe, on any OS. Both are

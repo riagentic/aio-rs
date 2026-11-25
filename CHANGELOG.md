@@ -193,6 +193,18 @@ version may break things.
   ([relay](docs/examples/relay.md)).
 - `Source::for_server_with(cfg, dirs, http)`: `for_server` serving the
   app's own routes too, without the sync client `for_app_with` holds.
+- ax checks the disk of its build folder before `ax dev`, `start`,
+  `build` and `run`: under 5 GB free it warns, under 1 GB it refuses, each
+  time with what `ax prune --yes` (and `--days 0`) would free. A full disk
+  showed only as cargo's "No space left on device" deep in a build.
+- `ax prune` prunes ax's build folder too: each toolchain's profiles
+  (`1.98.0/desktop-dev`, `1.98.0/wasm32-unknown-unknown/debug`) with their
+  size; one unused `--days` (30) days goes, never one a cargo builds in
+  (it holds cargo's lock). ax 0.2's old build folder is said with its size.
+- `ax setup --build-cap 40G` (`off`): before each `ax dev`, `start` and
+  `build`, the least recently used build profiles past the cap go (never
+  one used today), each said.
+- `ax apps` says each app's home size (`"bytes"` in `--json`).
 - The template's `Cargo.toml` shows how to optimize a CPU-heavy crate of
   the app's own in debug builds (`[profile.dev.package.<crate>] opt-level
   = 3`, which every debug profile of ax inherits): unoptimized, it ran

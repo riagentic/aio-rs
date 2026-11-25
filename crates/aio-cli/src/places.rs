@@ -58,7 +58,8 @@ pub fn data(id: &str, plan: &aio::paths::Plan, json: bool) -> String {
 }
 
 /// The apps under `apps/` and the private instances under `instances/<n>/`
-/// of the tool home `root`, each running or not.
+/// of the tool home `root`, each running or not, and the size of its home
+/// (its data and logs; its builds share ax's build folder: `ax prune`).
 pub fn apps(root: &Path, json: bool) -> String {
     let dirs = |d: &Path| -> Vec<(String, PathBuf)> {
         let mut v: Vec<_> = std::fs::read_dir(d)
@@ -80,7 +81,7 @@ pub fn apps(root: &Path, json: bool) -> String {
         let rows = rows.iter().map(|(name, inst, home)| {
             let data = home.join("data");
             let on = aio::paths::running(&data);
-            let mut v = serde_json::json!({ "name": name, "home": home, "running": on });
+            let mut v = serde_json::json!({ "name": name, "home": home, "running": on, "bytes": size(home) });
             if let Some(i) = inst.strip_prefix("instance ") {
                 v["instance"] = i.into();
             }
@@ -109,7 +110,7 @@ pub fn apps(root: &Path, json: bool) -> String {
                 ("-", String::new())
             };
             let inst = if inst.is_empty() { String::new() } else { format!("  ({inst})") };
-            format!("{name:<w$}  {run:<7}  {}{inst}{about}", home.display())
+            format!("{name:<w$}  {run:<7}  {:>9}  {}{inst}{about}", human(size(home)), home.display())
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -363,6 +364,9 @@ mod tests {
         assert_eq!(rows[2]["instance"], "agent1");
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3, "{out}");
+        let home = t.path().join("apps/mail");
+        assert_eq!(rows[0]["bytes"].as_u64(), Some(size(&home)));
+        assert!(lines[0].contains(&format!("  {:>9}  {}", human(size(&home)), home.display())), "{out}");
         assert!(lines[0].starts_with("mail   running") && lines[1].starts_with("notes  -"), "{out}");
         let about = "  pid 42, v1.2.0, since 2026-10-28T08:00:00.000Z, serving on port 8100 (TLS), started by other";
         assert!(lines[0].ends_with(about) && !lines[1].contains("pid"), "{out}");
