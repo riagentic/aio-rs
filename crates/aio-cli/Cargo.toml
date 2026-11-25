@@ -31,7 +31,7 @@ notify = "8"
 base64 = "0.23"
 # `ax build --sizes`: a binary's code symbols, by crate. `write`: ax dev's
 # hot-patch stub object (`hotpatch.rs`).
-object = { version = "0.37", default-features = false, features = ["read", "std", "write"] }
+object = { version = "0.39", default-features = false, features = ["read", "std", "write"] }
 # ax dev's hot-patch: the jump table the app applies (its own type).
 aio-hotpatch = { workspace = true }
 rustc-demangle = "0.1"

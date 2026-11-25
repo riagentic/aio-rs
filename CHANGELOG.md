@@ -206,6 +206,8 @@ version may break things.
 
 ### Changed
 
+- ax reads and writes objects with object 0.39 (from 0.37): one hashbrown
+  in the workspace, a crate fewer in ax's graph.
 - `Tabs` that don't fit wrap to another row, where a scrollbar showed
   under them; `scroll: true` keeps the old row.
 - **Breaking: ax's plumbing is out of the API**: `aio_shell`'s `runtime`,
