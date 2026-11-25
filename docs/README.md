@@ -53,6 +53,7 @@ New here? Read in this order: [setup](basics/setup.md) →
 - [Theming and styles](ui/theming.md): CSS and live CSS, the hue, tokens, dark mode, a CSS toolchain.
 - [Motion and animation](ui/animation.md): transitions, springs, moving rows.
 - [Islands and advanced views](ui/islands.md): other sites and foreign widgets in a view, portals, advanced patterns.
+- [Charts, heat maps and drawing](ui/drawing.md): `Chart`, `Heatmap`, `Canvas` with a draw-list made in Rust.
 - [Performance](performance.md): fine-grained reads, coalesced writes, memoizing, windowed lists; measuring.
 
 **Testing**

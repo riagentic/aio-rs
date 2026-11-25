@@ -21,6 +21,7 @@ tokens: put the theme on the page first
 | Status | `Spinner`, `Progress`, `Skeleton`, `Alert`, `EmptyState`, `ConnectionStatus`, `Avatar` |
 | Lists | `VirtualList`, `window(..)`, `Transition`, `TransitionGroup` |
 | Keys | `GlobalKeys`, `use_global_key`, `use_global_keys`, `use_key_claim`, `Chord` |
+| Data | `Chart` (lines, bars, dots; log axes), `Heatmap`, `Canvas` + `Draw` ([drawing](drawing.md)) |
 | Other | `Markdown`, `ZoomPan`, `QrScanner` (QR codes from the camera), `Browser` (a guest web page), `Island` / `WebIsland` (plain JS inside a view), `SignIn`, `ConnectPage`, `TimeTravelPanel`, `Defer`, `use_held`, `use_spring`, `use_frame`, `use_interval`, `use_window_event`, `use_window_listener`, `use_back_button` |
 
 The parts a person uses inside a control carry handles of their own for
@@ -743,8 +744,9 @@ The kit matches aio's `aio/ui` component for component and adds the
 controls aio apps wrote by hand (`Tabs`' right-to-left keys, `Defer`,
 `ZoomPan`'s math, `TransitionGroup`); what aio has beyond it:
 
-- **Data grids, charts, date pickers**: neither has them; mount a
-  library as an [island](islands.md).
+- **Data grids, date pickers**: neither has them; mount a library as an
+  [island](islands.md). Charts, heat maps and 2-D drawing are the kit's
+  own ([drawing](drawing.md)); aio had none.
 
 ## Common mistakes
 

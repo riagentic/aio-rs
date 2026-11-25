@@ -835,6 +835,7 @@ aio::fmt::bytes: fn bytes(n: u64) -> String
 aio::fmt::count: fn count(n: u64, one: &str, many: Option<&str>) -> String
 aio::fmt::dur: fn dur(d: std::time::Duration) -> String
 aio::fmt::fold: fn fold<S: AsRef<str>>(items: &[S], max: usize) -> String
+aio::fmt::short: fn short(v: f64) -> String
 aio::fmt::stack: fn stack(blocks: &[&str]) -> String
 aio::fmt::tally: fn tally(parts: &[(u64, &str)]) -> String
 aio::fns::Access::Check(Rule)
@@ -1100,6 +1101,15 @@ aio::kit::AvatarProps.color: Prop<Option<String>>
 aio::kit::AvatarProps.name: Prop<String>
 aio::kit::AvatarProps.size: Prop<u32>
 aio::kit::AvatarProps.src: Prop<Option<String>>
+aio::kit::Axis.label: String
+aio::kit::Axis.max: Option<f64>
+aio::kit::Axis.min: Option<f64>
+aio::kit::Axis.names: Vec<String>
+aio::kit::Axis.scale: Scale
+aio::kit::Axis::linear: fn linear(label: impl Into<String>) -> Self
+aio::kit::Axis::log: fn log(label: impl Into<String>) -> Self
+aio::kit::Axis::names: fn names(label: impl Into<String>, names: impl IntoIterator<Item = impl Into<String>>) -> Self
+aio::kit::Axis::range: fn range(self, min: f64, max: f64) -> Self
 aio::kit::Bind.field: &'static str
 aio::kit::Bind::blur: fn blur(&self)
 aio::kit::Bind::input: fn input(&self, v: String)
@@ -1122,12 +1132,18 @@ aio::kit::ButtonProps.onmounted: Option<EventHandler<MountedEvent>>
 aio::kit::ButtonProps.size: Prop<Size>
 aio::kit::ButtonProps.type: Prop<String>
 aio::kit::ButtonProps.variant: Prop<Variant>
+aio::kit::Canvas: fn Canvas(_: CanvasProps) -> View
+aio::kit::CanvasPointer.buttons: u16
+aio::kit::CanvasPointer.kind: PointerKind
+aio::kit::CanvasPointer.x: f64
+aio::kit::CanvasPointer.y: f64
 aio::kit::Card: fn Card(_: CardProps) -> View
 aio::kit::CardProps.attributes: Vec<Attribute>
 aio::kit::CardProps.children: View
 aio::kit::CardProps.class: Prop<String>
 aio::kit::CardProps.footer: Option<View>
 aio::kit::CardProps.title: Option<View>
+aio::kit::Chart: fn Chart(_: ChartProps) -> View
 aio::kit::Checkbox: fn Checkbox(_: CheckboxProps) -> View
 aio::kit::CheckboxProps.attributes: Vec<Attribute>
 aio::kit::CheckboxProps.bind: Option<super::Bind>
@@ -1193,6 +1209,35 @@ aio::kit::Defer: fn Defer(_: DeferProps) -> View
 aio::kit::Direction: fn Direction(_: DirectionProps) -> View
 aio::kit::DirectionProps.children: View
 aio::kit::DirectionProps.rtl: Prop<bool>
+aio::kit::Draw(_)
+aio::kit::Draw::align: fn align(&mut self, a: Align) -> &mut Self
+aio::kit::Draw::alpha: fn alpha(&mut self, a: f64) -> &mut Self
+aio::kit::Draw::arc: fn arc(&mut self, cx: f64, cy: f64, r: f64, a0: f64, a1: f64) -> &mut Self
+aio::kit::Draw::close: fn close(&mut self) -> &mut Self
+aio::kit::Draw::curve_to: fn curve_to(&mut self, c1x: f64, c1y: f64, c2x: f64, c2y: f64, x: f64, y: f64) -> &mut Self
+aio::kit::Draw::dash: fn dash(&mut self, pattern: &[f64]) -> &mut Self
+aio::kit::Draw::fill: fn fill(&mut self, color: &str) -> &mut Self
+aio::kit::Draw::fill_path: fn fill_path(&mut self) -> &mut Self
+aio::kit::Draw::font: fn font(&mut self, css: &str) -> &mut Self
+aio::kit::Draw::image: fn image(&mut self, src: &str, x: f64, y: f64, w: f64, h: f64) -> &mut Self
+aio::kit::Draw::is_empty: fn is_empty(&self) -> bool
+aio::kit::Draw::line: fn line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64) -> &mut Self
+aio::kit::Draw::line_to: fn line_to(&mut self, x: f64, y: f64) -> &mut Self
+aio::kit::Draw::move_to: fn move_to(&mut self, x: f64, y: f64) -> &mut Self
+aio::kit::Draw::new: fn new() -> Self
+aio::kit::Draw::pixels: fn pixels(&mut self, px: &Pixels, x: f64, y: f64, w: f64, h: f64) -> &mut Self
+aio::kit::Draw::polyline: fn polyline(&mut self, points: &[(f64, f64)]) -> &mut Self
+aio::kit::Draw::rect: fn rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> &mut Self
+aio::kit::Draw::restore: fn restore(&mut self) -> &mut Self
+aio::kit::Draw::rotate: fn rotate(&mut self, a: f64) -> &mut Self
+aio::kit::Draw::save: fn save(&mut self) -> &mut Self
+aio::kit::Draw::scale: fn scale(&mut self, x: f64, y: f64) -> &mut Self
+aio::kit::Draw::smooth: fn smooth(&mut self, on: bool) -> &mut Self
+aio::kit::Draw::stroke: fn stroke(&mut self, color: &str, width: f64) -> &mut Self
+aio::kit::Draw::stroke_path: fn stroke_path(&mut self) -> &mut Self
+aio::kit::Draw::stroke_rect: fn stroke_rect(&mut self, x: f64, y: f64, w: f64, h: f64) -> &mut Self
+aio::kit::Draw::text: fn text(&mut self, x: f64, y: f64, text: &str) -> &mut Self
+aio::kit::Draw::translate: fn translate(&mut self, x: f64, y: f64) -> &mut Self
 aio::kit::EmptyState: fn EmptyState(_: EmptyStateProps) -> View
 aio::kit::EmptyStateProps.action: Option<View>
 aio::kit::EmptyStateProps.attributes: Vec<Attribute>
@@ -1266,6 +1311,7 @@ aio::kit::GuestEvent::Title { title: String }
 aio::kit::GuestEvent::Unresponsive
 aio::kit::GuestInput::Click(f64, f64, Modifiers)
 aio::kit::GuestInput::Key(Key, Modifiers)
+aio::kit::Heatmap: fn Heatmap(_: HeatmapProps) -> View
 aio::kit::HostKey.alt: bool
 aio::kit::HostKey.code: String
 aio::kit::HostKey.ctrl: bool
@@ -1289,6 +1335,9 @@ aio::kit::Island::js: const fn js(src: &'static str) -> Self
 aio::kit::Island::react: const fn react(src: &'static str) -> Self
 aio::kit::Island::sandboxed: const fn sandboxed(self) -> Self
 aio::kit::Load(_)
+aio::kit::Mark::Bar
+aio::kit::Mark::Line
+aio::kit::Mark::Scatter
 aio::kit::Markdown: fn Markdown(_: MarkdownProps) -> View
 aio::kit::Menu: fn Menu(_: MenuProps) -> View
 aio::kit::MenuItem.danger: bool
@@ -1356,13 +1405,27 @@ aio::kit::PaginationProps.onpage: EventHandler<u32>
 aio::kit::PaginationProps.page: Prop<u32>
 aio::kit::PaginationProps.pages: Prop<u32>
 aio::kit::PaginationProps.window: Prop<u32>
+aio::kit::Palette::Cividis
+aio::kit::Palette::CoolWarm
+aio::kit::Palette::Magma
+aio::kit::Palette::Stops(Vec<[u8; 3]>)
+aio::kit::Palette::Viridis
+aio::kit::Palette::color: fn color(&self, t: f32) -> [u8; 3]
+aio::kit::Palette::css_gradient: fn css_gradient(&self) -> String
 aio::kit::Parse::field: fn field<V: 'static, O: 'static>(&mut self, f: FieldOf<T, V>, r: &Rule<V, O>) -> Option<O>
 aio::kit::Parse::problem: fn problem(&mut self, field: &'static str, msg: impl Into<String>)
 aio::kit::Parse::values: fn values(&self) -> &T
+aio::kit::Pixels::indexed: fn indexed(w: u32, h: u32, index: &[u8], palette: &[[u8; 4]]) -> Self
+aio::kit::Pixels::rgba: fn rgba(w: u32, h: u32, rgba: &[u8]) -> Self
 aio::kit::Placement::Bottom
 aio::kit::Placement::Left
 aio::kit::Placement::Right
 aio::kit::Placement::Top
+aio::kit::PointerKind::Click
+aio::kit::PointerKind::Down
+aio::kit::PointerKind::Leave
+aio::kit::PointerKind::Move
+aio::kit::PointerKind::Up
 aio::kit::Portal: fn Portal(_: PortalProps) -> View
 aio::kit::PortalHost: fn PortalHost(_: PortalHostProps) -> View
 aio::kit::Progress: fn Progress(_: ProgressProps) -> View
@@ -1407,6 +1470,8 @@ aio::kit::Rule::required: fn required(self, msg: impl Into<String>) -> Self
 aio::kit::Rule::run: fn run(&self, i: I) -> Result<O, String>
 aio::kit::Rule::then: fn then<P: 'static>(self, f: impl Fn(O) -> Result<P, String> + 'static) -> Rule<I, P>
 aio::kit::Rule::trim: fn trim(self) -> Self
+aio::kit::Scale::Linear
+aio::kit::Scale::Log
 aio::kit::Schema::json: fn json(text: &str) -> Result<Self, String>
 aio::kit::Schema::new: fn new(parse: impl Fn(&mut Parse<'_, T>) -> Option<O> + 'static) -> Self
 aio::kit::Schema::parse: fn parse(&self, values: &T) -> Result<O, Problems>
@@ -1420,6 +1485,14 @@ aio::kit::SelectProps.invalid: Prop<bool>
 aio::kit::SelectProps.onchange: Option<EventHandler<String>>
 aio::kit::SelectProps.options: Prop<Vec<Opt>>
 aio::kit::SelectProps.value: Prop<String>
+aio::kit::Series.color: Option<String>
+aio::kit::Series.mark: Mark
+aio::kit::Series.name: String
+aio::kit::Series.points: Vec<(f64, f64)>
+aio::kit::Series::bar: fn bar(name: impl Into<String>, points: impl Into<Vec<(f64, f64)>>) -> Self
+aio::kit::Series::color: fn color(self, css: impl Into<String>) -> Self
+aio::kit::Series::line: fn line(name: impl Into<String>, points: impl Into<Vec<(f64, f64)>>) -> Self
+aio::kit::Series::scatter: fn scatter(name: impl Into<String>, points: impl Into<Vec<(f64, f64)>>) -> Self
 aio::kit::SignIn: fn SignIn(_: SignInProps) -> View
 aio::kit::Size::Lg
 aio::kit::Size::Md
@@ -2897,8 +2970,12 @@ enum aio::kit::Align
 enum aio::kit::Go
 enum aio::kit::GuestEvent
 enum aio::kit::GuestInput
+enum aio::kit::Mark
+enum aio::kit::Palette
 enum aio::kit::Placement
+enum aio::kit::PointerKind
 enum aio::kit::QrState
+enum aio::kit::Scale
 enum aio::kit::Size
 enum aio::kit::Tone
 enum aio::kit::Trigger
@@ -2944,6 +3021,7 @@ impl Clone for Asked
 impl Clone for AskedFor
 impl Clone for AuthError
 impl Clone for AvatarProps
+impl Clone for Axis
 impl Clone for Backoff
 impl Clone for Backs
 impl Clone for Bind
@@ -2959,6 +3037,7 @@ impl Clone for ButtonProps
 impl Clone for By
 impl Clone for Caller
 impl Clone for Cancel
+impl Clone for CanvasPointer
 impl Clone for Captured
 impl Clone for CardProps
 impl Clone for Cassette
@@ -2987,6 +3066,7 @@ impl Clone for Diagnostic
 impl Clone for DirectionProps
 impl Clone for Doc
 impl Clone for Done
+impl Clone for Draw
 impl Clone for Due
 impl Clone for EmptyStateProps
 impl Clone for Encoding
@@ -3035,6 +3115,7 @@ impl Clone for Login
 impl Clone for Loop
 impl Clone for Mail
 impl Clone for Manifest
+impl Clone for Mark
 impl Clone for MarkdownProps
 impl Clone for Me
 impl Clone for Memory
@@ -3065,6 +3146,7 @@ impl Clone for Outcome
 impl Clone for Page
 impl Clone for PaginationProps
 impl Clone for Paint
+impl Clone for Palette
 impl Clone for Part
 impl Clone for Patch
 impl Clone for PatchList
@@ -3072,8 +3154,10 @@ impl Clone for Patches
 impl Clone for Peer
 impl Clone for Phase
 impl Clone for Phases
+impl Clone for Pixels
 impl Clone for Placement
 impl Clone for Plan
+impl Clone for PointerKind
 impl Clone for Position
 impl Clone for Presence
 impl Clone for Problem
@@ -3102,10 +3186,12 @@ impl Clone for RowProps
 impl Clone for Rows
 impl Clone for SameSite
 impl Clone for Saved
+impl Clone for Scale
 impl Clone for Seen
 impl Clone for Select
 impl Clone for SelectProps
 impl Clone for Seqs
+impl Clone for Series
 impl Clone for Server
 impl Clone for Session
 impl Clone for Severity
@@ -3161,6 +3247,7 @@ impl Clone for WindowEvent
 impl Clone for ZoomView
 impl Copy for Align
 impl Copy for Backoff
+impl Copy for CanvasPointer
 impl Copy for Col
 impl Copy for Columns
 impl Copy for Conn
@@ -3174,6 +3261,7 @@ impl Copy for Filter
 impl Copy for Gate
 impl Copy for Island
 impl Copy for Kind
+impl Copy for Mark
 impl Copy for Memory
 impl Copy for Mode
 impl Copy for Motion
@@ -3182,10 +3270,12 @@ impl Copy for Order
 impl Copy for Phase
 impl Copy for Phases
 impl Copy for Placement
+impl Copy for PointerKind
 impl Copy for Position
 impl Copy for Problem
 impl Copy for ProgressOf
 impl Copy for SameSite
+impl Copy for Scale
 impl Copy for Seen
 impl Copy for Severity
 impl Copy for Size
@@ -3218,6 +3308,7 @@ impl Debug for Ask
 impl Debug for Asked
 impl Debug for AskedFor
 impl Debug for AuthError
+impl Debug for Axis
 impl Debug for Backoff
 impl Debug for Blob
 impl Debug for Blobs
@@ -3228,6 +3319,7 @@ impl Debug for Budget
 impl Debug for By
 impl Debug for Caller
 impl Debug for Cancel
+impl Debug for CanvasPointer
 impl Debug for CellHealth
 impl Debug for Client
 impl Debug for Closed
@@ -3246,6 +3338,7 @@ impl Debug for Diagnostic
 impl Debug for Doc
 impl Debug for Done
 impl Debug for Drained
+impl Debug for Draw
 impl Debug for Due
 impl Debug for Encoding
 impl Debug for Episode
@@ -3288,6 +3381,7 @@ impl Debug for Login
 impl Debug for Loop
 impl Debug for Mail
 impl Debug for Manifest
+impl Debug for Mark
 impl Debug for Me
 impl Debug for Memory
 impl Debug for MemoryReport
@@ -3311,6 +3405,7 @@ impl Debug for Outcome
 impl Debug for Output
 impl Debug for Page
 impl Debug for Paint
+impl Debug for Palette
 impl Debug for Part
 impl Debug for Patch
 impl Debug for PatchList
@@ -3318,8 +3413,10 @@ impl Debug for Patches
 impl Debug for Peer
 impl Debug for Phase
 impl Debug for Phases
+impl Debug for Pixels
 impl Debug for Placement
 impl Debug for Plan
+impl Debug for PointerKind
 impl Debug for Position
 impl Debug for Presence
 impl Debug for Problem
@@ -3346,10 +3443,12 @@ impl Debug for Rows
 impl Debug for SameSite
 impl Debug for Sampler
 impl Debug for Saved
+impl Debug for Scale
 impl Debug for Secret
 impl Debug for Seen
 impl Debug for Select
 impl Debug for Seqs
+impl Debug for Series
 impl Debug for Server
 impl Debug for Serving
 impl Debug for Session
@@ -3397,6 +3496,7 @@ impl Default for About
 impl Default for Align
 impl Default for Args
 impl Default for Ask
+impl Default for Axis
 impl Default for Backs
 impl Default for Blocked
 impl Default for BrowserTab
@@ -3413,6 +3513,7 @@ impl Default for Data
 impl Default for Doc
 impl Default for Done
 impl Default for Drained
+impl Default for Draw
 impl Default for Feedback
 impl Default for Filter
 impl Default for Head
@@ -3422,6 +3523,7 @@ impl Default for Http
 impl Default for Inputs
 impl Default for Known
 impl Default for Loc
+impl Default for Mark
 impl Default for Me
 impl Default for Merged
 impl Default for Metrics
@@ -3435,6 +3537,7 @@ impl Default for Opts
 impl Default for Page
 impl Default for Paint
 impl Default for Pairing
+impl Default for Palette
 impl Default for Patches
 impl Default for Phase
 impl Default for Phases
@@ -3445,6 +3548,7 @@ impl Default for Request
 impl Default for Rows
 impl Default for Sampler
 impl Default for Saved
+impl Default for Scale
 impl Default for Seqs
 impl Default for Server
 impl Default for Sha256
@@ -3529,6 +3633,7 @@ impl Eq for Loc
 impl Eq for Login
 impl Eq for Mail
 impl Eq for Manifest
+impl Eq for Mark
 impl Eq for Me
 impl Eq for Memory
 impl Eq for Merge
@@ -3550,6 +3655,7 @@ impl Eq for Phase
 impl Eq for Phases
 impl Eq for Placement
 impl Eq for Plan
+impl Eq for PointerKind
 impl Eq for Position
 impl Eq for Presence
 impl Eq for Problem
@@ -3568,6 +3674,7 @@ impl Eq for Roster
 impl Eq for Row
 impl Eq for SameSite
 impl Eq for Saved
+impl Eq for Scale
 impl Eq for Seen
 impl Eq for Server
 impl Eq for Session
@@ -3617,6 +3724,7 @@ impl PartialEq for Ask
 impl PartialEq for Asked
 impl PartialEq for AskedFor
 impl PartialEq for AuthError
+impl PartialEq for Axis
 impl PartialEq for Backoff
 impl PartialEq for Bind
 impl PartialEq for Blob
@@ -3625,6 +3733,7 @@ impl PartialEq for Blocked
 impl PartialEq for Breach
 impl PartialEq for By
 impl PartialEq for Caller
+impl PartialEq for CanvasPointer
 impl PartialEq for CellHealth
 impl PartialEq for Client
 impl PartialEq for Closed
@@ -3644,6 +3753,7 @@ impl PartialEq for Diagnostic
 impl PartialEq for Doc
 impl PartialEq for Done
 impl PartialEq for Drained
+impl PartialEq for Draw
 impl PartialEq for Due
 impl PartialEq for Encoding
 impl PartialEq for Episode
@@ -3682,6 +3792,7 @@ impl PartialEq for Login
 impl PartialEq for Loop
 impl PartialEq for Mail
 impl PartialEq for Manifest
+impl PartialEq for Mark
 impl PartialEq for Me
 impl PartialEq for Memory
 impl PartialEq for MemoryReport
@@ -3703,14 +3814,17 @@ impl PartialEq for Opt
 impl PartialEq for Order
 impl PartialEq for Outcome
 impl PartialEq for Paint
+impl PartialEq for Palette
 impl PartialEq for Part
 impl PartialEq for Patch
 impl PartialEq for PatchList
 impl PartialEq for Patches
 impl PartialEq for Phase
 impl PartialEq for Phases
+impl PartialEq for Pixels
 impl PartialEq for Placement
 impl PartialEq for Plan
+impl PartialEq for PointerKind
 impl PartialEq for Position
 impl PartialEq for Presence
 impl PartialEq for Problem
@@ -3735,8 +3849,10 @@ impl PartialEq for Row
 impl PartialEq for Rows
 impl PartialEq for SameSite
 impl PartialEq for Saved
+impl PartialEq for Scale
 impl PartialEq for Seen
 impl PartialEq for Select
+impl PartialEq for Series
 impl PartialEq for Server
 impl PartialEq for Serving
 impl PartialEq for Session
@@ -3816,6 +3932,7 @@ impl Serialize for By
 impl Serialize for Code
 impl Serialize for Contract
 impl Serialize for Doc
+impl Serialize for Draw
 impl Serialize for Due
 impl Serialize for Event
 impl Serialize for Feedback
@@ -3855,6 +3972,7 @@ impl StructuralPartialEq for Ask
 impl StructuralPartialEq for Asked
 impl StructuralPartialEq for AskedFor
 impl StructuralPartialEq for AuthError
+impl StructuralPartialEq for Axis
 impl StructuralPartialEq for Backoff
 impl StructuralPartialEq for Blob
 impl StructuralPartialEq for Block
@@ -3862,6 +3980,7 @@ impl StructuralPartialEq for Blocked
 impl StructuralPartialEq for Breach
 impl StructuralPartialEq for By
 impl StructuralPartialEq for Caller
+impl StructuralPartialEq for CanvasPointer
 impl StructuralPartialEq for CellHealth
 impl StructuralPartialEq for Closed
 impl StructuralPartialEq for Code
@@ -3880,6 +3999,7 @@ impl StructuralPartialEq for Diagnostic
 impl StructuralPartialEq for Doc
 impl StructuralPartialEq for Done
 impl StructuralPartialEq for Drained
+impl StructuralPartialEq for Draw
 impl StructuralPartialEq for Due
 impl StructuralPartialEq for Encoding
 impl StructuralPartialEq for Episode
@@ -3917,6 +4037,7 @@ impl StructuralPartialEq for Login
 impl StructuralPartialEq for Loop
 impl StructuralPartialEq for Mail
 impl StructuralPartialEq for Manifest
+impl StructuralPartialEq for Mark
 impl StructuralPartialEq for Me
 impl StructuralPartialEq for Memory
 impl StructuralPartialEq for MemoryReport
@@ -3937,14 +4058,17 @@ impl StructuralPartialEq for Opt
 impl StructuralPartialEq for Order
 impl StructuralPartialEq for Outcome
 impl StructuralPartialEq for Paint
+impl StructuralPartialEq for Palette
 impl StructuralPartialEq for Part
 impl StructuralPartialEq for Patch
 impl StructuralPartialEq for PatchList
 impl StructuralPartialEq for Patches
 impl StructuralPartialEq for Phase
 impl StructuralPartialEq for Phases
+impl StructuralPartialEq for Pixels
 impl StructuralPartialEq for Placement
 impl StructuralPartialEq for Plan
+impl StructuralPartialEq for PointerKind
 impl StructuralPartialEq for Position
 impl StructuralPartialEq for Presence
 impl StructuralPartialEq for Problem
@@ -3969,8 +4093,10 @@ impl StructuralPartialEq for Row
 impl StructuralPartialEq for Rows
 impl StructuralPartialEq for SameSite
 impl StructuralPartialEq for Saved
+impl StructuralPartialEq for Scale
 impl StructuralPartialEq for Seen
 impl StructuralPartialEq for Select
+impl StructuralPartialEq for Series
 impl StructuralPartialEq for Server
 impl StructuralPartialEq for Serving
 impl StructuralPartialEq for Session
@@ -4044,6 +4170,7 @@ impl<'de> Deserialize<'de> for Patch
 impl<'de> Deserialize<'de> for PatchList
 impl<'de> Deserialize<'de> for Patches
 impl<'de> Deserialize<'de> for Phase
+impl<'de> Deserialize<'de> for PointerKind
 impl<'de> Deserialize<'de> for Profile
 impl<'de> Deserialize<'de> for ProgressOf
 impl<'de> Deserialize<'de> for Queued
@@ -4341,9 +4468,11 @@ struct aio::ipc::Listener
 struct aio::ipc::Only
 struct aio::kit::AlertProps
 struct aio::kit::AvatarProps
+struct aio::kit::Axis
 struct aio::kit::Bind
 struct aio::kit::BreadcrumbProps
 struct aio::kit::ButtonProps
+struct aio::kit::CanvasPointer
 struct aio::kit::CardProps
 struct aio::kit::CheckboxProps
 struct aio::kit::ChordSpec
@@ -4354,6 +4483,7 @@ struct aio::kit::ConfirmProps
 struct aio::kit::ConnectionStatusProps
 struct aio::kit::Crumb
 struct aio::kit::DirectionProps
+struct aio::kit::Draw
 struct aio::kit::EmptyStateProps
 struct aio::kit::FieldArray<V: 'static>
 struct aio::kit::FieldOf<T, V>
@@ -4374,12 +4504,14 @@ struct aio::kit::NavListProps
 struct aio::kit::Opt
 struct aio::kit::PaginationProps
 struct aio::kit::Parse<'a, T>
+struct aio::kit::Pixels
 struct aio::kit::ProgressProps
 struct aio::kit::RadioGroupProps
 struct aio::kit::RowProps
 struct aio::kit::Rule<I, O>
 struct aio::kit::Schema<T: 'static, O: 'static>
 struct aio::kit::SelectProps
+struct aio::kit::Series
 struct aio::kit::SkeletonProps
 struct aio::kit::SpinnerProps
 struct aio::kit::Spring
