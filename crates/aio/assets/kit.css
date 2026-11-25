@@ -288,6 +288,18 @@ body{
     --aio-ui-danger: var(--aio-danger, #ff6b78);
   }
 }
+/* A chart's series, in order (Chart): eight hues whose neighbours stay
+   apart for colour-blind eyes, stepped for each surface. */
+:root {
+  --aio-series-1:#2a78d6; --aio-series-2:#eb6834; --aio-series-3:#1baf7a; --aio-series-4:#eda100;
+  --aio-series-5:#e87ba4; --aio-series-6:#008300; --aio-series-7:#6250d6; --aio-series-8:#e34948;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --aio-series-1:#3987e5; --aio-series-2:#d95926; --aio-series-3:#199e70; --aio-series-4:#c98500;
+    --aio-series-5:#d55181; --aio-series-6:#0ca30c; --aio-series-7:#9085e9; --aio-series-8:#e66767;
+  }
+}
 /* The ink ON the danger fill, solved from the fill (see app-theme.ts): dark
    mode LIGHTENS the fill — white on #ff6b78 is 2.8:1 — and an app may set any
    --aio-danger, so no fixed ink fits. An engine without relative colour keeps

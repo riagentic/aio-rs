@@ -161,6 +161,7 @@ change everything made from it.
 | `--aio-text`, `--aio-muted`, `--aio-border` | ink, quiet ink, lines | |
 | `--aio-ring` | the focus ring (a `box-shadow`) | 3 px of the accent |
 | `--aio-ok`, `--aio-warn`, `--aio-danger`, `--aio-on-danger` | status colours; the ink on danger is solved from the fill | green, amber, red |
+| `--aio-series-1` … `--aio-series-8` | a chart's series, in order, set by the kit's sheet ([drawing](drawing.md)) | blue, orange, aqua, yellow, magenta, green, violet, red; checked for colour-blind eyes, light and dark |
 | `--aio-s-1` … `--aio-s-6` | spacing | .25, .5, .75, 1, 1.5, 2.5 rem |
 | `--aio-r-1` … `--aio-r-4` | radii | 6, 10, 14, 20 px |
 | `--aio-page` | `.container`'s width | 72rem |

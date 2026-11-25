@@ -75,6 +75,28 @@ version may break things.
 
 ### Added
 
+- `aio::kit::Chart`: lines, bars and dots on linear, log or category
+  axes as SVG, with ticks at round numbers, a legend for two series or
+  more, the nearest point's values on hover and a description a screen
+  reader hears; `Chart { series: vec![Series::line("load", points)] }` is
+  a whole chart. A line of more points than its plot has pixel columns
+  is thinned to each column's first, lowest, highest and last point
+  ([drawing](docs/ui/drawing.md)).
+- `aio::kit::Heatmap`: rows × cols of `f32` as colours (`Palette::Viridis`,
+  `Magma`, `Cividis`, `CoolWarm` or stops), one canvas bitmap of a byte a
+  cell, with labels, a colour key, the hovered value, `sel` and
+  `onpick((row, col))` by click or keys.
+- `aio::kit::Canvas` with `Draw`: a 2-D drawing made in Rust (rects,
+  lines, paths, text, images, `Pixels`, transforms; colours may be
+  tokens), painted in the page at its pixel ratio, again when the list,
+  the size or the theme changes; `onpointer` in the drawing's
+  coordinates, `onsize`. Its painter is a kit island an app that draws
+  nothing doesn't build.
+- Tokens `--aio-series-1` … `--aio-series-8` (the kit's sheet): a chart's
+  series colours, light and dark.
+- `aio::fmt::short`: a number in three significant digits, short (`1.5k`,
+  `2.4M`, `0.001`, `1e-5`).
+
 - `aio::capabilities::network()`: this process's `[capabilities] network`
   list, `None` when it is not held.
 - `aio::http::content_name(name, bytes)`: a file's name by its content
