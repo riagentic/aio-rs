@@ -1188,7 +1188,7 @@ fn run(args: &[String]) -> Result<String, Fail> {
             }
             Ok(made.said(json))
         }
-        ("add", [app, "page", name]) => add::page(&pin::root_of(Some(app))?, name, json),
+        ("add", [app, "page", name]) => add::page(&pin::root_of(Some(app))?, name, has("--yes"), json),
         ("add", [app, kind, name]) => add::run(&pin::root_of(Some(app))?, add::Kind::of(kind)?, name, json),
         ("pin", [w]) if pin::is_target(w) => pin::run(None, Some(w), (has("--major"), has("--force")), json),
         ("pin", [app, rest @ ..]) if rest.len() <= 1 => {
