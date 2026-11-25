@@ -419,6 +419,14 @@ version may break things.
 
 ### Fixed
 
+- A dev build's Redux DevTools lost the calls made while its bridge
+  connected: a cell's instance began recording only once the page
+  answered (up to 250 ms after the first frame, plus an eval's round
+  trip), so a first click was folded into the start state and its
+  action dropped (`init {n: 1}`, then only the second click). The cells
+  live as it mounts get their instance at once, its history starts from
+  the state it mounts with, and the commits made while the page
+  connects are kept and told in order.
 - Two rows of a `for` with one key no longer panic the window dead (in
   every build, with no place of the app's): the window draws every row,
   the second keyed by its repeat, and says once, through the log and

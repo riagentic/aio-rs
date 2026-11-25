@@ -247,7 +247,9 @@ fn script(name: &str) -> String {
 /// its cells go live.
 #[component]
 pub fn ReduxDevTools() -> View {
-    let cells = signal(|| 0usize);
+    // The cells live already (the app is drawn first) get theirs at once:
+    // from their first state, before a call can come.
+    let cells = signal(|| SAID.get_untracked().0.borrow().0.len());
     spawn(async move {
         loop {
             let n = SAID.get_untracked().0.borrow().0.len();
@@ -264,41 +266,60 @@ pub fn ReduxDevTools() -> View {
     }
 }
 
-/// The `at`th bridged cell's instance.
+/// The views' calls of `cell` not yet told, taken.
+fn calls_of(cell: &str) -> Vec<(String, Value)> {
+    let said = SAID.get_untracked();
+    let mut s = said.0.borrow_mut();
+    let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut s.1).into_iter().partition(|c| c.0 == cell);
+    s.1 = rest;
+    mine.into_iter().map(|(_, m, a)| (m, a)).collect()
+}
+
+/// Where an instance's messages go: kept in order until the page says
+/// whether it has the extension (a call may commit meanwhile), then sent,
+/// or dropped where it has none.
+enum Out {
+    Waiting(Vec<Value>),
+    Page,
+    None,
+}
+
+/// The `at`th bridged cell's instance: its history starts from the state
+/// it mounts with (calls made before are in it), and every commit after
+/// is an action, those made while the page connects too.
 #[component]
 fn Instance(at: usize) -> View {
     let b = SAID.get_untracked().0.borrow().0[at];
     let page = eval(&script(b.cell));
     let link = Rc::new(RefCell::new(Link::default()));
-    let on = signal(|| false);
+    let start = link.borrow_mut().init((b.state)(), (b.steps)());
+    _ = calls_of(b.cell);
+    let out = Rc::new(RefCell::new(Out::Waiting(vec![start])));
     {
-        let (page, link) = (page.clone(), link.clone());
+        let (page, link, out) = (page.clone(), link.clone(), out.clone());
         effect(move || {
             let state = (b.state)();
-            if !on.get() {
-                return;
-            }
             untrack(|| {
-                let said = SAID.get_untracked();
-                let mut s = said.0.borrow_mut();
-                let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut s.1).into_iter().partition(|c| c.0 == b.cell);
-                s.1 = rest;
-                drop(s);
-                let calls = mine.into_iter().map(|(_, m, a)| (m, a)).collect();
-                if let Some(m) = link.borrow_mut().commit(state, calls, (b.steps)()) {
-                    _ = page.send(m);
+                let calls = calls_of(b.cell);
+                let Some(m) = link.borrow_mut().commit(state, calls, (b.steps)()) else { return };
+                match &mut *out.borrow_mut() {
+                    Out::Waiting(kept) => kept.push(m),
+                    Out::Page => _ = page.send(m),
+                    Out::None => {}
                 }
             });
         });
     }
     spawn(async move {
         let mut page = page;
-        if !matches!(page.recv::<bool>().await, Ok(true)) {
+        let has = matches!(page.recv::<bool>().await, Ok(true));
+        let kept = std::mem::replace(&mut *out.borrow_mut(), if has { Out::Page } else { Out::None });
+        if !has {
             return;
         }
-        let first = link.borrow_mut().init((b.state)(), (b.steps)());
-        _ = page.send(first);
-        on.set(true);
+        if let Out::Waiting(kept) = kept {
+            kept.into_iter().for_each(|m| _ = page.send(m));
+        }
         while let Ok(m) = page.recv::<Value>().await {
             let done = match link.borrow_mut().asked(&m) {
                 Do::Nothing => Ok(false),

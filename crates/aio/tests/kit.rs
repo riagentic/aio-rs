@@ -2332,6 +2332,28 @@ mod redux {
         assert_eq!(s[5], json!(["init", { "n": 20 }]));
     }
 
+    /// A call made while the bridge connects (a dev page's first click,
+    /// before its eval answered): its action is told after the state the
+    /// bridge started from, never folded into it.
+    #[test]
+    fn a_call_while_the_bridge_connects_is_an_action_of_its_own() {
+        let mut ui = TestUi::new(app);
+        ui.eval(EXTENSION);
+        // The ordering forced: a click the page sends while the bridge's
+        // script connects, so the view hears it before the bridge is told
+        // the extension is there.
+        ui.eval(
+            "const connect = window.__REDUX_DEVTOOLS_EXTENSION__.connect; \
+                 window.__REDUX_DEVTOOLS_EXTENSION__.connect = (o) => \
+                 (document.querySelector('[data-t=add]').click(), connect(o)); true",
+        );
+        ui.click("bridge");
+        ui.click("add");
+        let s = until_sent(&mut ui, 3);
+        let add = |n: i64| json!([{ "type": "add", "args": [2] }, { "n": n }]);
+        assert_eq!(s, [json!(["init", { "n": 0 }]), add(2), add(4)]);
+    }
+
     /// No extension in the page (a desktop window's): nothing is sent, nothing breaks.
     #[test]
     fn without_the_extension_the_bridge_stays_quiet() {
