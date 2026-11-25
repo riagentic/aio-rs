@@ -113,8 +113,9 @@ fn count_tests(ts: &TokenStream) -> usize {
 }
 
 /// One `.rs` file. A test file (under `tests/`) is no app code: only what
-/// it tests is noted.
-pub fn file(rel: &str, text: &str, test_file: bool, f: &mut Facts) {
+/// it tests is noted. `ui`: its crate may hold views (it depends on aio-rs
+/// or air), so the view checks run too: hooks, signal guards, `rsx!` markup.
+pub fn file(rel: &str, text: &str, test_file: bool, ui: bool, f: &mut Facts) {
     let mut ast = match syn::parse_file(text) {
         Ok(a) => a,
         Err(e) => {
@@ -137,7 +138,7 @@ pub fn file(rel: &str, text: &str, test_file: bool, f: &mut Facts) {
     split_tests(&mut ast.items, f);
     secrets::tokens(rel, ast.to_token_stream(), &mut f.issues);
     blocking(rel, text, &ast, &mut f.issues);
-    Checks { file: rel, f, repeats: 0 }.visit_file(&ast);
+    Checks { file: rel, f, repeats: 0, ui, tabs: BTreeSet::new() }.visit_file(&ast);
 }
 
 /// Blocking std I/O in async code (aio's sync-I/O perf hint): the runtime
@@ -396,6 +397,11 @@ struct Checks<'a> {
     f: &'a mut Facts,
     /// Closures and loops around here: an `rsx!` in one may make a list's items.
     repeats: usize,
+    /// The crate may hold views: the view checks run.
+    ui: bool,
+    /// The literal ids of the kit `Tab`s the function around here makes:
+    /// each is a handle of its view, as a `data-t` is.
+    tabs: BTreeSet<String>,
 }
 
 impl Checks<'_> {
@@ -409,7 +415,7 @@ impl Checks<'_> {
     fn hooks(&mut self, sig: &Signature, body: &Block) {
         let element = matches!(&sig.output, ReturnType::Type(_, t)
             if matches!(&**t, syn::Type::Path(p) if last_is(&p.path, "View") || last_is(&p.path, "Element")));
-        if !element && !sig.ident.to_string().starts_with("use_") {
+        if !self.ui || !element && !sig.ident.to_string().starts_with("use_") {
             return;
         }
         let mut h = Hooks::default();
@@ -436,10 +442,13 @@ impl Checks<'_> {
 }
 
 impl Checks<'_> {
-    /// A guard (`X.read()`, `.peek()`, `.write()`) taken in an `if let`,
-    /// `while let` or `match` scrutinee lives until its block ends: a write
-    /// in there, by a call or a method, panics as already borrowed.
+    /// A guard (`X.read()`, `.read_untracked()`, `.write()`) taken in an
+    /// `if let`, `while let` or `match` scrutinee lives until its block
+    /// ends: a write in there, by a call or a method, panics as already borrowed.
     fn held(&mut self, scrutinee: &Expr, kind: &str, body: impl FnOnce(&mut Writes)) {
+        if !self.ui {
+            return;
+        }
         let mut g = Guards::default();
         g.visit_expr(scrutinee);
         let Some((guard, line)) = g.0 else { return };
@@ -449,9 +458,9 @@ impl Checks<'_> {
         self.push(
             Severity::Warn,
             "render",
-            format!("`{guard}` in this `{kind}` stays borrowed until its block ends, and the block writes (`{write}`): a write to the same signal panics as already borrowed"),
+            format!("`{guard}` in this `{kind}` stays borrowed until its block ends, and the block writes (`{write}`): a write to the same signal panics as already borrowed (taken for a signal's guard: an argument-less `.{}()` on a value other than `self`, in a crate that depends on aio-rs)", guard.rsplit('.').next().unwrap_or_default().trim_end_matches("()")),
             line,
-            "take the value first: `let v = X.get_untracked();` then `if let Some(id) = v { .. }` (or read with X.get())",
+            "take the value first: `let v = X.get_untracked();` then `if let Some(id) = v { .. }` (or read with X.get()); not a signal (a lock, a reader of your own): // aio-ok(render): <what it is>",
         );
     }
 }
@@ -466,8 +475,10 @@ impl<'ast> Visit<'ast> for Lets<'ast> {
     }
 }
 
-/// The first guard an expression takes and keeps: `.read()`, `.peek()`,
-/// `.write()` with no argument, outside a closure.
+/// The first guard an expression takes and keeps: a signal's `.read()`,
+/// `.read_untracked()`, `.write()` with no argument, outside a closure.
+/// `self.read()` is the type's own method (a signal is a field or a
+/// variable), so it is none.
 #[derive(Default)]
 struct Guards(Option<(String, usize)>);
 
@@ -475,7 +486,8 @@ impl<'ast> Visit<'ast> for Guards {
     fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
     fn visit_expr_method_call(&mut self, e: &'ast syn::ExprMethodCall) {
         let m = e.method.to_string();
-        if self.0.is_none() && e.args.is_empty() && ["read", "read_untracked", "peek", "write"].contains(&m.as_str()) {
+        let own = matches!(&*e.receiver, Expr::Path(p) if p.path.is_ident("self"));
+        if self.0.is_none() && e.args.is_empty() && !own && ["read", "read_untracked", "write"].contains(&m.as_str()) {
             let on = e.receiver.to_token_stream().to_string().replace(' ', "");
             self.0 = Some((format!("{on}.{m}()"), e.method.span().start().line));
         }
@@ -574,13 +586,16 @@ impl<'ast> Visit<'ast> for Checks<'_> {
 
     fn visit_item_fn(&mut self, i: &'ast syn::ItemFn) {
         self.hooks(&i.sig, &i.block);
+        let outer = std::mem::replace(&mut self.tabs, tab_ids(i.block.to_token_stream()));
         visit::visit_item_fn(self, i);
+        self.tabs = outer;
     }
 
     fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
         // A hook's first value is made once: page CSS kept in one never sees
         // an edit, and live reload looks broken (`ax dev`).
         if let Expr::Path(p) = &*e.func
+            && self.ui
             && (last_is(&p.path, "once") || last_is(&p.path, "use_hook"))
             && e.args.to_token_stream().to_string().contains("page_css")
         {
@@ -611,7 +626,9 @@ impl<'ast> Visit<'ast> for Checks<'_> {
 
     fn visit_impl_item_fn(&mut self, i: &'ast syn::ImplItemFn) {
         self.hooks(&i.sig, &i.block);
+        let outer = std::mem::replace(&mut self.tabs, tab_ids(i.block.to_token_stream()));
         visit::visit_impl_item_fn(self, i);
+        self.tabs = outer;
     }
 
     fn visit_expr_if(&mut self, e: &'ast syn::ExprIf) {
@@ -656,6 +673,9 @@ impl<'ast> Visit<'ast> for Checks<'_> {
     }
 
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        if !self.ui {
+            return;
+        }
         if last_is(&m.path, "rsx") {
             // One made once (a component's own) is in no list.
             let roots = if self.repeats == 0 { Nodes::Branch } else { Nodes::Macro };
@@ -916,6 +936,7 @@ impl Checks<'_> {
         a11y(&body, Within::default(), &mut found);
         keys(&body, roots, &mut found);
         found.extend(twins(&body));
+        found.extend(tab_twins(&body, &self.tabs));
         found.sort_by_key(|f| f.0);
         for (line, sev, area, msg, fix) in found {
             self.push(sev, area, msg, line, fix);
@@ -1070,7 +1091,7 @@ fn unkeyed(roots: &[Node]) -> Found {
                 Severity::Error,
                 "render",
                 msg.into(),
-                "{items.iter().map(|it| { …; rsx! { div { key: \"{it.id}\", … } } })}",
+                "work out a row's values in its own component, keyed: for it in items { Row { key: \"{it.id}\", it } } (a {items.map(..)} hole keys nothing either: it makes every row again)",
             )];
         }
         _ => None,
@@ -1210,6 +1231,41 @@ fn twins(roots: &[Node]) -> Found {
         (line, Severity::Warn, "render", msg, "a handle of its own for each (\"fleet-nav\", \"fleet-table\")")
     };
     handles(roots).into_iter().filter(|(_, (n, _))| *n > 1).map(say).collect()
+}
+
+/// The literal ids of the kit tabs `ts` makes (`Tab::new("gpu", …)`, any
+/// path ending in it), in or out of `rsx!` (pure).
+fn tab_ids(ts: TokenStream) -> BTreeSet<String> {
+    let tt: Vec<TokenTree> = ts.into_iter().collect();
+    let mut out = BTreeSet::new();
+    for (i, t) in tt.iter().enumerate() {
+        let TokenTree::Group(g) = t else { continue };
+        let call = i >= 4
+            && matches!(&tt[i - 4], TokenTree::Ident(id) if id == "Tab")
+            && matches!((&tt[i - 3], &tt[i - 2]), (TokenTree::Punct(a), TokenTree::Punct(b)) if a.as_char() == ':' && b.as_char() == ':')
+            && matches!(&tt[i - 1], TokenTree::Ident(id) if id == "new");
+        if call
+            && let Some(TokenTree::Literal(l)) = g.stream().into_iter().next()
+            && let Ok(id) = syn::parse2::<syn::LitStr>(TokenTree::Literal(l).into())
+        {
+            out.insert(id.value());
+        }
+        out.extend(tab_ids(g.stream()));
+    }
+    out
+}
+
+/// A literal `data-t` equal to the id of a kit `Tab` the same view makes:
+/// the tab's button carries its id as its handle, so the two collide in
+/// `ax trigger` and tests, though `data-t` is written once.
+fn tab_twins(roots: &[Node], tabs: &BTreeSet<String>) -> Found {
+    let say = |(t, (_, line)): (String, (usize, usize))| {
+        let msg = format!(
+            "data-t {t:?} is also the id of a kit Tab in this view (Tab::new({t:?}, …)), and a tab's id is its handle: a test or `ax trigger` naming it can't tell them apart"
+        );
+        (line, Severity::Warn, "render", msg, "rename one: the tab (Tab::new(\"gpu-tab\", …)) or the element's data-t")
+    };
+    handles(roots).into_iter().filter(|(t, _)| tabs.contains(t)).map(say).collect()
 }
 
 /// Where an element sits: in a `label`, in a `form`.
