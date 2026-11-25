@@ -94,6 +94,8 @@ pages! {
     Secrets = "auth/secrets.md",
     #[cfg(feature = "secrets")]
     Keychain = "auth/keychain.md",
+    #[cfg(feature = "usb")]
+    Usb = "devices/usb.md",
     #[cfg(feature = "kit")]
     Performance = "performance.md",
     #[cfg(feature = "kit")]

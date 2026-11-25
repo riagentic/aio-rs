@@ -1,8 +1,18 @@
 package aio.rt;
 
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.hardware.biometrics.BiometricManager;
 import android.hardware.biometrics.BiometricPrompt;
+import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbDeviceConnection;
+import android.hardware.usb.UsbInterface;
+import android.hardware.usb.UsbManager;
 import android.os.CancellationSignal;
+import android.os.ParcelFileDescriptor;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyPermanentlyInvalidatedException;
 import android.security.keystore.KeyProperties;
@@ -14,6 +24,8 @@ import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /** The app's Rust library: its view runs there, frames cross as base64 text. */
 public final class Host {
@@ -44,6 +56,9 @@ public final class Host {
     /** The system picker answered question {@code id}: each document's name and
      *  detached descriptor (null: cancelled), or {@code error}. */
     public static native void answer(long id, String[] names, int[] fds, String error);
+
+    /** A USB device came or went: aio::hw's watches look again. */
+    public static native void usbChanged();
 
     /** Back's default (the page's history, then leave), set by the activity. */
     static volatile Runnable backDefault;
@@ -198,6 +213,105 @@ public final class Host {
             return done.get();
         } catch (ExecutionException e) {
             throw e.getCause() instanceof Exception x ? x : e;
+        }
+    }
+
+    /** The app's context for aio::hw, kept from its first call on: devices
+     *  plugged in and out are heard from then (usbChanged). */
+    private static Context usb;
+
+    private static synchronized Context usb() {
+        if (usb != null) return usb;
+        MainActivity a = activity;
+        if (a == null) throw new IllegalStateException("no activity yet to reach USB through");
+        Context c = a.getApplicationContext();
+        IntentFilter f = new IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+        f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+        // The system's own broadcasts (protected: no app can send them).
+        c.registerReceiver(new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context ctx, Intent i) {
+                usbChanged();
+            }
+        }, f, Context.RECEIVER_EXPORTED);
+        usb = c;
+        return c;
+    }
+
+    /** The USB devices plugged in (called by the library, from any thread), as
+     *  JSON: id, vendor, product, class, strings (the serial only once the
+     *  app may use the device), each interface's number, class, subclass, protocol. */
+    static String usbList() throws Exception {
+        UsbManager m = usb().getSystemService(UsbManager.class);
+        JSONArray all = new JSONArray();
+        for (UsbDevice d : m.getDeviceList().values()) {
+            String serial;
+            try {
+                serial = d.getSerialNumber();
+            } catch (SecurityException e) {
+                serial = null;
+            }
+            JSONArray faces = new JSONArray();
+            for (int i = 0; i < d.getInterfaceCount(); i++) {
+                UsbInterface f = d.getInterface(i);
+                if (f.getAlternateSetting() != 0) continue;
+                faces.put(new JSONArray().put(f.getId()).put(f.getInterfaceClass())
+                        .put(f.getInterfaceSubclass()).put(f.getInterfaceProtocol()));
+            }
+            all.put(new JSONObject().put("id", d.getDeviceId()).put("vendor", d.getVendorId())
+                    .put("product", d.getProductId()).put("class", d.getDeviceClass())
+                    .put("manufacturer", orNull(d.getManufacturerName())).put("name", orNull(d.getProductName()))
+                    .put("serial", orNull(serial)).put("interfaces", faces));
+        }
+        return all.toString();
+    }
+
+    private static Object orNull(String s) {
+        return s == null ? JSONObject.NULL : s;
+    }
+
+    /** USB device {@code id} opened (called by the library on a worker thread:
+     *  it blocks while the system asks the user, the first time): its
+     *  usbfs descriptor, detached for the library. */
+    static int usbOpen(int id) throws Exception {
+        Context c = usb();
+        UsbManager m = c.getSystemService(UsbManager.class);
+        UsbDevice d = null;
+        for (UsbDevice x : m.getDeviceList().values()) if (x.getDeviceId() == id) d = x;
+        if (d == null) throw new java.io.FileNotFoundException("the USB device was unplugged");
+        if (!m.hasPermission(d)) askUsb(c, m, d);
+        UsbDeviceConnection conn = m.openDevice(d);
+        if (conn == null) throw new java.io.IOException("Android did not open the USB device " + d.getDeviceName());
+        try {
+            return ParcelFileDescriptor.fromFd(conn.getFileDescriptor()).detachFd();
+        } finally {
+            conn.close();
+        }
+    }
+
+    /** The system asks the user whether the app may use {@code d}: their answer, waited for. */
+    private static void askUsb(Context c, UsbManager m, UsbDevice d) throws Exception {
+        // One action per device: two questions at once get their own answers.
+        String action = c.getPackageName() + ".AIO_USB." + d.getDeviceId();
+        CompletableFuture<Boolean> answered = new CompletableFuture<>();
+        BroadcastReceiver r = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context ctx, Intent i) {
+                answered.complete(i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false));
+            }
+        };
+        c.registerReceiver(r, new IntentFilter(action), Context.RECEIVER_NOT_EXPORTED);
+        try {
+            // Mutable: the system adds the answer; explicit: only this app gets it.
+            Intent i = new Intent(action).setPackage(c.getPackageName());
+            m.requestPermission(d, PendingIntent.getBroadcast(c, d.getDeviceId(), i,
+                    PendingIntent.FLAG_MUTABLE | PendingIntent.FLAG_UPDATE_CURRENT));
+            if (!answered.get()) {
+                String name = d.getProductName() != null ? d.getProductName() : d.getDeviceName();
+                throw new SecurityException("the user did not let the app use the USB device " + name);
+            }
+        } finally {
+            c.unregisterReceiver(r);
         }
     }
 }

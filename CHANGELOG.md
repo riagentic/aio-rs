@@ -86,6 +86,32 @@ version may break things.
   list doesn't reach fails the build with the line to add
   ([privacy](docs/clients/desktop.md#privacy)).
 
+- `aio::hw` (feature `usb`): USB devices from the app's own code (a
+  hardware key, a lab instrument, a board): `list()`, `watch()` (the
+  devices there, then each plugged in or out), `open(&Filter)` (vendor,
+  product, serial), `Device::claim(n)`, and on the `Interface` bulk and
+  interrupt `read` and `write`, `control_in` and `control_out`, each with
+  its timeout. Async on aio's own runtime (any executor awaits it) and
+  cancel-safe: a dropped or timed-out read leaves its transfer queued for
+  the next read (no byte lost), a dropped write is cancelled. Errors by
+  their kind (`NotConnected` unplugged, `BrokenPipe` a stall, `TimedOut`,
+  `ResourceBusy`, …). Desktop through nusb (pure Rust over usbfs, WinUSB,
+  IOKit: no libusb); Android through the USB host API (the user asked once
+  per device, the shell's `Host.usbList`, `usbOpen`, `usbChanged`); the
+  web: the same API, `Unsupported`. On Linux a refused open names the
+  udev rule that allows it ([USB devices](docs/devices/usb.md)).
+- `[capabilities] usb`: the devices `aio::hw` may see (`"2c97"` a vendor,
+  `"1209:5342"` a product, `"*"` any); every other one is invisible, and
+  opening it by its ids says the entry to add. `ax build --android`
+  declares USB host (optional) and offers the APK for those devices
+  (`res/xml/aio_usb.xml`); `ax build --deb` installs their udev rule
+  (`/usr/lib/udev/rules.d/70-<app>.rules`).
+- `aio::testing::usb`: fake USB devices for tests: declare descriptors
+  (`Device::new(vendor, product).strings(..).interface(..)`), script
+  answers (`.respond(|transfer, io| reply)`, `io.send(ep, bytes)`), plug
+  and unplug at will (`plug`, `Plugged::unplug`, `send`, `transfers`).
+  The app's code under test uses `aio::hw` unchanged; in the test world
+  `aio::hw` never reaches the machine's devices.
 - `aio::client!` also makes `prelude`, a module with its items (`part`,
   `Ui` that `act!` calls through, the cell's reader, `use_live`…) and the
   view API: another module of the crate (a page) needs one line,
@@ -323,6 +349,8 @@ version may break things.
 
 ### Changed
 
+- ax reads and writes objects with object 0.39 (from 0.37): one hashbrown
+  in the workspace, a crate fewer in ax's graph.
 - **Breaking:** a module named `prelude` beside an `aio::client!(..)`
   call collides with the one it makes now: rename yours, or move the
   `client!` into a module of its own

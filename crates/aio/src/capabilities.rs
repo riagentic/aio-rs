@@ -29,6 +29,21 @@ pub fn network() -> Option<Vec<String>> {
     NETWORK.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+static USB: RwLock<Option<Vec<String>>> = RwLock::new(None);
+
+/// Hold this process's USB devices (`aio::hw`) to `usb` (`[capabilities]
+/// usb`) from now on: any other is invisible to it.
+pub fn set_usb(usb: &[String]) {
+    *USB.write().unwrap_or_else(|e| e.into_inner()) = Some(usb.to_vec());
+}
+
+/// May this process see USB device `vendor:product` ([`set_usb`]; not
+/// held: any)?
+#[cfg(feature = "usb")]
+pub(crate) fn usb_allows(vendor: u16, product: u16) -> bool {
+    USB.read().unwrap_or_else(|e| e.into_inner()).as_deref().is_none_or(|u| aio_config::capabilities::allows_usb(u, vendor, product))
+}
+
 /// A UI test's hold (`TestUi`): this machine and `hosts`, besides the hosts
 /// the test binary's other mounts (or an app it booted) allowed.
 #[cfg(all(feature = "kit", feature = "testing"))]
@@ -123,6 +138,31 @@ mod tests {
         assert_eq!(host_port("[::1]:80"), ("::1".into(), Some(80)));
         assert_eq!(host_port("fe80::1"), ("fe80::1".into(), None));
         assert_eq!(host_port("example.org."), ("example.org".into(), None));
+    }
+
+    #[test]
+    fn a_usb_entry_is_a_vendor_a_product_or_any_and_its_udev_rule_says_so() {
+        use aio_config::capabilities::{allows_usb, udev_rule, udev_rules, usb_entry};
+        assert_eq!(usb_entry("2c97"), Ok((Some(0x2c97), None)));
+        assert_eq!(usb_entry("1209:5342"), Ok((Some(0x1209), Some(0x5342))));
+        assert_eq!(usb_entry("ABCD:00ff"), Ok((Some(0xabcd), Some(0xff))), "hex either case");
+        assert_eq!(usb_entry("*"), Ok((None, None)));
+        for bad in ["", "2c9", "2c977", "0x2c97", "2c97:", ":0001", "2c97:*", "zzzz", "2c97:0001:1", "+c97"] {
+            assert!(usb_entry(bad).unwrap_err().contains("is not a device"), "{bad:?}");
+        }
+        let usb = n(&["2c97", "1209:5342"]);
+        assert!(allows_usb(&usb, 0x2c97, 7) && allows_usb(&usb, 0x1209, 0x5342));
+        assert!(!allows_usb(&usb, 0x1209, 0x5343) && !allows_usb(&n(&[]), 0x2c97, 1), "nothing else, none by default");
+        assert!(allows_usb(&n(&["*"]), 0x0001, 0x0001) && !allows_usb(&n(&["junk"]), 1, 1));
+        assert_eq!(udev_rule(0x2c97, None), r#"SUBSYSTEM=="usb", ATTRS{idVendor}=="2c97", TAG+="uaccess""#);
+        assert_eq!(
+            udev_rule(0x1209, Some(0x5342)),
+            r#"SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="5342", TAG+="uaccess""#
+        );
+        let file = udev_rules("wallet", &n(&["*", "2c97", "1209:5342"])).unwrap();
+        assert!(file.starts_with("# wallet: ") && file.ends_with("TAG+=\"uaccess\"\n"), "{file}");
+        assert_eq!(file.lines().count(), 3, "a comment, then one rule per vendor or product: {file}");
+        assert_eq!(udev_rules("wallet", &n(&["*"])), None, "any device: no rule (too wide)");
     }
 
     #[test]

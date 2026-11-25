@@ -154,6 +154,58 @@ pub mod capabilities {
                 }
             })
     }
+
+    /// A `[capabilities] usb` entry as the vendor and product it names
+    /// (`"*"`: any, `(None, None)`), or why it is none. Pure.
+    pub fn usb_entry(entry: &str) -> Result<(Option<u16>, Option<u16>), String> {
+        let hex = |h: &str| h.len() == 4 && h.bytes().all(|b| b.is_ascii_hexdigit());
+        let id = |h: &str| hex(h).then(|| u16::from_str_radix(h, 16).ok()).flatten();
+        let named = match entry.split_once(':') {
+            _ if entry == "*" => Some((None, None)),
+            Some((v, p)) => id(v).zip(id(p)).map(|(v, p)| (Some(v), Some(p))),
+            None => id(entry).map(|v| (Some(v), None)),
+        };
+        named.ok_or_else(|| {
+            format!(
+                "[capabilities] usb {entry:?} is not a device: a vendor id (\"2c97\", 4 hex digits as lsusb \
+                 shows it), a vendor and product (\"2c97:0001\") or \"*\""
+            )
+        })
+    }
+
+    /// Whether `usb` lets an app see the device `vendor:product`. Pure.
+    pub fn allows_usb(usb: &[String], vendor: u16, product: u16) -> bool {
+        usb.iter().any(|e| match usb_entry(e) {
+            Ok((v, p)) => v.is_none_or(|v| v == vendor) && p.is_none_or(|p| p == product),
+            Err(_) => false,
+        })
+    }
+
+    /// The udev rule that lets the person at this Linux machine open the
+    /// device `vendor` (`product`: that one only), as `/etc/udev/rules.d/`
+    /// or a package's `/usr/lib/udev/rules.d/` holds it. Pure.
+    pub fn udev_rule(vendor: u16, product: Option<u16>) -> String {
+        let product = product.map(|p| format!(", ATTRS{{idProduct}}==\"{p:04x}\"")).unwrap_or_default();
+        format!("SUBSYSTEM==\"usb\", ATTRS{{idVendor}}==\"{vendor:04x}\"{product}, TAG+=\"uaccess\"")
+    }
+
+    /// App `id`'s udev rules file for its `usb` entries, `None` when it
+    /// names no vendor (`"*"` grants no device a rule: too wide). Pure.
+    pub fn udev_rules(id: &str, usb: &[String]) -> Option<String> {
+        let rules: Vec<String> = usb
+            .iter()
+            .filter_map(|e| match usb_entry(e) {
+                Ok((Some(v), p)) => Some(udev_rule(v, p)),
+                _ => None,
+            })
+            .collect();
+        (!rules.is_empty()).then(|| {
+            format!(
+                "# {id}: the USB devices of its [capabilities] usb, open to the person at this machine.\n{}\n",
+                rules.join("\n")
+            )
+        })
+    }
 }
 
 /// `aio::update`'s pure half: release sources, keys and channel names.

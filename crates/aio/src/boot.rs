@@ -223,6 +223,7 @@ pub fn begin(cfg: &Config, version: &str, dirs: &crate::paths::AppDirs) -> std::
     crate::cron::set_local(cfg.app.tz == crate::config::Tz::Local);
     crate::vitals::set(cfg.vitals);
     crate::capabilities::set(&cfg.capabilities.network);
+    crate::capabilities::set_usb(&cfg.capabilities.usb);
     crate::budgets::declare(cfg.budgets);
     crate::ui::set_look(cfg.ui.theme);
     crate::ui::set_scheme(cfg.ui.scheme);
