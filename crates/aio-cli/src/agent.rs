@@ -130,10 +130,11 @@ changed) · cargo check → ax dev <app> → tests",
 - A big app keeps its views by area in page crates (ax add <app> page <n>):
   ax dev recompiles the edited crate alone (~0.5 s; one crate of 70 000
   lines: ~5 s). ax lint hints past 15 000 lines in one crate. The first
-  page moves the cells (client!, prelude, what they use) to the core crate
-  (core/, <app>-core; asked first, --yes: not); the library re-exports it
-  (pub use <app>_core::*;, every path as before), a page reads a cell with
-  use <app>_core::prelude::*;, ax add cell writes into core/ then.
+  page moves the cells (client!, prelude, what they use) and the server
+  functions' modules to the core crate (core/, <app>-core; asked first,
+  --yes: not); the library re-exports it (pub use <app>_core::*;, every
+  path as before), a page reads a cell with use <app>_core::prelude::*;,
+  ax add cell and ax add server write into core/ then.
 - main: let cfg = aio::config!();  (the nearest aio.toml, parsed and checked
   as the app builds: a mistake is a compile error; no build.rs)
   let aio_shell::Start::Run(dirs) = aio_shell::start(&cfg, aio::app_version!())?

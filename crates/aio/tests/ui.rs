@@ -173,6 +173,26 @@ fn a_dev_build_says_where_a_render_reads_the_whole_state_once() {
     ui.settle();
 }
 
+/// A dev build's Redux DevTools reads the cell as it mounts: no hint
+/// for that (it named the app's `client!` line, in every new app).
+#[cfg(feature = "dev")]
+#[test]
+fn a_dev_build_says_nothing_of_its_own_tools_reads() {
+    fn app() -> View {
+        use_live();
+        let left = part(|p| &p.left);
+        rsx! { aio::kit::ReduxDevTools {} span { "data-t": "left", "{left}" } }
+    }
+    let (ui, lines) = aio::log::capture(|| {
+        let mut ui = TestUi::new(app);
+        ui.run(|| act!(bump_left()));
+        ui.settle();
+        ui
+    });
+    assert!(!lines.iter().any(|l| l.contains("reads all of")), "{lines:?}");
+    assert_eq!(ui.text("left"), "1");
+}
+
 fn shows() -> View {
     let on = signal(|| false);
     rsx! {

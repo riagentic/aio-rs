@@ -102,9 +102,11 @@ fn is_test(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| a.path().is_ident("cfg") && quote::ToTokens::to_token_stream(a).to_string().contains("test"))
 }
 
-/// Does `i` make a cell or its client (a module: in it, its tests aside)?
+/// Does `i` make a cell, its client or a server function's declaration
+/// (a module: in it, its tests aside)?
 fn is_cell(i: &syn::Item) -> bool {
     match i {
+        syn::Item::Const(c) => matches!(&*c.ty, syn::Type::Path(p) if last_is(&p.path, "ServerFn")),
         syn::Item::Struct(s) => has_attr(&s.attrs, "cell"),
         syn::Item::Enum(e) => has_attr(&e.attrs, "cell"),
         syn::Item::Impl(i) => has_attr(&i.attrs, "methods"),
@@ -682,7 +684,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let (_, manifest) = made(d.path(), "app");
         crate::add::run(d.path(), crate::add::Kind::Cell, "tally", false).unwrap();
-        // Server functions stay: the cell in their tests is no cell of the app's.
+        // Server functions move too: a page's view may run them (a client's).
         crate::add::run(d.path(), crate::add::Kind::Server, "tools", false).unwrap();
         std::fs::create_dir_all(d.path().join("src/tally")).unwrap();
         std::fs::write(d.path().join("src/tally/rows.json"), "[]").unwrap();
@@ -695,14 +697,15 @@ mod tests {
         let p = plan(d.path(), "notes", &lib, &manifest).unwrap().unwrap();
         assert_eq!(p.moved[0], "pub mod tally;");
         assert!(p.moved.contains(&"pub(crate) fn twice(n: i64) -> i64".to_string()), "{:?}", p.moved);
-        assert_eq!(p.removes, ["src/tally.rs", "src/tally/rows.json"]);
+        assert_eq!(p.removes, ["src/tally.rs", "src/tally/rows.json", "src/tools.rs"]);
         assert!(p.writes.iter().any(|(f, b)| f == "core/src/tally/rows.json" && b == b"[]"));
         let core = file(&p, "core/src/lib.rs");
         assert!(core.contains("// Twice.\npub fn twice(n: i64) -> i64 {"), "{core}");
         assert!(!core.contains("UNUSED"));
         let app = file(&p, "src/lib.rs");
         assert!(app.contains("const UNUSED") && !app.contains("pub mod tally;") && !app.contains("fn twice"), "{app}");
-        assert!(app.contains("pub mod tools;") && !p.moved.iter().any(|m| m.contains("tools")), "{app}");
+        assert!(!app.contains("pub mod tools;") && p.moved.contains(&"pub mod tools;".to_string()), "{app}");
+        assert!(core.contains("#[cfg(not(target_arch = \"wasm32\"))]\npub mod tools;"), "native only still: {core}");
         // The new page reads the first client! there is (the root's).
         let read = |f: &str| {
             p.writes

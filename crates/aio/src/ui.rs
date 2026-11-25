@@ -1095,7 +1095,12 @@ macro_rules! client {
             if $crate::ui::DEV {
                 $crate::kit::redux::register($crate::kit::redux::Bridged {
                     cell: <$cell as $crate::CellData>::ID,
-                    state: || $crate::serde_json::to_value(&*$read()).unwrap_or_default(),
+                    // As `$read()` reads (an effect follows each commit),
+                    // but no hint: the tools' read, not the app's.
+                    state: || {
+                        let _ = (VERSION.get(), PARTS.read_untracked());
+                        $crate::serde_json::to_value(&*HANDLE.read_untracked().state()).unwrap_or_default()
+                    },
                     steps: || $crate::kit::redux::steps(&HANDLE.read_untracked()),
                     jump: |seq, state, newest| {
                         let r = $crate::kit::redux::jump(&HANDLE.read_untracked(), seq, state, newest);
