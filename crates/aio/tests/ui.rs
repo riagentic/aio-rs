@@ -468,7 +468,7 @@ fn siblings_with_one_key_are_refused() {
         TestUi::new(duplicated).click("DupButton");
     });
     assert!(why.contains("keyed siblings must each have a unique key"), "{why}");
-    assert!(why.contains(&format!("the `for` at {}:", file!())), "{why}");
+    assert!(why.contains(&format!("the `for` at {}:", file!().replace('\\', "/"))), "{why}");
 }
 
 /// A flake seen in an app: a commit made off the UI thread is readable before

@@ -283,7 +283,7 @@ fn gate_2_two_rows_with_one_key_fail_a_test_saying_where_and_draw_on() {
     let mut p = TestPage::mount(|| rsx! { Dups {} });
     let e = says(std::panic::AssertUnwindSafe(|| p.click("dup")));
     assert!(e.contains("has the key of a row before it"), "{e}");
-    assert!(e.contains(&format!("the `for` at {}:{DUPS_FOR}:", file!())), "{e}");
+    assert!(e.contains(&format!("the `for` at {}:{DUPS_FOR}:", file!().replace('\\', "/"))), "{e}");
     assert!(e.contains("in `Dups`"), "{e}");
     assert_eq!(p.text("list"), "112", "every row drawn");
     // Said once per list: the window goes on and follows its state.
