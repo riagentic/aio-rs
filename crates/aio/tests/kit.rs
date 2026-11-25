@@ -287,6 +287,44 @@ fn a_tab_that_is_gone_falls_back_to_the_first_enabled_one() {
     );
 }
 
+/// How far `t`'s label starts from its box's left edge, in px.
+fn label_start(ui: &mut TestUi, t: &str) -> f64 {
+    let js = format!(
+        "(() => {{ const b = document.querySelector('[data-t={t}]'), r = document.createRange(); \
+         r.selectNodeContents(b); return r.getBoundingClientRect().left - b.getBoundingClientRect().left }})()"
+    );
+    ui.eval(&js).as_f64().unwrap()
+}
+
+fn plain() -> View {
+    styled(rsx! {
+        aside { style: "width: 240px",
+            button { "data-t": "row", class: "aio-plain", style: "display: flex; width: 100%", "Row" }
+            button { "data-t": "look", style: "width: 100%", "Look" }
+        }
+        Menu { "data-t": "acts", label: "Actions", trigger: rsx! { "⋯" }, items: vec![MenuItem::new("edit", "Edit")] }
+    })
+}
+
+#[test]
+fn a_plain_button_and_the_kits_quiet_ones_keep_the_looks_button_out() {
+    let mut ui = TestUi::new(plain);
+    assert!(label_start(&mut ui, "look") > 40.0, "the look centres a bare button");
+    assert!(label_start(&mut ui, "row") < 1.0, "a plain one starts at the start");
+    for (p, v) in [
+        ("box-shadow", "none"),
+        ("padding-top", "0px"),
+        ("border-top-width", "0px"),
+        ("min-height", "0px"),
+        ("background-color", "rgba(0, 0, 0, 0)"),
+    ] {
+        assert_eq!(ui.style("row", p), v, "{p}");
+    }
+    ui.click("menuTrigger");
+    assert!(label_start(&mut ui, "edit") < 20.0, "a menu item's label starts at the start");
+    assert_eq!(ui.style("edit", "box-shadow"), "none");
+}
+
 // Unstyled: the menu as markup, its placement not under test.
 fn menu() -> View {
     rsx! {

@@ -75,6 +75,10 @@ version may break things.
 
 ### Added
 
+- `.aio-plain`: a button with no look (a sidebar entry, a list row), in
+  the kit's sheet: with `theme = "full"` the look's button (centred,
+  padded, shadowed, 44 px on a phone) no longer has to be undone property
+  by property ([theming](docs/ui/theming.md#what-the-look-styles)).
 - `aio::capabilities::network()`: this process's `[capabilities] network`
   list, `None` when it is not held.
 - `aio::http::content_name(name, bytes)`: a file's name by its content
@@ -334,6 +338,9 @@ version may break things.
 
 ### Fixed
 
+- With `theme = "full"` the look's button reached the kit's quiet ones:
+  a `Menu`'s items were centred and shadowed, tabs had a shadow, rounded
+  corners and a press nudge. They start from `.aio-plain` now.
 - A `TestUi` step waits for the files its event reads: a form's submit
   read its files as the event went out, and a click that submitted it
   could end before they were read (the submit unheard on a loaded
