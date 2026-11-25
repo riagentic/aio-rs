@@ -1407,7 +1407,7 @@ fn checkpoints() -> &'static std::sync::Mutex<Vec<Checkpoint>> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn on_shutdown<T: Cell>(h: Handle<T>) {
+pub(crate) fn on_shutdown(h: crate::handle::Raw) {
     let c = h.clone();
     checkpoints().lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(move || c.checkpoint()));
     closers().lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(move |budget| {
