@@ -71,10 +71,46 @@ pub fn stack(blocks: &[&str]) -> String {
     blocks.iter().filter(|b| !b.is_empty()).copied().collect::<Vec<_>>().join("\n\n")
 }
 
+/// A number in at most three significant digits, short, for an axis or a
+/// value at a glance: `0.25`, `42`, `1.5k`, `2.4M`, `3G`, `1e-5`.
+pub fn short(v: f64) -> String {
+    // Rounded first, so 999.6 is `1k`, not `1000`.
+    let e = format!("{v:.2e}");
+    let r: f64 = e.parse().unwrap_or(v);
+    let trim = |s: String| if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
+    if !r.is_finite() || r == 0.0 {
+        return if r == 0.0 { "0".into() } else { r.to_string() };
+    }
+    if r.abs() < 1e-3 {
+        let (m, x) = e.split_once('e').unwrap_or((&e, "0"));
+        return format!("{}e{x}", trim(m.to_string()));
+    }
+    let i = ((r.abs().log10() / 3.0).floor() as i32).clamp(0, 6);
+    let s = r / 1000f64.powi(i);
+    let d = (2 - s.abs().log10().floor() as i32).max(0) as usize;
+    trim(format!("{s:.d$}")) + ["", "k", "M", "G", "T", "P", "E"][i as usize]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn short_numbers_keep_three_digits() {
+        let all: Vec<String> =
+            [0.0, 0.25, 42.0, -7.5, 1234.0, 1500.0, 999.6, 2.4e6, 3e9, 1e-5, 0.00123, 0.001, 1e21, f64::NAN]
+                .into_iter()
+                .map(short)
+                .collect();
+        assert_eq!(
+            all,
+            [
+                "0", "0.25", "42", "-7.5", "1.23k", "1.5k", "1k", "2.4M", "3G", "1e-5", "0.00123", "0.001", "1000E",
+                "NaN"
+            ]
+        );
+    }
 
     #[test]
     fn units_a_human_can_compare() {

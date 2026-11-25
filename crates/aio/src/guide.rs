@@ -56,6 +56,8 @@ pages! {
     Animation = "ui/animation.md",
     #[cfg(feature = "kit")]
     Islands = "ui/islands.md",
+    #[cfg(feature = "kit")]
+    Drawing = "ui/drawing.md",
     Release = "build/release.md",
     Targets = "build/targets.md",
     Build = "build/README.md",
