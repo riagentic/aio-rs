@@ -109,7 +109,14 @@ out when a finding has none.
 
 ## What it checks
 
-Each finding has an area, in brackets in the report.
+Each finding has an area, in brackets in the report. The view checks
+(`hooks`, `render`, `a11y`) run on the crates that can hold views: those
+depending on aio-rs or air, by their own dependency, through
+`[workspace.dependencies]`, or through a path dependency that does (a
+file with no Cargo.toml above it counts too). A library of the app with
+none of them (a parser, an emulator) gets no view findings. The gate is
+the crate, not the file: a page module may name no aio path at all
+(`use crate::prelude::*;`).
 
 ### `security`
 
@@ -175,7 +182,7 @@ budgets.
 | a `for` loop's element or component with no `key` (air refuses it) | error |
 | a `for` loop over a block (its `rsx!` inside an unkeyed node) | warn |
 | a `key` on a `for` row's later node: it keys no row (it remakes that node when it changes) | warn |
-| a `.read()`, `.read_untracked()` or `.write()` guard held across an `if let`, `while let` or `match` whose block writes: it panics as already borrowed | warn |
+| a `.read()`, `.read_untracked()` or `.write()` guard held across an `if let`, `while let` or `match` whose block writes: it panics as already borrowed (taken for a signal's: an argument-less call on a value other than `self`; a lock or a reader of your own: `// aio-ok(render): <what it is>`) | warn |
 | page CSS made in `once`: an edit never shows under `ax dev` | error |
 | `ondragstart` that calls `set_data`: the view runs after the browser's drag start, so the drop never gets it | warn: `"data-drag": "{id}"` |
 | a DOM property no attribute sets and air doesn't set (`src_object`, `text_content`, `inner_text`, `scroll_top`, `scroll_left`): written as an attribute, it does nothing | warn: a child for text, else a page script (`aio.node(id)`) |

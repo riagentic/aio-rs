@@ -196,6 +196,14 @@ version may break things.
 
 ### Changed
 
+- `ax lint`'s view checks (hooks, signal guards, `rsx!` markup) run only
+  on crates that can hold views: those depending on aio-rs or air, by
+  their own dependency, through `[workspace.dependencies]` or through a
+  path crate that does. A library of the app with neither (a parser, an
+  emulator) was told its token cursor's `self.peek()` was a signal
+  borrowed across a `while let`. The guard finding says why it took the
+  value for a signal, and how to mark one that isn't
+  ([lint](docs/testing/lint.md#what-it-checks)).
 - **Breaking: ax's plumbing is out of the API**: `aio_shell`'s `runtime`,
   `splash`, `place`, `prune`, `pidlock`, `macmove`, `oneclick`, `fuses`,
   `swap`, `switches`, `inspect` and `delta`, `html_open`, every
@@ -334,6 +342,9 @@ version may break things.
 
 ### Fixed
 
+- `ax lint` took any argument-less `.peek()` for a signal's guard (aio-rs
+  0.1's Dioxus signals; air's have none), and `self.read()` (the type's
+  own method) too.
 - A `TestUi` step waits for the files its event reads: a form's submit
   read its files as the event went out, and a click that submitted it
   could end before they were read (the submit unheard on a loaded

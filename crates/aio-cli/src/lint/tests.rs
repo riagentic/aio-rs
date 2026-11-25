@@ -567,12 +567,12 @@ fn a_signal_read_kept_through_a_block_that_writes_is_a_warning() {
         r#"
 fn on_key(k: Key) {
     if k == Key::Escape {
-    } else if let Some(id) = TOAST.peek().as_ref().map(|t| t.id) {
+    } else if let Some(id) = TOAST.read_untracked().as_ref().map(|t| t.id) {
         dismiss(id);
     }
     while let Some(n) = queue.write().pop() { log(n) }
     match MODE.read().kind { Kind::A => *MODE.write() = Mode::B, _ => {} }
-    let id = TOAST.peek().as_ref().map(|t| t.id);
+    let id = TOAST.read_untracked().as_ref().map(|t| t.id);
     if let Some(id) = id { dismiss(id) }
     if let Some(t) = TOAST.read().as_ref() { let _ = Some(t.id); }
     if let Some(t) = TOAST.cloned() { dismiss(t.id) }
@@ -582,9 +582,109 @@ fn on_key(k: Key) {
     let r = lint(d.path());
     let got: Vec<_> = r.issues.iter().filter(|i| i.area == "render").map(|i| (i.line.unwrap(), &i.message)).collect();
     assert_eq!(got.iter().map(|g| g.0).collect::<Vec<_>>(), [4, 7, 8], "{:?}", r.issues);
-    assert!(got[0].1.contains("`TOAST.peek()` in this `if let`") && got[0].1.contains("`dismiss()`"), "{}", got[0].1);
+    assert!(
+        got[0].1.contains("`TOAST.read_untracked()` in this `if let`") && got[0].1.contains("`dismiss()`"),
+        "{}",
+        got[0].1
+    );
+    // It says why it took the value for a signal, and what to write if it isn't one.
+    assert!(got[0].1.contains("taken for a signal's guard: an argument-less `.read_untracked()`"), "{}", got[0].1);
     let fix = r.issues.iter().find(|i| i.area == "render").and_then(|i| i.fix.as_deref()).unwrap_or_default();
-    assert!(fix.contains("take the value first"), "{fix}");
+    assert!(fix.contains("take the value first") && fix.contains("aio-ok(render)"), "{fix}");
+}
+
+/// A parser's cursor in a crate with no aio-rs (cuda-master's emulator):
+/// `.peek()` is no signal's (air has none), and the view checks don't run
+/// on a crate that can't hold views.
+const CURSOR: &str = r#"
+impl Parser {
+    fn ws(&mut self) {
+        while let Some(c) = self.peek() { self.bump(c) }
+        while let Some(t) = self.toks.peek() { self.take(t) }
+        while let Some(b) = self.read() { self.push(b) }
+    }
+}
+fn use_buffer() { if x { let _ = signal(|| 0); } }
+fn table() -> View { rsx! { for r in rows { tr { "{r}" } } } }
+"#;
+
+#[test]
+fn view_checks_run_only_on_crates_that_can_hold_views() {
+    let lib = |deps: &str| format!("[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\n{deps}\n");
+    let render = |files: &[(&str, &str)]| {
+        let r = lint(project(files).path());
+        let mut got: Vec<_> = r
+            .issues
+            .iter()
+            .filter(|i| ["render", "hooks"].contains(&i.area))
+            .map(|i| i.file.clone().unwrap())
+            .collect();
+        got.dedup();
+        got
+    };
+    // A pure library: nothing.
+    assert!(render(&[("sim/Cargo.toml", &lib("")), ("sim/src/lib.rs", CURSOR)]).is_empty());
+    // Its own `self.peek()`/`self.read()` are no signal's anywhere: the
+    // hook and the keyless row are found in a crate on aio-rs.
+    let found = lint(
+        project(&[
+            ("app/Cargo.toml", &lib("aio = { package = \"aio-rs\", version = \"0.5\" }")),
+            ("app/src/lib.rs", CURSOR),
+        ])
+        .path(),
+    );
+    let areas: Vec<_> = found
+        .issues
+        .iter()
+        .filter(|i| ["render", "hooks"].contains(&i.area))
+        .map(|i| (i.area, i.line.unwrap()))
+        .collect();
+    assert_eq!(areas, [("hooks", 9), ("render", 10)], "{:?}", found.issues);
+    // On aio-rs by every road: renamed, the workspace's, through a path
+    // crate of the app; air too; an example by a dev-dependency; no manifest.
+    let ws = "[workspace]\nmembers = [\"app\", \"views\"]\n\n[workspace.dependencies]\nui = { package = \"aio-rs\", path = \"aio\" }\n";
+    for files in [
+        vec![
+            ("app/Cargo.toml", lib("air = { package = \"aio-rs-air\", version = \"0.5\" }")),
+            ("app/src/lib.rs", CURSOR.into()),
+        ],
+        vec![
+            ("Cargo.toml", ws.into()),
+            ("app/Cargo.toml", lib("ui = { workspace = true }")),
+            ("app/src/lib.rs", CURSOR.into()),
+        ],
+        vec![
+            ("Cargo.toml", ws.into()),
+            ("views/Cargo.toml", lib("ui.workspace = true")),
+            ("app/Cargo.toml", lib("views = { path = \"../views\" }")),
+            ("app/src/lib.rs", CURSOR.into()),
+        ],
+        vec![
+            ("app/Cargo.toml", lib("") + "\n[dev-dependencies]\naio-rs = \"0.5\"\n"),
+            ("app/examples/demo.rs", CURSOR.into()),
+        ],
+        vec![("src/lib.rs", CURSOR.into())],
+    ] {
+        let files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (*p, t.as_str())).collect();
+        assert_eq!(render(&files).len(), 1, "{files:?}");
+    }
+    // A dev-dependency alone gives a library's own source no views.
+    assert!(
+        render(&[
+            ("sim/Cargo.toml", &(lib("") + "\n[dev-dependencies]\naio-rs = \"0.5\"\n")),
+            ("sim/src/lib.rs", CURSOR)
+        ])
+        .is_empty()
+    );
+    // `ax dev`'s check of a saved file takes the same gate.
+    let d = project(&[
+        ("sim/Cargo.toml", &lib("")),
+        ("sim/src/lib.rs", CURSOR),
+        ("app/Cargo.toml", &lib("aio-rs = \"0.5\"")),
+        ("app/src/lib.rs", CURSOR),
+    ]);
+    let saved = changed(&[d.path().join("sim/src/lib.rs"), d.path().join("app/src/lib.rs")], d.path());
+    assert!(!saved.is_empty() && saved.iter().all(|l| l.contains("app/src/lib.rs")), "{saved:?}");
 }
 
 #[test]
