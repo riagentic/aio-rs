@@ -74,6 +74,7 @@ mode = "standalone"
 version = "1.4"
 ui = "window"
 lang = "en"
+spellcheck = "os"           # nothing fetched: the OS's, or a dictionary on the machine
 dir = "ltr"
 tz = "utc"
 profiles = true
@@ -220,6 +221,7 @@ Who the app is and where its cells live.
 | `version` | string | the package's | `major.minor`: builds are numbered from git, `1.4.<commit count>` (`1.4.0-nogit` without git). Or a pinned `major.minor.patch`. Either may carry a stage: `1.4-beta` builds `1.4.<n>-beta` (`-alpha` < `-beta` < `-rc` < none). Unset: `Cargo.toml`'s version, as written. Any other form is refused as the file is read. |
 | `ui` | `window`, `browser` | `"window"` | Where a `client-server` app shows its UI: `window` (the shared runtime's) or `browser` (its own page in the system browser, running until asked to stop). A launch's `--client=window`, `browser` or `server-only` (no window, served until asked to stop) decides for one run (aio's `--client`). |
 | `lang` | language tag | `"en"` | The page's language, `<html lang>` (screen readers, spellcheck, translation). Letters, digits and `-`: `"en"`, `"pt-BR"`. |
+| `spellcheck` | `os`, `off`, `google`, URL | `"os"` | Where the window's spellchecker finds a language the OS doesn't check (macOS checks every one, Windows those with a language pack, Linux none). `os`: only the OS's and a dictionary already on the machine, nothing fetched. `off`: no spellchecking. `google`: Chromium's dictionaries from Google's CDN (needs `"*.gvt1.com"` in `[capabilities] network`). An `https://` folder ending in `/`: the app's own `.bdic` files (its host in the network list) ([privacy](../clients/desktop.md#privacy)). |
 | `dir` | `ltr`, `rtl`, `auto` | `"ltr"` | The page's direction, `<html dir>`. `auto` is the browser's guess from the first strong character. Never guessed from `lang`. |
 | `tz` | `utc`, `local` | `"utc"` | The clock cron schedules read (`#[cron]`, `cx.cron`): UTC as aio's, so a port's jobs fire when they did, or this machine's local time (with its daylight-saving changes). |
 | `schemes` | list | `[]` | URL schemes the app opens on every platform (`notes://item/7`): its install registers them with the OS (Linux `x-scheme-handler`, Windows `HKCU\Software\Classes`, macOS `CFBundleURLTypes`, Android intent filters), its uninstall takes them away, and each link reaches the app through `aio::ui::links()` (a `router!` goes there), started by it or running ([deep links](../clients/desktop.md#deep-links)). A link is untrusted input. A lower-case letter, then lower-case letters, digits, `+`, `-` or `.`; none of the system's (`http`, `https`, `file`, `data`, `javascript`, `mailto`, `tel`, `aio`, `chrome`, `ms-*`…). |
@@ -511,9 +513,9 @@ person picks (the connect page, a pairing, `--server-url`) or the app
 names (`[client] server`) is reached without an entry, that host and port
 alone. Every other host still needs one.
 
-The window holds to it too: Chromium's spellchecker fetches a missing
-dictionary from Google only when the list reaches `"*.gvt1.com"`
-([privacy](../clients/desktop.md#privacy)).
+The window holds to it too: its spellchecker fetches a missing
+dictionary only from where `[app] spellcheck` says, and that host must be
+in the list ([privacy](../clients/desktop.md#privacy)).
 
 ```toml
 [capabilities]

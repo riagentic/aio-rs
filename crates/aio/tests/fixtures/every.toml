@@ -6,6 +6,7 @@ maintainer = "A <a@example.org>"
 version = "1.2-beta"
 ui = "browser"
 lang = "ar"
+spellcheck = "https://example.org/dictionaries/"
 dir = "rtl"
 tz = "local"
 profiles = false

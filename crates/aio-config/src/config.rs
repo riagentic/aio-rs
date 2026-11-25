@@ -57,6 +57,12 @@ pub struct App {
     /// translation read it, WCAG 3.1.1); unset: `en`.
     #[serde(default)]
     pub lang: Option<String>,
+    /// Where the window's spellchecker finds a language the OS doesn't
+    /// check ([`spellcheck_refused`]): `os` (only the OS's and dictionaries
+    /// already on the machine: nothing fetched), `off`, `google` (Chromium's,
+    /// from Google's CDN) or the `https://` folder of the app's own `.bdic` files.
+    #[serde(default = "App::default_spellcheck")]
+    pub spellcheck: String,
     /// The page's direction, `<html dir>`. Never guessed from `lang`.
     #[serde(default)]
     pub dir: Dir,
@@ -100,6 +106,7 @@ impl Default for App {
             version: None,
             ui: Shown::default(),
             lang: None,
+            spellcheck: Self::default_spellcheck(),
             dir: Dir::default(),
             tz: Tz::default(),
             profiles: true,
@@ -111,10 +118,43 @@ impl Default for App {
 }
 
 impl App {
+    fn default_spellcheck() -> String {
+        "os".into()
+    }
+
     /// The name the monogram draws: the app's, else its id.
     pub fn label(&self) -> &str {
         if self.name.is_empty() { &self.id } else { &self.name }
     }
+}
+
+/// Why `[app] spellcheck` can't be `v` for an app whose `[capabilities]
+/// network` is `network`, or `None` (pure). Chromium checks a language the
+/// OS doesn't (Linux: every one; Windows: one without a language pack) with
+/// a `.bdic` dictionary, fetched from `google` or the app's own folder: the
+/// folder is a URL ending in `/` (`<url>en-us-10-1.bdic` is fetched, as
+/// Electron's `hunspell_dictionaries.zip` names them), its host in `network`.
+pub fn spellcheck_refused(v: &str, network: &[String]) -> Option<String> {
+    use crate::capabilities::{allows, host_port};
+    let url = match v {
+        "os" | "off" => return None,
+        // Chromium's own, on Google's CDN.
+        "google" => "https://redirector.gvt1.com/edgedl/chrome/dict/",
+        u => u,
+    };
+    let local = url.starts_with("http://127.0.0.1:") || url.starts_with("http://[::1]:");
+    let (host, port) = host_port(url);
+    if !(url.starts_with("https://") || local) || !url.ends_with('/') || host.is_empty() {
+        return Some(format!(
+            "[app] spellcheck {v:?} is \"os\" (nothing fetched), \"off\", \"google\" or the https:// folder of \
+             the app's own .bdic dictionaries, ending in / (\"https://example.org/dictionaries/\")"
+        ));
+    }
+    // Google's CDN sends each fetch on to another of its hosts.
+    let wanted = if v == "google" { "*.gvt1.com" } else { &host };
+    let reached = if v == "google" { allows(network, "cdn.gvt1.com", None) } else { true };
+    (!(reached && allows(network, &host, port)))
+        .then(|| format!("[app] spellcheck {v:?} reaches {host}: add \"{wanted}\" to [capabilities] network"))
 }
 
 /// `[app] tz`: the clock of cron schedules.
@@ -2103,6 +2143,9 @@ impl Config {
             return Err("aio.toml: [updates] keep must be at least 2 (the running version and the one before)".into());
         }
         if let Some(e) = c.capabilities.missing(&c) {
+            return Err(format!("aio.toml: {e}"));
+        }
+        if let Some(e) = spellcheck_refused(&c.app.spellcheck, &c.capabilities.network) {
             return Err(format!("aio.toml: {e}"));
         }
         Ok(c)

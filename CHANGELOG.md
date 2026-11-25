@@ -64,16 +64,27 @@ version may break things.
   it is kept aside (`copy.other-user-<ms>`) and said (`sync:other-user`),
   as a page's copy already was. A copy saved before is no one's.
 
-- The window fetches no spellcheck dictionary from Google unless the
-  app's `[capabilities] network` reaches `*.gvt1.com`. Chromium's
-  spellchecker on Linux (and on Windows for a language the OS lacks)
-  fetched the person's dictionary from Google's CDN on first launch, in
-  the browser process: past the page's policy and the app's network list,
-  telling Google the machine's address and language. Without the entry a
-  dictionary already in the profile is used, and a language left
-  unchecked is said in the log ([privacy](docs/clients/desktop.md#privacy)).
+- The window fetches no spellcheck dictionary unless `[app] spellcheck`
+  says where. Chromium's spellchecker on Linux (and on Windows for a
+  language without a language pack) fetched the person's dictionary from
+  Google's CDN on first launch, in the browser process: past the page's
+  policy and the app's network list, telling Google the machine's address
+  and language. Now a dictionary already in the profile is used, and a
+  language left unchecked is said once in the log, naming the fix
+  ([privacy](docs/clients/desktop.md#privacy)).
 
 ### Added
+
+- `[app] spellcheck` (`aio_shell::Window { spellcheck }`, `Window::of`
+  reads it): where the window's spellchecker finds a language the OS
+  doesn't check. `"os"` (default): the OS's (macOS, Windows' language
+  packs) and dictionaries already on the machine, nothing fetched;
+  `"off"`: no spellchecking; `"google"`: Chromium's from Google's CDN
+  (needs `"*.gvt1.com"` in `[capabilities] network`); an `https://` folder
+  ending in `/`: the app's own `.bdic` files (Electron's
+  `hunspell_dictionaries.zip`), its host in the network list. A source the
+  list doesn't reach fails the build with the line to add
+  ([privacy](docs/clients/desktop.md#privacy)).
 
 - `aio::kit::NavList` and `NavItem`: a sidebar's rail of pages, the
   current one `aria-current="page"` (marked by a bar and weight, not

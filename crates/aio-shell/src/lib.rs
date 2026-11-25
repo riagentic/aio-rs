@@ -25,6 +25,11 @@ pub struct Window {
     /// The page's language, `<html lang>` (screen readers and spellcheck
     /// read it, WCAG 3.1.1); unset: `en`.
     pub lang: Option<&'static str>,
+    /// Where the spellchecker finds a language the OS doesn't check
+    /// (`[app] spellcheck`, `aio::config::spellcheck_refused`): `"os"`,
+    /// `"off"`, `"google"` or the app's own `https://` folder; unset: `"os"`,
+    /// nothing fetched.
+    pub spellcheck: Option<&'static str>,
     /// The page's direction, `<html dir>`. Never guessed from `lang`.
     pub dir: Dir,
     /// The `<meta name="viewport">` content; unset: the device's width at
@@ -95,12 +100,13 @@ pub use aio::config::SplashShow;
 impl Window {
     /// The window `[app]` describes: its name as the title, its own icon
     /// (`assets/icon.png`, built in by `aio::config!()`; none: the shell draws
-    /// its monogram), its `lang` and `dir`; the rest default (`Window { width: 900,
-    /// ..Window::of(&cfg) }`).
+    /// its monogram), its `lang`, `spellcheck` and `dir`; the rest default
+    /// (`Window { width: 900, ..Window::of(&cfg) }`).
     pub fn of(cfg: &aio::config::Config) -> Self {
         let lang = cfg.app.lang.clone().map(|l| &*l.leak());
         let icon = Some(cfg.app.icon).filter(|i| !i.is_empty());
-        Self { title: cfg.app.name.clone().leak(), icon, lang, dir: cfg.app.dir, ..Self::default() }
+        let spellcheck = Some(&*cfg.app.spellcheck.clone().leak());
+        Self { title: cfg.app.name.clone().leak(), icon, lang, spellcheck, dir: cfg.app.dir, ..Self::default() }
     }
 }
 
