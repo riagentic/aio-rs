@@ -75,6 +75,25 @@ version may break things.
 
 ### Added
 
+- `aio::client!` also makes `prelude`, a module with its items (`part`,
+  `Ui` that `act!` calls through, the cell's reader, `use_live`…) and the
+  view API: another module of the crate (a page) needs one line,
+  `use crate::prelude::*;`, where each page module failed with dozens of
+  `cannot find function part` / `cannot find type Ui` errors until it
+  found `use crate::*;`. `ax dev` and `ax lint` add that line to those
+  errors as the fix, `ax create`'s template draws its buttons from a
+  second module that uses it, and `ax add cell`'s file says it
+  ([views](docs/ui/views.md#what-client-makes)).
+- `ax lint` warns of a literal `data-t` equal to the id of a kit `Tab`
+  the same component makes (`Tab::new("gpu", …)` beside a
+  `Select { "data-t": "gpu" }`): a tab's id is its handle, so `ax trigger`
+  and tests met two elements by one name, though `data-t` was written once.
+- The guide says how to read a field that isn't `Copy` from a client's
+  state (`todo().title.clone()`; why no getter is made) and how to keep
+  app-lifetime state that isn't saved: a `Global` filled by
+  `spawn_forever` + `off_thread`, read by a test with `ui.read(&GLOBAL)`
+  ([views](docs/ui/views.md#app-lifetime-state-that-isnt-saved)); `ax
+  agent ui` says both.
 - `aio::kit::NavList` and `NavItem`: a sidebar's rail of pages, the
   current one `aria-current="page"` (marked by a bar and weight, not
   colour alone), one tab stop with ↑/↓, Home and End moving focus and
@@ -226,6 +245,21 @@ version may break things.
 
 ### Changed
 
+- **Breaking:** a module named `prelude` beside an `aio::client!(..)`
+  call collides with the one it makes now: rename yours, or move the
+  `client!` into a module of its own
+  ([migration](docs/migration/0.4-to-0.5.md#views)).
+- `ax lint`'s view checks (hooks, signal guards, `rsx!` markup) run only
+  on crates that can hold views: those depending on aio-rs or air, by
+  their own dependency, through `[workspace.dependencies]` or through a
+  path crate that does. A library of the app with neither (a parser, an
+  emulator) was told its token cursor's `self.peek()` was a signal
+  borrowed across a `while let`. The guard finding says why it took the
+  value for a signal, and how to mark one that isn't
+  ([lint](docs/testing/lint.md#what-it-checks)).
+- `ax agent`'s brief is checked against the guide: every example its UI
+  section shows in backticks is in docs/agents.md's compiled doctest, and
+  every one it refuses in a `compile_fail` block of it.
 - `Tabs` that don't fit wrap to another row, where a scrollbar showed
   under them; `scroll: true` keeps the old row.
 - `ax start` builds the app with the window's door (aio-shell's `door`;
@@ -410,6 +444,24 @@ version may break things.
   sets what differs at each start, in the background: its menu entry's
   `MimeType` and `xdg-mime` handlers (Linux), a handler that is missing or
   this app's at another path (Windows; another app's stays).
+- `ax agent` said views have no `if let` or `match` nodes, so agents
+  wrote `{x.map(|e| rsx! {..})}` holes instead; both are markup, and the
+  brief shows them. Its other stale lines too: `{xs.map(|x| rsx! {..})}`
+  given as keyed rows (it doesn't compile, and such a hole keys nothing),
+  a prop following state only as a `Signal`, `Part` or `Prop` (plain
+  props follow since this release), `h.done(x)` as an effect's answer
+  (a method call is), `cx.at` and `cx.backoff`'s arguments, a `VList`
+  (`VirtualList`), `use_css!(false, ..)` for the template's
+  `aio::ui::scheme()`, `ax setup` fetching dx, a pipe getting JSON from
+  every verb, the `cli` mode, the `secrets` and `updates` features,
+  `#[cell(id)]`, `Code` in `aio::prelude`, `TestCells::advance` taking a
+  `Duration`, and `TestUi` refusing a handle two elements share.
+- `ax lint` took any argument-less `.peek()` for a signal's guard (aio-rs
+  0.1's Dioxus signals; air's have none), and `self.read()` (the type's
+  own method) too.
+- `ax lint`'s fix for a `for` over a block was a `{items.iter().map(..)}`
+  hole, which doesn't compile; it says to key a row component now.
+  docs/testing/lint.md listed the finding as a warning: it is an error.
 - With `theme = "full"` the look's button reached the kit's quiet ones:
   a `Menu`'s items were centred and shadowed, tabs had a shadow, rounded
   corners and a press nudge. They start from `.aio-plain` now.

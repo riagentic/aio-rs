@@ -139,6 +139,45 @@ per test):
 | `use_pending(Some("method"))` | calls of that method in flight (`None`: all), for a spinner |
 | `use_time_travel()`, `time_travel(ask)` | the cell's history and steps through it (`kit::TimeTravelPanel`) |
 | `act!(method(args))` | calls a method from a handler |
+| `prelude` | a module with all of these and the view API (`aio::ui::prelude`): another module of the crate takes them with `use crate::prelude::*;` (`use crate::todo::prelude::*;` for a `client!` in `mod todo`) |
+
+These are made where `client!` is called. A page module that uses
+`part`, `act!` or `use_live` without them fails with `cannot find
+function part` and `cannot find type Ui` (`ax dev` and `ax lint` say
+which line to add):
+
+```rust
+#[aio::cell(id = "notes")]
+pub struct Notes {
+    pub count: u32,
+}
+
+#[aio::methods]
+impl Notes {
+    pub fn add(&mut self) {
+        self.count += 1;
+    }
+}
+
+aio::client!(Notes, notes);
+
+mod page {
+    use crate::prelude::*; // part, act!'s Ui, notes(), use_live, and the view API
+
+    #[component]
+    pub fn Page() -> View {
+        use_live();
+        let n = part(|c| &c.count);
+        rsx! { button { "data-t": "add", onclick: move |_| _ = act!(add()), "{n}" } }
+    }
+}
+
+# fn main() {
+let mut ui = aio::testing::TestUi::new(page::Page);
+ui.click("add");
+assert_eq!(ui.text("add"), "1");
+# }
+```
 
 `aio::client!(Cell, name, name_at)` also makes `name_at(|c| value)`: a
 [`memo`](#local-state-and-hooks) of a value made from the state, its
@@ -154,10 +193,15 @@ readers told when that value changes.
   ([performance](../performance.md#1-read-fields)).
 - `name()` reads the whole state. Use it in handlers, which don't
   follow anything; a dev build names, once, each view body that reads it
-  (`[hint]` in the log).
+  (`[hint]` in the log). It is an `Arc` of the state, shared: a field
+  that isn't `Copy` is cloned out, `notes().title.clone()` (`notes().title`
+  alone is E0507, cannot move out of an `Arc`); `notes().title.len()` and
+  other reads by reference need no clone. `client!` makes no getter per
+  field: `name().field.clone()` already is one call, and a hole reads
+  `part(|c| &c.title)`, which follows the field and clones it for you.
 - `act!(method(args))` calls the method; a refusal is logged and gives
   `None`, an answer `Some(value)`. It needs only the client's `Ui` in
-  scope (`use crate::prefs::Ui;` in another module), never the
+  scope (`use crate::prelude::*;` in another module), never the
   `<Cell>Calls` trait. A view's call shows at once; commits
   from effects, schedules and other threads reach the views at most once
   per `aio::ui::BACKGROUND` (150 ms).
@@ -437,6 +481,56 @@ assert_eq!(ui.read(&THEME), "dark");
 | `aio::kit::use_window_event(\|e\| ..)` | the window's pointer, wheel, key and resize events (inside `GlobalKeys`) | `onWindowEvent` |
 | `aio::kit::use_window_listener(kind, \|e\| ..)` | any event type the window hears, each one, as JSON | `onWindowEvent(type)` |
 | `aio::kit::use_back_button(\|\| ..)` | takes Back while the view lives ([routing](routing.md#back)) | `onBackButton` |
+
+### App-lifetime state that isn't saved
+
+A value the views show for as long as the app runs, but that nobody
+wants back after a restart (a run's report, a scan's result), is no
+cell field: a cell saves it and logs each change. It is a `Global`,
+filled by work that outlives the view that started it:
+
+- `static REPORT: Global<T>`: one value per app instance (per test),
+  shown by any view, kept when the view that asked goes away.
+- `spawn_forever(async move { .. })`: the work, outliving its view (a
+  `spawn` or `task` stops with its component).
+- `aio::effect::off_thread(key, f, input)` inside it for CPU-heavy work:
+  a worker thread (a Web Worker in a browser), so the window stays
+  responsive.
+
+State a person would want back after a restart belongs in a cell; state
+of one view only (a hover, an open menu), in its `signal`s; a value only
+a view needs while it shows, in a `resource`.
+
+```rust
+use aio::ui::prelude::*;
+
+/// The last run's sum: shown by every view, never saved.
+static REPORT: Global<Option<u64>> = Global::new(|| None);
+
+fn sum(n: u64) -> u64 {
+    (1..=n).sum()
+}
+
+#[component]
+fn Run() -> View {
+    rsx! {
+        button { "data-t": "run",
+            onclick: move |_| _ = spawn_forever(async move {
+                REPORT.set(aio::effect::off_thread("sum", sum, 1000).await.ok());
+            }),
+            "Run"
+        }
+        p { "data-t": "report", "{REPORT.get().unwrap_or_default()}" }
+    }
+}
+
+# fn main() {
+let mut ui = aio::testing::TestUi::new(Run);
+ui.click("run");
+ui.until_text("report", "500500");
+assert_eq!(ui.read(&REPORT), Some(500500)); // a test reads a Global as it is
+# }
+```
 
 ### Lifecycle
 
@@ -789,6 +883,10 @@ Routes are [routing](routing.md); styles and dark mode are
   don't subscribe; read it in a hole.
 - Reading `name()` in a hole: it works, and runs the hole again on every
   commit of the cell. Read `part(..)` per field.
+- `name().field` of a `String` or a `Vec` in a handler: E0507, cannot
+  move out of an `Arc`. Clone it: `name().field.clone()`.
+- `cannot find function part` / `cannot find type Ui` in a module other
+  than the one that calls `client!`: add `use crate::prelude::*;`.
 - `part(|c| &c.rows[i])`: a reference into a list can't name its field, so
   the hole follows every commit. Pick the field, then index it.
 - Forgetting `use_live()` in the root: views then miss commits that don't

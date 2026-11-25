@@ -1,7 +1,7 @@
 //! The `thing` cell (`ax add cell thing`): its state, saved, and the
 //! only ways to change it.
 //! Its views: `thing::use_live()` in the root view, then `part(|t| &t.count)`
-//! and `act!(add(1))` in this module.
+//! and `act!(add(1))` here, or in another module after `use crate::thing::prelude::*;`.
 
 #[aio::cell(persist, id = "thing")]
 pub struct Thing {
