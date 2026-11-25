@@ -237,6 +237,10 @@ pub struct Pkg {
     /// `<its aio-shell dependency>/dev`: the feature that takes hot-patches
     /// in (`aio-shell/dev`); `None`: it has no window shell, nothing to patch.
     pub dev_feature: Option<String>,
+    /// `<its aio-shell dependency>/door`: the window's `ui` door alone, for
+    /// `ax start`'s build; `None`: no window shell, or one before the
+    /// feature (aio-rs 0.5.0).
+    pub door_feature: Option<String>,
     /// The shell features its aio.toml turns on (`build::shell_features`:
     /// `updates` for an `[updates] url`): every dev build takes them, so the
     /// `updates` cell works under `ax dev` as in the release.
@@ -244,11 +248,11 @@ pub struct Pkg {
 }
 
 impl Pkg {
-    /// Its features for a dev-profile build, `dev`'s tooling too when
-    /// asked, comma-separated (`--features`); None: none (pure).
+    /// Its features for a dev-profile build, `dev`'s tooling when asked,
+    /// else the window's door, comma-separated (`--features`); None: none (pure).
     pub fn features_with(&self, dev: bool) -> Option<String> {
-        let all: Vec<&str> =
-            self.dev_feature.iter().filter(|_| dev).chain(&self.features).map(String::as_str).collect();
+        let tooling = if dev { &self.dev_feature } else { &self.door_feature };
+        let all: Vec<&str> = tooling.iter().chain(&self.features).map(String::as_str).collect();
         (!all.is_empty()).then(|| all.join(","))
     }
 
@@ -378,11 +382,13 @@ fn pkg_with(meta: &serde_json::Value, name: &str, kind: &str) -> Option<Pkg> {
     let pkg_name = pkg["name"].as_str().unwrap_or(name).to_string();
     let version = pkg["version"].as_str().unwrap_or("0.0.0").to_string();
     let dev_feature = shell_dev_feature(pkg);
+    let door_feature = shell_door_feature(meta, pkg, dev_feature.as_deref());
     let cfg = aio_config::config::find(&dirs[0])
         .and_then(|f| std::fs::read_to_string(f).ok())
         .and_then(|t| aio::config::Config::parse(&t).ok());
     let features = cfg.map(|c| crate::build::shell_features(meta, &pkg_name, &c, false)).unwrap_or_default();
-    Some(Pkg { name: pkg_name, dirs, bin: dev_bin(Path::new(target), name), version, dev_feature, features })
+    let bin = dev_bin(Path::new(target), name);
+    Some(Pkg { name: pkg_name, dirs, bin, version, dev_feature, door_feature, features })
 }
 
 /// The `dev` feature of package `pkg`'s aio-shell dependency, by the name
@@ -392,6 +398,30 @@ pub fn shell_dev_feature(pkg: &serde_json::Value) -> Option<String> {
     let shell = deps.iter().find(|d| d["name"] == "aio-rs-shell" && d["kind"].is_null())?;
     let named = shell["rename"].as_str().or(shell["name"].as_str())?;
     Some(format!("{named}/dev"))
+}
+
+/// The `door` feature beside `dev` (`aio-shell/door`), when the aio-rs-shell
+/// package `pkg` builds with has one ([`has_door`]; reads its manifest, or
+/// the workspace's Cargo.lock).
+fn shell_door_feature(meta: &serde_json::Value, pkg: &serde_json::Value, dev: Option<&str>) -> Option<String> {
+    let shell = dev?.strip_suffix("/dev")?;
+    let dep = pkg["dependencies"].as_array()?.iter().find(|d| d["name"] == "aio-rs-shell" && d["kind"].is_null())?;
+    let read = |p: PathBuf| std::fs::read_to_string(p).ok();
+    let manifest = dep["path"].as_str().and_then(|p| read(Path::new(p).join("Cargo.toml")));
+    let lock = meta["workspace_root"].as_str().and_then(|w| read(Path::new(w).join("Cargo.lock")));
+    has_door(manifest.as_deref(), lock.as_deref()).then(|| format!("{shell}/door"))
+}
+
+/// Whether the app's aio-rs-shell has the `door` feature (pure): a path
+/// dependency's own manifest (a checkout) says; else the version
+/// Cargo.lock holds, 0.5.0 on (cargo refuses a feature a package lacks).
+pub fn has_door(manifest: Option<&str>, lock: Option<&str>) -> bool {
+    match manifest {
+        Some(m) => m.lines().any(|l| l.trim_start().starts_with("door = ")),
+        None => crate::pin::locked(lock.unwrap_or_default()).iter().any(|l| {
+            l.name == "aio-rs-shell" && aio::update::parse_version(&l.version).is_some_and(|(v, _)| v >= vec![0, 5, 0])
+        }),
+    }
 }
 
 /// Binary `name` of a debug build into `target` ([`layout`]).
@@ -523,8 +553,9 @@ fn build_or_stale(pkg: &Pkg, logs: Option<&Path>, dev: bool, stop: &Stop) -> Bui
 /// The features a dev-profile build of `pkg` is built with (pure): its
 /// aio.toml's ([`Pkg::features`]), and for an `ax dev` run (`dev`)
 /// aio-shell's `dev`, as its fat build has it; for any other (`ax start`)
-/// not that: it runs as the release build does, with no operator door, no
-/// DevTools port, its process hardened.
+/// only the window's `ui` door (aio-shell's `door`: local, the user's own),
+/// so ax shot, eval and trigger reach it: else it runs as the release build
+/// does, with no operator door, no DevTools port, its process hardened.
 pub fn build_features(pkg: &Pkg, dev: bool) -> Vec<String> {
     pkg.features_with(dev).into_iter().flat_map(|f| ["--features".to_string(), f]).collect()
 }
@@ -2224,6 +2255,16 @@ mod tests {
         assert_eq!(shell_dev_feature(&none), None);
         let dev_only = pkg(serde_json::json!([{ "name": "aio-rs-shell", "rename": null, "kind": "dev" }]));
         assert_eq!(shell_dev_feature(&dev_only), None);
+        // The window's door: only from an aio-rs-shell that has the feature.
+        let lock = |v: &str| {
+            format!("[[package]]\nname = \"aio-rs-shell\"\nversion = \"{v}\"\nsource = \"git+https://x?tag=v{v}#c\"\n")
+        };
+        assert!(has_door(None, Some(&lock("0.5.0"))) && has_door(None, Some(&lock("0.6.1"))));
+        assert!(!has_door(None, Some(&lock("0.4.2"))), "aio-rs before 0.5.0: cargo would refuse the feature");
+        assert!(!has_door(None, None), "no lock yet: as before");
+        let checkout = "[features]\ndev = [\"door\", \"dep:aio-hotpatch\"]\ndoor = []\n";
+        assert!(has_door(Some(checkout), Some(&lock("0.4.2"))), "a checkout: its manifest, whatever its version");
+        assert!(!has_door(Some("[features]\ndev = []\n"), Some(&lock("0.5.0"))));
     }
 
     #[test]
@@ -2408,6 +2449,7 @@ mod tests {
             bin: "/b".into(),
             version: "1".into(),
             dev_feature: None,
+            door_feature: None,
             features: vec![],
         };
         assert_eq!(watched(&pkg, Path::new("/w"), &Watching::Off), Vec::<PathBuf>::new());
@@ -2417,12 +2459,26 @@ mod tests {
         assert!(!warms_after_create(true, true, None), "--no-warm");
         assert!(!warms_after_create(true, false, Some("1")), "AIORT_NO_WARM=1");
         assert!(warms_after_create(true, false, Some("0")));
-        let shell = Pkg { dev_feature: Some("aio-shell/dev".into()), ..pkg.clone() };
+        let shell = Pkg {
+            dev_feature: Some("aio-shell/dev".into()),
+            door_feature: Some("aio-shell/door".into()),
+            ..pkg.clone()
+        };
         assert_eq!(build_features(&shell, true), ["--features", "aio-shell/dev"], "ax dev's tooling");
-        assert!(build_features(&shell, false).is_empty(), "ax start: no door, no DevTools port, hardened");
+        assert_eq!(
+            build_features(&shell, false),
+            ["--features", "aio-shell/door"],
+            "ax start: the window's door for ax shot and co., no DevTools port, hardened"
+        );
         let fed = Pkg { features: vec!["aio-shell/updates".into()], ..shell.clone() };
         assert_eq!(build_features(&fed, true), ["--features", "aio-shell/dev,aio-shell/updates"], "an [updates] url");
-        assert_eq!(build_features(&fed, false), ["--features", "aio-shell/updates"], "ax start updates as the release");
+        assert_eq!(
+            build_features(&fed, false),
+            ["--features", "aio-shell/door,aio-shell/updates"],
+            "ax start updates as the release"
+        );
+        let old = Pkg { door_feature: None, ..fed.clone() };
+        assert_eq!(build_features(&old, false), ["--features", "aio-shell/updates"], "an aio-rs without the door");
         assert_eq!(watched(&pkg, Path::new("/w"), &Watching::Only(s(&["src/ui"]))), [PathBuf::from("/w/src/ui")]);
         let all = watched(&pkg, Path::new("/w"), &Watching::All);
         assert!(all.contains(&PathBuf::from("/w/app/src")) && all.contains(&PathBuf::from("/w/Cargo.toml")), "{all:?}");

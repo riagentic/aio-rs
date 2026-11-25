@@ -124,6 +124,7 @@ finished:
 | `.grid` | a responsive grid (columns of at least 15rem) |
 | `.muted` | the quiet ink |
 | `.badge` | a small accent pill |
+| `.aio-plain` | a button with no look (a sidebar entry, a list row): no padding, border, shadow or centring, the text's own font and colour; any rule of the app's wins over it. In every mode but `none` |
 
 Every rule sits in `@layer aio` and most are written with `:where(..)`,
 so any rule of the app's wins over it, even a bare `button { .. }`. Each is

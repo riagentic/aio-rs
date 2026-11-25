@@ -310,6 +310,17 @@ body{
   }
 }
 
+/* A plain button (class "aio-plain"): a click target with no look of its
+   own (a sidebar entry, a list row). Unlayered, so the look's button
+   (centred, padded, shadowed, 44px on a phone) never reaches it; :where(),
+   so any rule of the app's wins. The kit's own quiet buttons start here. */
+:where(.aio-plain,.aio-tab,.aio-nav__item,.aio-menu__item,.aio-alert__x,.aio-toast__x) {
+  appearance: none; display: inline-block; margin: 0; padding: 0; border: 0; border-radius: 0;
+  background: none; box-shadow: none; transform: none; font: inherit; color: inherit;
+  text-align: start; justify-content: normal; align-items: normal; gap: normal; cursor: pointer;
+}
+:where(.aio-plain) { min-height: 0; }
+
 .aio-btn {
   font: inherit; font-family: var(--aio-ui-font); font-weight: 550;
   border: 1px solid transparent; border-radius: var(--aio-ui-radius);
@@ -450,13 +461,24 @@ body{
 @media (forced-colors: active) { .aio-switch { border: 1px solid CanvasText; } .aio-switch:checked { background: Highlight; } }
 
 /* Tabs */
-.aio-tablist { display: flex; gap: .15em; border-block-end: 1px solid var(--aio-ui-line); overflow-x: auto; }
+.aio-tablist { display: flex; flex-wrap: wrap; gap: .15em; border-block-end: 1px solid var(--aio-ui-line); }
+.aio-tablist--scroll { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; }
 .aio-tab { appearance: none; background: none; border: none; border-block-end: 2px solid transparent; padding: .6em .9em; font: inherit; font-family: var(--aio-ui-font); color: var(--aio-ui-ink-soft); cursor: pointer; white-space: nowrap; }
 .aio-tab:hover:not(:disabled) { color: var(--aio-ui-ink); }
 .aio-tab--active { color: var(--aio-ui-accent-ink); border-block-end-color: var(--aio-ui-accent-ink); font-weight: 600; }
 .aio-tab:disabled { opacity: .45; cursor: not-allowed; }
 .aio-tabpanel { padding-block-start: 1em; }
 .aio-tabpanel:focus-visible { outline: 2px solid var(--aio-ui-accent); outline-offset: 2px; }
+
+/* NavList: a rail of pages, the current one marked by more than colour */
+.aio-nav__list { display: flex; flex-direction: column; gap: .15em; list-style: none; margin: 0; padding: 0; }
+.aio-nav__list > li { margin: 0; }
+.aio-nav__item { display: flex; align-items: center; gap: .6em; inline-size: 100%; padding: .5em .75em; border-inline-start: 3px solid transparent; border-radius: var(--aio-ui-radius); font-family: var(--aio-ui-font); color: var(--aio-ui-ink-soft); }
+.aio-nav__item:hover:not(:disabled) { background: var(--aio-ui-surface); color: var(--aio-ui-ink); }
+.aio-nav__item[aria-current="page"] { background: var(--aio-tint, var(--aio-ui-surface)); border-inline-start-color: var(--aio-ui-accent-ink); color: var(--aio-ui-accent-ink); font-weight: 600; }
+.aio-nav__item:disabled { opacity: .45; cursor: not-allowed; }
+@media (pointer: coarse) { .aio-nav__item { min-block-size: 44px; } }
+@media (forced-colors: active) { .aio-nav__item[aria-current="page"] { border-inline-start-color: Highlight; } }
 
 /* Progress */
 .aio-progress-row { display: inline-flex; align-items: center; gap: .6em; }

@@ -4,7 +4,7 @@
 //! control does its WAI-ARIA keyboard pattern. Every component takes `class`
 //! (appended to its own) and any other attribute (`"data-t"`, `id`, `aria-*`),
 //! which wins over the kit's own. The parts a person uses inside a control
-//! carry handles of their own: a tab's or menu item's id, `menuTrigger`,
+//! carry handles of their own: a tab's, nav item's or menu item's id, `menuTrigger`,
 //! `menuScrim`, `modalBackdrop`, `confirmOk`, `confirmCancel`, `toastDismiss`,
 //! `alertDismiss`, `pagePrev`, `pageNext`, `page{n}`, `zoomIn`, `zoomOut`,
 //! `zoomFit`, `zoomStage`, and the sign-in form's `signin…` parts.

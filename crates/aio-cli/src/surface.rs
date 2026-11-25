@@ -9,6 +9,7 @@
 //! so the app's handlers run as for a person.
 use crate::cdp::Session;
 use aio::serde_json::{Value, json};
+use std::time::Duration;
 
 /// The page side: the surface, the names, and the DOM steps of a trigger.
 const SCRIPT: &str = aio::ui::SURFACE_JS;
@@ -208,6 +209,122 @@ pub async fn trigger(s: &mut Session, path: &str, action: &str, text: Option<&st
     })
 }
 
+/// `ax expect-ui`'s ops, TestUi's words: its whole text (`until_text`), a
+/// part of it (`until_contains`), showing or not (`present`, `absent`).
+pub const EXPECT_OPS: [&str; 4] = ["eq", "contains", "present", "absent"];
+
+/// The op's words checked before the window is asked (pure).
+pub fn expect_usage(op: &str, want: Option<&str>) -> Result<(), String> {
+    let texts = matches!(op, "eq" | "contains");
+    match () {
+        _ if !EXPECT_OPS.contains(&op) => Err(format!("unknown op `{op}` (use: {})", EXPECT_OPS.join(" "))),
+        _ if texts && want.is_none() => Err(format!("{op} needs a text: ax expect-ui <app> <path> {op} <text>")),
+        _ if !texts && want.is_some() => Err(format!("{op} takes no text")),
+        _ => Ok(()),
+    }
+}
+
+/// How often a wait asks the window again.
+const POLL: Duration = Duration::from_millis(50);
+
+/// Does the element at `path` pass `op` (`want`: the text)? Asked again
+/// until it does or `wait` is up: `Ok` PASS, `Err` FAIL with what it
+/// shows; a path two or more elements answer fails at once, each named.
+pub async fn expect(
+    s: &mut Session,
+    (path, op, want): (&str, &str, Option<&str>),
+    wait: Duration,
+) -> Result<String, String> {
+    expect_usage(op, want)?;
+    let line = format!("{path} {op}{}", want.map_or(String::new(), |w| format!(" {w:?}")));
+    let end = tokio::time::Instant::now() + wait;
+    let arg = json!({ "path": path, "op": op, "want": want });
+    loop {
+        let r = s.eval(&format!("({SCRIPT})(\"expect\", {arg})")).await;
+        let why = match &r {
+            Ok(r) if r["many"].is_u64() => return Err(format!("FAIL  {line}: {}", r["error"].as_str().unwrap_or(""))),
+            Ok(r) if r["ok"]["pass"] == true => return Ok(format!("PASS  {line}")),
+            Ok(r) => seen(op, &r["ok"]),
+            // The page went (a reload): asked again while there is time.
+            Err(e) => e.clone(),
+        };
+        if tokio::time::Instant::now() >= end {
+            return Err(format!("FAIL  {line}: {why}"));
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// What a failed check saw (pure): what the element shows, else why there is none.
+fn seen(op: &str, got: &Value) -> String {
+    match got["why"].as_str() {
+        Some(why) => why.into(),
+        None if op == "present" => "it is there but hidden".into(),
+        None => format!("it shows {:?}", cut(got["text"].as_str().unwrap_or(""))),
+    }
+}
+
+/// A text cut at 200 characters, for a line.
+fn cut(s: &str) -> String {
+    match s.char_indices().nth(200) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s.into(),
+    }
+}
+
+/// The page's stillness, `{still, moving}`: ms since its DOM last changed
+/// (ax's own tooling, `[data-aio-dev]`, aside; watched from the first ask)
+/// and how many animations that end are running.
+const STILL: &str = "(() => { const w = window; if (!w.__aioStill) { w.__aioStill = { at: performance.now() }; \
+    const ours = (r) => (r.target.nodeType === 1 ? r.target : r.target.parentElement)?.closest('[data-aio-dev]'); \
+    new MutationObserver((rs) => { if (!rs.every(ours)) w.__aioStill.at = performance.now() }).observe(document, \
+    { subtree: true, childList: true, attributes: true, characterData: true }) } \
+    const moving = document.getAnimations().filter((a) => a.playState === 'running' && \
+    a.effect && a.effect.getComputedTiming().endTime !== Infinity).length; \
+    return { still: Math.floor(performance.now() - w.__aioStill.at), moving } })()";
+
+/// What keeps the app from being idle (pure): its work in flight (`busy`,
+/// [`aio::effect::busy`]), and its page (`page`, [`STILL`]) moving or changed
+/// less than `quiet` ago; empty: idle.
+pub fn not_idle(busy: &[String], page: &Value, quiet: Duration) -> Vec<String> {
+    let mut why: Vec<String> = busy.to_vec();
+    match page["moving"].as_u64() {
+        Some(0) => {}
+        Some(n) => why.push(format!("{n} animation{} running", if n == 1 { "" } else { "s" })),
+        None => why.push("the page said nothing of itself".into()),
+    }
+    let still = page["still"].as_u64().unwrap_or(0);
+    if still < quiet.as_millis() as u64 {
+        why.push(format!("the page changed {still} ms ago"));
+    }
+    why
+}
+
+/// `ax wait <app> --idle`: until the app (`s`, through its door) has
+/// nothing in flight and its window has been still for `quiet`, `wait` at
+/// most: how long it took, or what is still busy.
+pub async fn idle(s: &mut Session, quiet: Duration, wait: Duration) -> Result<String, String> {
+    let t0 = tokio::time::Instant::now();
+    loop {
+        let busy = s.call(aio_shell::inspect::BUSY, json!({})).await?;
+        let busy: Vec<String> =
+            busy["busy"].as_array().into_iter().flatten().filter_map(|b| b.as_str().map(String::from)).collect();
+        let why = not_idle(&busy, &s.eval(STILL).await?, quiet);
+        let took = t0.elapsed();
+        if why.is_empty() {
+            return Ok(format!(
+                "idle after {:.1} s: nothing in flight, the window still for {} ms",
+                took.as_secs_f64(),
+                quiet.as_millis()
+            ));
+        }
+        if took >= wait {
+            return Err(format!("not idle after {:.1} s: {}", took.as_secs_f64(), why.join("; ")));
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +479,104 @@ mod tests {
             assert!(e.contains("can't click data-t=\"off\": it is disabled"), "{e}");
             let e = step(&mut s, "HiddenButton", "click", None).await.0.unwrap_err();
             assert!(e.contains("by name: Form, EmailInput"), "hidden: no name: {e}");
+        });
+    }
+
+    /// `ax expect-ui`: TestUi's words on the live page, waited for; a path
+    /// two showing elements answer is refused at once, each named with the
+    /// path that names it (skipped without Chromium).
+    #[cfg(unix)]
+    #[test]
+    fn expect_ui_waits_for_what_the_window_shows_and_refuses_a_guess() {
+        let html = concat!(
+            r#"<nav data-t="side"><button data-t="gpu">GPU</button></nav>"#,
+            r#"<div data-t="tabs"><select data-t="gpu"><option>a</option></select></div>"#,
+            r#"<p data-t="out">running</p><p data-t="gone">x</p><p data-t="off" style="display:none">h</p>"#,
+            r#"<button onclick="setTimeout(() => { document.querySelector('[data-t=out]').textContent = 'done: 42'; "#,
+            r#"document.querySelector('[data-t=gone]').remove() }, 300)">Run</button>"#,
+        );
+        let Some(page) = crate::cdp::tests::Chromium::open(html) else { return };
+        aio::rt().block_on(async {
+            let mut s = page.session().await;
+            let (now, w) = (Duration::ZERO, Duration::from_secs(5));
+            assert_eq!(
+                expect(&mut s, ("out", "eq", Some("running")), now).await,
+                Ok("PASS  out eq \"running\"".into())
+            );
+            let e = expect(&mut s, ("out", "contains", Some("done")), now).await.unwrap_err();
+            assert_eq!(e, "FAIL  out contains \"done\": it shows \"running\"");
+            trigger(&mut s, "RunButton", "click", None).await.unwrap();
+            assert_eq!(
+                expect(&mut s, ("out", "contains", Some("42")), w).await,
+                Ok("PASS  out contains \"42\"".into())
+            );
+            assert!(expect(&mut s, ("gone", "absent", None), w).await.is_ok(), "removed");
+            assert!(expect(&mut s, ("off", "absent", None), now).await.is_ok(), "hidden is absent");
+            let e = expect(&mut s, ("off", "present", None), now).await.unwrap_err();
+            assert!(e.ends_with("it is there but hidden"), "{e}");
+            let e = expect(&mut s, ("nope", "present", None), Duration::from_millis(200)).await.unwrap_err();
+            assert!(e.contains("no element with data-t=\"nope\""), "{e}");
+            let t = std::time::Instant::now();
+            let e = expect(&mut s, ("gpu", "present", None), w).await.unwrap_err();
+            assert!(t.elapsed() < Duration::from_secs(2), "refused at once, not waited out");
+            assert!(
+                e.contains(r#"2 elements have data-t="gpu": <button> "GPU" at side/gpu, <select> "a" at tabs/gpu"#),
+                "{e}"
+            );
+            assert!(expect(&mut s, ("tabs/gpu", "present", None), now).await.is_ok(), "a path names one");
+        });
+    }
+
+    /// The page's stillness, as `ax wait --idle` reads it: ax's own tooling
+    /// aside, and an endless animation (a spinner) never holding it.
+    #[cfg(unix)]
+    #[test]
+    fn the_page_is_still_once_nothing_changes_for_a_while() {
+        let Some(page) = crate::cdp::tests::Chromium::open("<p id=p>a</p><div data-aio-dev id=d>0</div>") else {
+            return;
+        };
+        aio::rt().block_on(async {
+            let mut s = page.session().await;
+            let still = |v: Value| v["still"].as_u64().unwrap();
+            s.eval(STILL).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            s.eval("document.getElementById('d').textContent = '1'").await.unwrap();
+            assert!(still(s.eval(STILL).await.unwrap()) >= 250, "the tooling's change is not the app's");
+            s.eval("document.getElementById('p').textContent = 'b'").await.unwrap();
+            assert!(still(s.eval(STILL).await.unwrap()) < 250);
+            s.eval("window.A = document.getElementById('p').animate([{ opacity: 0 }, { opacity: 1 }], 5000); 1")
+                .await
+                .unwrap();
+            assert_eq!(s.eval(STILL).await.unwrap()["moving"], 1);
+            s.eval("A.cancel(); document.getElementById('p').animate([{ opacity: 0 }, { opacity: 1 }], { duration: 100, iterations: Infinity }); 1")
+                .await
+                .unwrap();
+            assert_eq!(s.eval(STILL).await.unwrap()["moving"], 0, "a spinner never ends: no wait on it");
+        });
+    }
+
+    #[test]
+    fn idle_is_nothing_in_flight_and_a_still_page() {
+        let q = Duration::from_millis(500);
+        assert!(not_idle(&[], &json!({ "still": 600, "moving": 0 }), q).is_empty());
+        assert_eq!(
+            not_idle(&["effect gpu.run".into()], &json!({ "still": 100, "moving": 2 }), q),
+            ["effect gpu.run", "2 animations running", "the page changed 100 ms ago"]
+        );
+        let answers = |busy: Value| {
+            crate::cdp::tests::Answers::from([
+                ("Aio.busy".into(), json!({ "busy": busy })),
+                ("Runtime.evaluate".into(), json!({ "result": { "value": { "still": 900, "moving": 0 } } })),
+            ])
+        };
+        aio::rt().block_on(async {
+            let (at, _d) = crate::cdp::tests::door_endpoint(answers(json!([]))).await;
+            let mut s = crate::cdp::window(&at, 0).await.unwrap();
+            assert!(idle(&mut s, q, Duration::from_secs(5)).await.unwrap().starts_with("idle after"));
+            let (at, _d) = crate::cdp::tests::door_endpoint(answers(json!(["blocking scan"]))).await;
+            let mut s = crate::cdp::window(&at, 0).await.unwrap();
+            let e = idle(&mut s, q, Duration::from_millis(200)).await.unwrap_err();
+            assert!(e.starts_with("not idle after") && e.ends_with(": blocking scan"), "{e}");
         });
     }
 

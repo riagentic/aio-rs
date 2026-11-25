@@ -287,6 +287,142 @@ fn a_tab_that_is_gone_falls_back_to_the_first_enabled_one() {
     );
 }
 
+fn crowded() -> View {
+    let six = |p: &str| {
+        ["Overview", "Memory", "Compute", "Power", "Clocks", "History"]
+            .map(|t| Tab::new(format!("{p}{t}"), t, rsx! {}))
+            .to_vec()
+    };
+    styled(rsx! {
+        div { style: "width: 420px",
+            Tabs { "data-t": "wrapped", tabs: six("") }
+            Tabs { "data-t": "scrolled", scroll: true, tabs: six("s") }
+        }
+    })
+}
+
+#[test]
+fn tabs_that_do_not_fit_wrap_unless_asked_to_scroll() {
+    let mut ui = TestUi::new(crowded);
+    let fits = |ui: &mut TestUi, t: &str| {
+        ui.eval(&format!("(() => {{ const l = document.querySelector('[data-t={t}] [role=tablist]'); return l.scrollWidth <= l.clientWidth }})()"))
+    };
+    assert_eq!(fits(&mut ui, "wrapped"), true, "no scrollbar under the tabs");
+    assert!(ui.rect("History").y > ui.rect("Overview").y, "a second row");
+    assert_eq!(fits(&mut ui, "scrolled"), false, "one row that scrolls");
+    assert_eq!(ui.rect("sHistory").y, ui.rect("sOverview").y);
+    assert_eq!(ui.style("wrapped/Overview", "box-shadow"), "none", "the look's button stays out of a tab");
+}
+
+/// How far `t`'s label starts from its box's left edge, in px.
+fn label_start(ui: &mut TestUi, t: &str) -> f64 {
+    let js = format!(
+        "(() => {{ const b = document.querySelector('[data-t={t}]'), r = document.createRange(); \
+         r.selectNodeContents(b); return r.getBoundingClientRect().left - b.getBoundingClientRect().left }})()"
+    );
+    ui.eval(&js).as_f64().unwrap()
+}
+
+fn rail() -> View {
+    let page = signal(|| "home".to_string());
+    styled(rsx! {
+        button { "data-t": "before", "before" }
+        NavList { "data-t": "rail", label: "Pages", value: page.get(), onchange: move |id: String| { log(id.clone()); page.set(id) },
+            items: vec![
+                NavItem::new("home", "Home"),
+                NavItem::new("jobs", rsx! { span { "aria-hidden": "true", "▶" } "Jobs" }),
+                NavItem::new("logs", "Logs").disabled(),
+                NavItem::new("settings", "Settings"),
+            ],
+        }
+        NavList { "data-t": "own", items: vec![NavItem::new("x", "X").disabled(), NavItem::new("y", "Y")] }
+        button { "data-t": "after", "after" }
+    })
+}
+
+#[test]
+fn a_nav_list_marks_the_current_page_and_is_one_tab_stop() {
+    let mut ui = TestUi::new(rail);
+    assert_eq!(ui.count("nav[aria-label=Pages][data-t=rail] > ul > li > button"), 4);
+    assert_eq!(ui.count("[data-t=rail] [aria-current]"), 1);
+    assert_eq!(ui.attr("home", "aria-current").as_deref(), Some("page"));
+    assert_eq!(ui.count("[data-t=rail] [tabindex='0']"), 1);
+    assert_eq!(ui.attr("home", "tabindex").as_deref(), Some("0"));
+    assert_eq!(ui.attr("y", "aria-current").as_deref(), Some("page"), "uncontrolled: the first enabled item");
+    let (item, rail) = (ui.rect("home"), ui.rect("rail"));
+    assert_eq!(item.width, rail.width, "an item fills the rail");
+    let start = label_start(&mut ui, "home");
+    assert!(start < 20.0, "its label starts at the start: {start}");
+}
+
+#[test]
+fn arrows_move_focus_through_a_nav_list_and_enter_opens_the_page() {
+    let mut ui = TestUi::new(rail);
+    press(&mut ui, "home", Key::ArrowDown);
+    assert_eq!(ui.focused().as_deref(), Some("jobs"));
+    assert_eq!(said(), Vec::<String>::new(), "focus moves, the page doesn't");
+    ui.press_key(Key::ArrowDown, Modifiers::empty());
+    assert_eq!(ui.focused().as_deref(), Some("settings"), "the disabled item is skipped");
+    ui.press_key(Key::ArrowDown, Modifiers::empty());
+    assert_eq!(ui.focused().as_deref(), Some("home"), "wraps");
+    ui.press_key(Key::End, Modifiers::empty());
+    assert_eq!(ui.focused().as_deref(), Some("settings"));
+    ui.press_key(Key::Home, Modifiers::empty());
+    ui.press_key(Key::ArrowUp, Modifiers::empty());
+    assert_eq!(ui.focused().as_deref(), Some("settings"), "wraps back");
+    ui.press_key(Key::Enter, Modifiers::empty());
+    assert_eq!(said(), ["settings"]);
+    assert_eq!(ui.attr("settings", "aria-current").as_deref(), Some("page"));
+    ui.click("y");
+    assert_eq!(ui.attr("y", "aria-current").as_deref(), Some("page"));
+    ui.click("x");
+    assert_eq!((ui.attr("x", "aria-current"), said()), (None, vec![]), "a disabled item opens nothing");
+}
+
+#[test]
+fn tab_leaves_a_nav_list_and_comes_back_where_it_left() {
+    let mut ui = TestUi::new(rail);
+    press(&mut ui, "home", Key::ArrowDown);
+    ui.press_key(Key::Tab, Modifiers::empty());
+    assert_eq!(ui.focused().as_deref(), Some("y"), "one stop per list");
+    ui.press_key(Key::Tab, Modifiers::SHIFT);
+    assert_eq!(ui.focused().as_deref(), Some("jobs"), "back on the item last left");
+    ui.press_key(Key::Tab, Modifiers::SHIFT);
+    assert_eq!(ui.focused().as_deref(), Some("before"));
+    ui.click("settings");
+    tab_to(&mut ui, "settings");
+    assert_eq!(ui.count("[data-t=rail] [tabindex='0']"), 1, "the new page is the stop");
+}
+
+fn plain() -> View {
+    styled(rsx! {
+        aside { style: "width: 240px",
+            button { "data-t": "row", class: "aio-plain", style: "display: flex; width: 100%", "Row" }
+            button { "data-t": "look", style: "width: 100%", "Look" }
+        }
+        Menu { "data-t": "acts", label: "Actions", trigger: rsx! { "⋯" }, items: vec![MenuItem::new("edit", "Edit")] }
+    })
+}
+
+#[test]
+fn a_plain_button_and_the_kits_quiet_ones_keep_the_looks_button_out() {
+    let mut ui = TestUi::new(plain);
+    assert!(label_start(&mut ui, "look") > 40.0, "the look centres a bare button");
+    assert!(label_start(&mut ui, "row") < 1.0, "a plain one starts at the start");
+    for (p, v) in [
+        ("box-shadow", "none"),
+        ("padding-top", "0px"),
+        ("border-top-width", "0px"),
+        ("min-height", "0px"),
+        ("background-color", "rgba(0, 0, 0, 0)"),
+    ] {
+        assert_eq!(ui.style("row", p), v, "{p}");
+    }
+    ui.click("menuTrigger");
+    assert!(label_start(&mut ui, "edit") < 20.0, "a menu item's label starts at the start");
+    assert_eq!(ui.style("edit", "box-shadow"), "none");
+}
+
 // Unstyled: the menu as markup, its placement not under test.
 fn menu() -> View {
     rsx! {

@@ -97,6 +97,16 @@ version may break things.
 - `aio::fmt::short`: a number in three significant digits, short (`1.5k`,
   `2.4M`, `0.001`, `1e-5`).
 
+- `aio::kit::NavList` and `NavItem`: a sidebar's rail of pages, the
+  current one `aria-current="page"` (marked by a bar and weight, not
+  colour alone), one tab stop with ↑/↓, Home and End moving focus and
+  Enter opening; Tab comes back to the item last left. 44 px tall under a
+  coarse pointer ([kit](docs/ui/kit.md#tabs-menus-and-navigation)).
+- `.aio-plain`: a button with no look (a sidebar entry, a list row), in
+  the kit's sheet: with `theme = "full"` the look's button (centred,
+  padded, shadowed, 44 px on a phone) no longer has to be undone property
+  by property ([theming](docs/ui/theming.md#what-the-look-styles)).
+- `Tabs { scroll: true }`: one row of tabs that scrolls sideways.
 - `aio::capabilities::network()`: this process's `[capabilities] network`
   list, `None` when it is not held.
 - `aio::http::content_name(name, bytes)`: a file's name by its content
@@ -215,9 +225,33 @@ version may break things.
   ([relay](docs/examples/relay.md)).
 - `Source::for_server_with(cfg, dirs, http)`: `for_server` serving the
   app's own routes too, without the sync client `for_app_with` holds.
+- `ax expect-ui <app> <path> eq|contains <text>` and `present|absent
+  [--wait s]`: what the running window shows asserted, and waited for, in
+  `TestUi`'s words (`until_text`, `until_contains`), as `ax expect` does
+  for a cell's state; exit 1 with what it shows. A result only a view
+  holds (a `Global`) can be awaited without a sleep.
+- `ax wait <app> --idle [--for ms] [--wait s]`: until the app has nothing
+  in flight (an effect, a `blocking` or `off_thread` job, a commit its
+  views aren't told of) and its window has been still for `--for` ms (no
+  DOM change, no animation that ends running); exit 1 naming what is
+  busy. `aio::effect::busy()` says what the app is still doing, and the
+  window's door answers it (`Aio.busy`).
+- aio-shell's `door` feature: the window's `ui` door alone (`dev` has it).
 
 ### Changed
 
+- `Tabs` that don't fit wrap to another row, where a scrollbar showed
+  under them; `scroll: true` keeps the old row.
+- `ax start` builds the app with the window's door (aio-shell's `door`;
+  local, in the user's private sockets folder): `ax shot`, `ax eval`, `ax
+  surface`, `ax trigger` work on an app it started, as on `ax dev`'s,
+  with no `--cdp` (said "start it with --cdp" of a dev build that had a
+  window). An app on an aio-rs without the feature builds as before; a
+  release build still opens no door, and the message says what to run:
+  `ax restart <app>` in its workspace.
+- A handle two showing elements share is refused naming the path of
+  handles that names each alone (`<button> "Fleet" at side/fleet`), in
+  `TestUi`, `ax trigger` and `ax expect-ui` alike.
 - **Breaking: ax's plumbing is out of the API**: `aio_shell`'s `runtime`,
   `splash`, `place`, `prune`, `pidlock`, `macmove`, `oneclick`, `fuses`,
   `swap`, `switches`, `inspect` and `delta`, `html_open`, every
@@ -295,8 +329,9 @@ version may break things.
   kit's sheet: a page without it no longer warns that `aio-browser` is
   unstyled. Any rule of the app's wins over it, as before.
 - **Breaking: `TestUi` refuses a `data-t` handle two showing elements
-  share**, naming both (`2 elements have data-t="fleet" (<button> "Fleet"
-  in data-t="side", <table> "gpu 1")`), where it read the first: name one
+  share**, naming both and the path that names each (`2 elements have
+  data-t="fleet": <button> "Fleet" at side/fleet, <table> "gpu 1" (no
+  path of handles names it)`), where it read the first: name one
   inside another (`side/fleet`) or give each its own. A hidden one doesn't
   count while one shows; `count`, `present` and `handles` are as before.
 - In the test world, `aio::process::Command` refuses a program that
@@ -356,6 +391,16 @@ version may break things.
 
 ### Fixed
 
+- With `theme = "full"` the look's button reached the kit's quiet ones:
+  a `Menu`'s items were centred and shadowed, tabs had a shadow, rounded
+  corners and a press nudge. They start from `.aio-plain` now.
+- `ax logs --text` (and `--quiet`) were refused (`no flag --text`): the
+  verb read its flags again past the gate every verb shares; `ax help
+  <verb> --json` read `--json` as a verb. A test runs each verb's parser
+  with `--json` and `--text`; `ax help dev` says that its flags after
+  `<app>`, `--json` too, go to the app.
+- `ax expect … --wait -1` (or `inf`, `1e30`) panicked; it is bad usage
+  now (exit 2).
 - A `TestUi` step waits for the files its event reads: a form's submit
   read its files as the event went out, and a click that submitted it
   could end before they were read (the submit unheard on a loaded

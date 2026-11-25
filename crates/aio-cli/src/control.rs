@@ -27,6 +27,8 @@ pub const VERBS: &[&str] = &[
     "eval",
     "surface",
     "trigger",
+    "expect-ui",
+    "wait",
     "components",
     "logs",
     "errors",
