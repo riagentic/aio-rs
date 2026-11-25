@@ -5,7 +5,9 @@
 //! in every build), so this user's tools reach any running app.
 use crate::patch;
 use crate::handle::Raw;
-use crate::{By, Cell, Handle, Rejected, Result};
+#[cfg(feature = "server")]
+use crate::{Cell, Handle};
+use crate::{By, Rejected, Result};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -173,7 +175,7 @@ impl<U: Cell> Beside for Handle<U> {
     }
 
     fn vitals(&self) -> (usize, bool) {
-        (serde_json::to_vec(&*self.state()).map_or(0, |v| v.len()), self.enabled())
+        self.raw.vitals()
     }
 
     fn session(

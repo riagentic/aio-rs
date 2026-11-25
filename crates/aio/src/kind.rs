@@ -19,6 +19,9 @@ pub(crate) trait AnyCell: Any + Send + Sync {
     fn dup(&self) -> St;
     fn same(&self, other: &dyn AnyCell) -> bool;
     fn to_json(&self) -> serde_json::Result<Value>;
+    /// Its size as JSON, in bytes (0: it doesn't serialize).
+    #[cfg(feature = "server")]
+    fn json_len(&self) -> usize;
     fn apply(&mut self, cx: &Cx, method: &str, args: Value) -> Result<Value>;
     fn advance(&mut self, method: &str) -> Result;
     fn check(&self) -> Result;
@@ -54,6 +57,8 @@ pub(crate) struct Kind {
     pub id: &'static str,
     pub version: u32,
     pub persist: bool,
+    #[cfg(feature = "server")]
+    pub shared: bool,
     pub diagnostics: bool,
     pub saved: bool,
     pub coalesce: bool,
@@ -103,6 +108,8 @@ impl<T: Cell> KindOf for T {
         id: T::ID,
         version: T::VERSION,
         persist: T::PERSIST,
+        #[cfg(feature = "server")]
+        shared: T::SHARED,
         diagnostics: T::DIAGNOSTICS,
         saved: T::SAVED,
         coalesce: T::COALESCE,
@@ -158,6 +165,11 @@ impl<T: Cell> AnyCell for T {
 
     fn to_json(&self) -> serde_json::Result<Value> {
         serde_json::to_value(self)
+    }
+
+    #[cfg(feature = "server")]
+    fn json_len(&self) -> usize {
+        serde_json::to_vec(self).map_or(0, |v| v.len())
     }
 
     fn apply(&mut self, cx: &Cx, method: &str, args: Value) -> Result<Value> {
@@ -220,7 +232,7 @@ pub(crate) fn screened(k: &Kind) -> bool {
     crate::screened_as(k.screened)
 }
 
-/// [`crate::shown`] of `st`.
+/// What `viewer` may see of `st` ([`crate::shown_as`]).
 pub(crate) fn shown(st: &dyn AnyCell, viewer: &Caller) -> Value {
     let k = st.kind();
     crate::shown_as(k.id, k.screened, st.project(viewer), || (k.default)().to_json(), viewer)

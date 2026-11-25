@@ -25,6 +25,7 @@
 //! health shows a client that keeps failing.
 //! Not yet: a binary wire.
 use crate::patch::{self, Op};
+use crate::handle::Raw;
 use crate::{By, Cell, Cx, Door, Handle, Inputs, Rejected, Result};
 use crate::link::{Gate, MAX_MESSAGE, Pace, Sock, clients, limits_from_wire, live, session};
 #[cfg(feature = "compat")]
@@ -419,8 +420,12 @@ pub(crate) enum Socket {
 
 /// What `/ws` and `/__aio/poll` serve a client: the cell, the ones beside
 /// it, the server fns, how clients are told apart and counted.
-pub(crate) struct Doors<T: Cell> {
-    h: Handle<T>,
+#[derive(Clone)]
+pub(crate) struct Doors {
+    h: Raw,
+    /// An aio client's session on the cell, made by its typed shell.
+    #[cfg(feature = "compat")]
+    aio: AioSession,
     creds: Creds,
     auth: Option<Arc<crate::auth::Auth>>,
     limits: Limits,
@@ -430,22 +435,7 @@ pub(crate) struct Doors<T: Cell> {
     open_links: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-impl<T: Cell> Clone for Doors<T> {
-    fn clone(&self) -> Self {
-        Self {
-            h: self.h.clone(),
-            creds: self.creds.clone(),
-            auth: self.auth.clone(),
-            limits: self.limits,
-            fns: self.fns.clone(),
-            on_link: self.on_link.clone(),
-            beside: self.beside.clone(),
-            open_links: self.open_links.clone(),
-        }
-    }
-}
-
-impl<T: Cell> Doors<T> {
+impl Doors {
     /// Admit a client by what it shows (the key, or with `users` its token;
     /// with accounts a live session), taking a slot; else the answer that
     /// refuses it.
@@ -477,10 +467,11 @@ impl<T: Cell> Doors<T> {
                 // A page in the browser shows its cookie, as on `/__aio/ui`.
                 // With users, the signed-in cookie outranks a `?token=`:
                 // a link can't make a tab act as the link's user.
+                let id = self.h.kind().id;
                 let shown = match &creds.users {
-                    Some(_) => users_token(&headers, q, T::ID),
+                    Some(_) => users_token(&headers, q, id),
                     None => shown_key(&headers, q)
-                        .or_else(|| crate::http::parse_cookies(&headers).remove(&format!("aio_key_{}", T::ID))),
+                        .or_else(|| crate::http::parse_cookies(&headers).remove(&format!("aio_key_{id}"))),
                 };
                 match (&creds.key, &creds.users) {
                     (None, _) => {}
@@ -498,7 +489,7 @@ impl<T: Cell> Doors<T> {
             }
             // A session only in the header: tokens never go in URLs.
             Some(a) => {
-                let (a, t) = (a.clone(), crate::auth::routes::session_token(&headers, T::ID).unwrap_or_default());
+                let (a, t) = (a.clone(), crate::auth::routes::session_token(&headers, self.h.kind().id).unwrap_or_default());
                 match tokio::task::spawn_blocking(move || (live(&a, &t), t)).await {
                     Ok((Some(s), t)) => Some((By::User(s.user), t)),
                     // Not a session: a service's key beside the accounts, if the app knows it.
@@ -539,6 +530,8 @@ impl<T: Cell> Doors<T> {
     /// slot: every link of it on the one socket (`mux`), else one aio-rs
     /// link (`wire2`) or, with `compat`, an aio client.
     pub(crate) async fn serve(self, s: Socket, a: Admitted, mux: bool, #[cfg_attr(not(feature = "compat"), allow(unused_variables))] wire2: bool) {
+        #[cfg(feature = "compat")]
+        let aio = self.aio;
         let Self { h, auth, limits, fns, on_link, beside, open_links, .. } = self;
         let Admitted { signed, known, recheck, gate, push, from, ip, headers } = a;
         let viewer = signed.as_ref().or(known.as_ref()).map(|(by, _)| by.clone());
@@ -577,9 +570,9 @@ impl<T: Cell> Doors<T> {
                 };
                 let _heard = Heard::new(on_link, &user, &from);
                 let who = format!("{user} from {from} (aio)");
-                let listed = Listed::new(Client::new(T::ID, user, "aio", from));
+                let listed = Listed::new(Client::new(h.kind().id, user, "aio", from));
                 let link = (listed.0, who);
-                crate::compat::wire::session(h, &beside, Sock::Ws(s), limits, gate, viewer, calls, link).await
+                aio(h, beside, Sock::Ws(s), limits, gate, viewer, calls, link).await
             };
             r
         };
@@ -605,7 +598,7 @@ impl<T: Cell> Doors<T> {
 /// `/ws`: clients that show the key (or with `users`, their token) get a
 /// session; with accounts (`auth`), clients show a live session instead,
 /// and its socket closes when the session ends.
-fn ws<T: Cell>(doors: Doors<T>) -> axum::routing::MethodRouter {
+fn ws(doors: Doors) -> axum::routing::MethodRouter {
     use crate::http::Query;
     use axum::http::{Extensions, HeaderMap, StatusCode};
     use axum::response::IntoResponse;
@@ -641,8 +634,8 @@ fn ws<T: Cell>(doors: Doors<T>) -> axum::routing::MethodRouter {
 /// One aio-rs link on `/ws`: to the cell its hello names, `h`'s or one
 /// served beside it.
 #[allow(clippy::too_many_arguments)]
-async fn linked<T: Cell>(
-    h: Handle<T>,
+async fn linked(
+    h: Raw,
     beside: Arc<Vec<Arc<dyn crate::link::Beside>>>,
     mut w: Sock,
     limits: Limits,
@@ -655,9 +648,9 @@ async fn linked<T: Cell>(
     let hooks = crate::link::Hooks { on_link, peers: None };
     let (mut pulse, mut bytes) = (crate::link::Pulse::new(), Pace::new(limits.bytes_per_sec));
     let hello = crate::link::hello(&mut w, &mut pulse, &limits, &mut bytes).await.ok_or("no hello")?;
-    match beside.iter().find(|c| c.id() != T::ID && hello["cell"] == c.id()) {
+    match beside.iter().find(|c| c.id() != h.kind().id && hello["cell"] == c.id()) {
         Some(c) => c.session(w, limits, from, gate, viewer, calls, hooks, hello).await,
-        None => session(h.raw, w, limits, from, gate, viewer, calls, hooks, Some(hello)).await,
+        None => session(h, w, limits, from, gate, viewer, calls, hooks, Some(hello)).await,
     }
 }
 
@@ -666,7 +659,8 @@ async fn linked<T: Cell>(
 /// cookie): the key, a user known by token, or with accounts a live session
 /// (or none: a signed-out tab). Its frames go to the tab handler. A tab
 /// whose session ends is closed.
-fn ui_socket<T: Cell>(
+fn ui_socket(
+    id: &'static str,
     ui: crate::http::Ui,
     creds: Creds,
     auth: Option<Arc<crate::auth::Auth>>,
@@ -681,7 +675,7 @@ fn ui_socket<T: Cell>(
             let (ui, creds, auth) = (ui.clone(), creds.clone(), auth.clone());
             async move {
                 let ip = ext.get::<ConnectInfo<Peer>>().map_or(std::net::Ipv4Addr::LOCALHOST.into(), |c| c.0.0.ip());
-                let session = crate::auth::routes::session_token(&headers, T::ID);
+                let session = crate::auth::routes::session_token(&headers, id);
                 let mut recheck = None;
                 // (user, credential): `None` is a signed-out tab.
                 let who: Option<(Option<String>, String)> = match (&auth, &creds.users, &creds.key) {
@@ -708,7 +702,7 @@ fn ui_socket<T: Cell>(
                         None => return unauthorized(&creds.guessed, ip, session.is_some(), "wrong or missing token"),
                     },
                     (None, None, Some(key)) => {
-                        let cookie = crate::http::parse_cookies(&headers).remove(&format!("aio_key_{}", T::ID));
+                        let cookie = crate::http::parse_cookies(&headers).remove(&format!("aio_key_{id}"));
                         match shown_key(&headers, &q).or(cookie) {
                             _ if creds.open => Some((None, key.to_string())),
                             Some(k) if same(&k, key) => Some((None, k)),
@@ -788,6 +782,46 @@ pub async fn serve_door_with<T: Cell>(
 /// Serve `h` at `/ws` (and pairing, the app's HTTP, over TLS, as `opts` say)
 /// until the listener fails.
 pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Options) -> std::io::Result<()> {
+    // A painted shell paints with the app's own cell and the others served.
+    #[cfg(feature = "kit")]
+    let opts = Options { http: opts.http.paint_cells(&h), ..opts };
+    #[cfg(feature = "compat")]
+    let aio: AioSession = |h, beside, w, limits, gate, viewer, calls, link| {
+        Box::pin(async move {
+            crate::compat::wire::session(Handle::<T>::of(h), &beside, w, limits, gate, viewer, calls, link).await
+        })
+    };
+    serve_raw(
+        h.raw,
+        #[cfg(feature = "compat")]
+        aio,
+        listener,
+        opts,
+    )
+    .await
+}
+
+/// An aio client's session on a served cell ([`crate::compat::wire::session`]).
+#[cfg(feature = "compat")]
+#[allow(clippy::type_complexity)]
+type AioSession = fn(
+    Raw,
+    Arc<Vec<Arc<dyn crate::link::Beside>>>,
+    Sock,
+    Limits,
+    Gate,
+    Option<By>,
+    crate::fns::Served,
+    (u64, String),
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>>;
+
+/// [`serve_with`], the cell's type erased: made once, not once per cell.
+async fn serve_raw(
+    h: Raw,
+    #[cfg(feature = "compat")] aio: AioSession,
+    listener: TcpListener,
+    opts: Options,
+) -> std::io::Result<()> {
     use axum::extract::ConnectInfo;
     #[cfg(feature = "tls")]
     use axum::http::StatusCode;
@@ -795,8 +829,9 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
     use axum::response::IntoResponse;
     // Fail closed: only a cell that says `shared` has its state on the
     // network (`/ws`, `/__aio/ui`); another serves its HTTP routes alone.
-    if !T::SHARED {
-        eprintln!("[aio] {} isn't #[cell(shared)]: only its HTTP routes are served, never its state", T::ID);
+    let k = h.kind();
+    if !k.shared {
+        eprintln!("[aio] {} isn't #[cell(shared)]: only its HTTP routes are served, never its state", k.id);
     }
     #[cfg(feature = "tls")]
     let Options { token, pairing, app: named, tls, limits, hosts, http, auth, strict_origin, trust_proxy, security, open, page_log } =
@@ -806,12 +841,9 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
         (opts, None::<std::convert::Infallible>);
     auth.iter().for_each(crate::auth::serve);
     #[cfg(feature = "tls")]
-    let title = if named.is_empty() { T::ID.to_string() } else { named.clone() };
+    let title = if named.is_empty() { k.id.to_string() } else { named.clone() };
     #[cfg(not(feature = "tls"))]
-    let title = T::ID.to_string();
-    // A painted shell paints with the app's own cell and the others served.
-    #[cfg(feature = "kit")]
-    let http = http.paint_cells(&h);
+    let title = k.id.to_string();
     // `[server] hosts` and the plugins' `allowed_origins`, merged (aio's `allowedOrigins`).
     let mut hosts = hosts;
     http.hosts.iter().for_each(|h| if !hosts.contains(h) { hosts.push(h.clone()) });
@@ -834,13 +866,15 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
     let guessed = Guessed::default();
     let creds = Creds { key: Some(token.clone()), users: users.clone(), guessed: guessed.clone(), open };
     let mut app = axum::Router::new();
-    if T::SHARED {
+    if k.shared {
         if let Some(ui) = http.ui.clone() {
-            app = app.route("/__aio/ui", ui_socket::<T>(ui, creds.clone(), auth.clone(), limits));
+            app = app.route("/__aio/ui", ui_socket(k.id, ui, creds.clone(), auth.clone(), limits));
         }
         let beside = Arc::new(http.beside.clone());
         let doors = Doors {
             h,
+            #[cfg(feature = "compat")]
+            aio,
             creds,
             auth: auth.clone(),
             limits,
@@ -882,7 +916,7 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
             .layer(axum::extract::DefaultBodyLimit::max(4096)),
         );
         let root = tls.as_ref().map(|t| t.root_pem.clone());
-        let name = if named.is_empty() { T::ID } else { &named };
+        let name = if named.is_empty() { k.id } else { &named };
         let profile = Arc::new(
             json!({ "aio": 1, "name": name, "title": name, "port": local.port(), "tls": root.is_some(), "cert": root, "key": *token }),
         );
@@ -919,9 +953,9 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
                     let (budgets, who, guessed, trust) = (budgets.clone(), who.clone(), guessed.clone(), trust.clone());
                     async move {
                         let here = from.ip().is_loopback() && !crate::gate::relayed(&headers, trust.as_deref());
-                        let cookie = crate::http::parse_cookies(&headers).remove(&format!("aio_key_{}", T::ID));
-                        let keyed = !who.key.is_empty() && cookie.is_some_and(|k| same(&k, &who.key));
-                        if !keyed && !who.admits(here, &headers, &q, T::ID).await {
+                        let cookie = crate::http::parse_cookies(&headers).remove(&format!("aio_key_{}", k.id));
+                        let keyed = !who.key.is_empty() && cookie.is_some_and(|c| same(&c, &who.key));
+                        if !keyed && !who.admits(here, &headers, &q, k.id).await {
                             return unauthorized(&guessed, from.ip(), shown_key(&headers, &q).is_some(), "sign in first");
                         }
                         let client = crate::gate::client(from.ip(), &headers, trust.as_deref());
@@ -980,7 +1014,7 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
                         (h.clone(), who.clone(), guessed.clone(), trust.clone(), beside.clone());
                     async move {
                         let here = from.ip().is_loopback() && !crate::gate::relayed(&headers, trust.as_deref());
-                        if !who.admits(here, &headers, &q, T::ID).await {
+                        if !who.admits(here, &headers, &q, k.id).await {
                             return unauthorized(
                                 &guessed,
                                 from.ip(),
@@ -999,8 +1033,8 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
                                 let (snap, loopback) = crate::vitals::snapshot();
                                 let t = crate::vitals::get();
                                 let mut doc = crate::vitals::doc(&snap, loopback, &t);
-                                let main = crate::link::Beside::vitals(&h);
-                                let cells: Vec<_> = std::iter::once((T::ID, main.0, main.1))
+                                let main = h.vitals();
+                                let cells: Vec<_> = std::iter::once((k.id, main.0, main.1))
                                     .chain(beside.iter().map(|b| {
                                         let (n, on) = b.vitals();
                                         (b.id(), n, on)
@@ -1077,7 +1111,7 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
     if let Some(a) = auth.clone() {
         app = app.merge(crate::auth::routes::router(Arc::new(crate::auth::routes::Doors::new(
             a,
-            T::ID,
+            k.id,
             tls.is_some(),
             trust_proxy.clone(),
             http.mail.clone(),
@@ -1086,11 +1120,11 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
     }
     let key = Arc::new(crate::http::Key {
         token: token.clone(),
-        cookie: format!("aio_key_{}", T::ID),
+        cookie: format!("aio_key_{}", k.id),
         secure: tls.is_some(),
         trust: trust_proxy.clone(),
         auth,
-        session_cookie: crate::auth::routes::cookie_name(T::ID),
+        session_cookie: crate::auth::routes::cookie_name(k.id),
         page: page.clone(),
         guessed,
         users,
@@ -1098,7 +1132,7 @@ pub async fn serve_with<T: Cell>(h: Handle<T>, listener: TcpListener, opts: Opti
         open,
         title: title.clone(),
     });
-    app = crate::doorstep::routes(app, &title, aio_config::icon::hue(T::ID));
+    app = crate::doorstep::routes(app, &title, aio_config::icon::hue(k.id));
     let http = Arc::new(http);
     app = app.fallback(move |ConnectInfo(Peer(from)): ConnectInfo<Peer>, req: axum::extract::Request| {
         let (http, key) = (http.clone(), key.clone());
@@ -1144,8 +1178,8 @@ async fn snapshot_open(
 /// aio's `handleSnapshot`: `GET` the snapshot; `POST` one (with `X-AIO`,
 /// aio's CSRF guard) to load it, `?force=1` past the cell-set check. The
 /// status and the answer's text.
-async fn snapshot_reply<T: Cell>(
-    h: &Handle<T>,
+async fn snapshot_reply(
+    h: &Raw,
     method: &axum::http::Method,
     x_aio: bool,
     q: &HashMap<String, String>,
@@ -1171,16 +1205,17 @@ async fn snapshot_reply<T: Cell>(
 }
 
 /// `GET /__aio/metrics`: Prometheus text.
-fn monitored<T: Cell>(h: &Handle<T>, started: std::time::Instant) -> String {
+fn monitored(h: &Raw, started: std::time::Instant) -> String {
+    let id = h.kind().id;
     let degraded = crate::health::degraded();
     let m = crate::health::Metrics {
         uptime_s: started.elapsed().as_secs(),
         memory: crate::health::memory(),
-        clients: lock(clients()).values().filter(|c| c.cell == T::ID).count(),
+        clients: lock(clients()).values().filter(|c| c.cell == id).count(),
         calls: crate::log::calls(),
         broadcast: crate::link::broadcast(),
-        cell: (T::ID.into(), h.enabled(), h.raw.failures()),
-        up: crate::health::now(T::ID)["status"] == "healthy",
+        cell: (id.into(), h.enabled(), h.failures()),
+        up: crate::health::now(id)["status"] == "healthy",
         degraded: degraded.into_iter().map(|(n, e)| (n, e.failures)).collect(),
         gauges: crate::health::gauges(),
     };
@@ -1188,9 +1223,10 @@ fn monitored<T: Cell>(h: &Handle<T>, started: std::time::Instant) -> String {
 }
 
 /// `GET /__aio/health`: what `health.json` says, now, and the served cell.
-fn health_now<T: Cell>(h: &Handle<T>) -> Value {
-    let mut d = crate::health::now(T::ID);
-    d["cell"] = json!({ "id": T::ID, "enabled": h.enabled(), "failures": h.raw.failures() });
+fn health_now(h: &Raw) -> Value {
+    let id = h.kind().id;
+    let mut d = crate::health::now(id);
+    d["cell"] = json!({ "id": id, "enabled": h.enabled(), "failures": h.failures() });
     d
 }
 

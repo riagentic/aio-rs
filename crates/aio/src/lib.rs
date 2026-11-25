@@ -823,13 +823,9 @@ pub(crate) fn screened_as(own: bool) -> bool {
     own || VISIBLE.read().unwrap_or_else(|e| e.into_inner()).is_some()
 }
 
-/// What `viewer` may see of `st`: its own `visible`, else the app's
-/// [`visible_by_default`].
-pub(crate) fn shown<T: CellData>(st: &T, viewer: &Caller) -> Value {
-    shown_as(T::ID, T::SCREENED, st.project(viewer), || serde_json::to_value(T::default()), viewer)
-}
-
-/// [`shown`] of cell `id`'s `view` (its `project`ion), `blank` its default.
+/// What `viewer` may see of cell `id`'s `view` (its `project`ion): its own
+/// `visible` (`screened`), else the app's [`visible_by_default`]; `blank`
+/// its default state.
 pub(crate) fn shown_as(
     id: &str,
     screened: bool,

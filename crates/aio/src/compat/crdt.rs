@@ -344,7 +344,7 @@ pub(crate) async fn answer<T: Cell>(
 pub(crate) fn sees_whole<T: Cell>(h: &Handle<T>, seer: &crate::Caller, cell: &str) -> bool {
     let (_, st) = h.snapshot();
     let all = cells::<T>(&serde_json::to_value(&*st).unwrap_or(Value::Null));
-    let theirs = cells::<T>(&crate::shown(&*st, seer));
+    let theirs = cells::<T>(&crate::kind::shown(&*st, seer));
     all.get(cell).is_some() && all.get(cell) == theirs.get(cell)
 }
 

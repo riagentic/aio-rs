@@ -85,7 +85,7 @@ impl Polled {
 type Polls = Arc<Mutex<HashMap<String, Arc<Polled>>>>;
 
 /// `/__aio/poll` for the clients [`crate::sync`]'s doors admit.
-pub(crate) fn route<T: crate::Cell>(doors: crate::sync::Doors<T>) -> axum::routing::MethodRouter {
+pub(crate) fn route(doors: crate::sync::Doors) -> axum::routing::MethodRouter {
     use crate::http::Query;
     use axum::http::{Extensions, HeaderMap, StatusCode};
     use axum::response::IntoResponse;

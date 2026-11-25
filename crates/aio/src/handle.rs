@@ -592,6 +592,12 @@ impl Raw {
         self.inner.kind
     }
 
+    /// Its state's size as JSON, and whether it is enabled ([`crate::vitals`]).
+    #[cfg(feature = "server")]
+    pub(crate) fn vitals(&self) -> (usize, bool) {
+        (self.state().json_len(), self.enabled())
+    }
+
     pub(crate) fn state(&self) -> St {
         lock(&self.inner.shown).1.clone()
     }
