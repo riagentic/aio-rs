@@ -29,6 +29,8 @@ native! {
     pub mod config;
     #[cfg(not(target_arch = "wasm32"))]
     pub mod connect;
+    // What `ax cost` reads: plumbing, changed in any release.
+    #[doc(hidden)]
     pub mod cost;
     #[cfg(feature = "tls")]
     pub mod cpace;

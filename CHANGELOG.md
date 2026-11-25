@@ -208,6 +208,9 @@ version may break things.
   `machine_errors`, `machine_ends`, `async_mode` and `redacts`. Code that
   named one still compiles; it may break in any release: ask for what it
   needs in an issue.
+- **Breaking: `aio::auth::budget` is gone from the API** (the login
+  doors' per-address budgets: the server's own), and `aio::cost` (what
+  `ax cost` reads) is `#[doc(hidden)]`.
 - **Breaking: every time in `aio.toml` is a span**, one parser
   (`aio::config::span_ms`) for all of them and for `#[every]`, `#[ttl]`
   and `#[long]`, with `ms` as a unit now (`"250ms"`): `[data] coalesce`,

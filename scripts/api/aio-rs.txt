@@ -354,18 +354,6 @@ aio::auth::Users::resolve: fn resolve(f: impl Fn(&str) -> Option<(String, String
 aio::auth::Users::resolve_with: fn resolve_with<F, Fut>(f: F) -> Self where F: Fn(String) -> Fut + Send + Sync + 'static, Fut: Future<Output = Option<Known>> + Send + 'static
 aio::auth::Users::sessions: fn sessions(auth: Arc<Auth>, then: Option<Users>) -> Self
 aio::auth::Users::who: fn who(&self, token: &str) -> Option<Session>
-aio::auth::budget::Budgets.fails: Meter
-aio::auth::budget::Budgets.mails: Meter
-aio::auth::budget::Budgets.signups: Meter
-aio::auth::budget::Budgets.work: Meter
-aio::auth::budget::Guesses::blocked: fn blocked(&mut self, ip: IpAddr, now: i64) -> Option<i64>
-aio::auth::budget::Guesses::wrong: fn wrong(&mut self, ip: IpAddr, now: i64) -> Option<i64>
-aio::auth::budget::Meter(_)
-aio::auth::budget::Meter::charge: fn charge(&mut self, key: &str, budget: (usize, i64), now: i64) -> bool
-aio::auth::budget::Meter::refund: fn refund(&mut self, key: &str)
-aio::auth::budget::Meter::spent: fn spent(&mut self, key: &str, budget: (usize, i64), now: i64) -> bool
-aio::auth::budget::block_ms: fn block_ms(n: u32) -> i64
-aio::auth::budget::bucket: fn bucket(ip: std::net::IpAddr) -> String
 aio::auth::client::AuthError.code: String
 aio::auth::client::AuthError.status: u16
 aio::auth::client::Client.addr: String
@@ -687,19 +675,6 @@ aio::connect::page: fn page() -> tokio::sync::watch::Receiver<Option<String>>
 aio::connect::pair: async fn pair(data: &std::path::Path, app: &str, addr: &str, code: &str) -> std::io::Result<bool>
 aio::connect::recent: fn recent(data: &std::path::Path) -> Vec<Server>
 aio::connect::remember: fn remember(data: &std::path::Path, s: Server) -> std::io::Result<()>
-aio::cost::Meter.bytes: u64
-aio::cost::Meter.full: u64
-aio::cost::Meter.keys: std::collections::BTreeMap<String, (u64, u64)>
-aio::cost::Meter.pushes: u64
-aio::cost::Meter.recent: std::collections::VecDeque<Meter>
-aio::cost::Meter.since: i64
-aio::cost::Meter.times: std::collections::VecDeque<u64>
-aio::cost::Meter::ran: fn ran(&mut self, took: Duration, now: i64)
-aio::cost::Meter::report: fn report(&self, now: i64) -> Value
-aio::cost::Meter::report_window: fn report_window(&self, now: i64, window: i64) -> Value
-aio::cost::Meter::sent: fn sent(&mut self, msg: &Value, bytes: usize, now: i64)
-aio::cost::report: fn report(cell: &str, window: Option<i64>) -> serde_json::Value
-aio::cost::sent: fn sent(cell: &'static str, msg: &serde_json::Value, bytes: usize)
 aio::cpace::Keys.isk: Vec<u8>
 aio::cpace::Keys.ta: Vec<u8>
 aio::cpace::Keys.tb: Vec<u8>
@@ -2772,11 +2747,6 @@ const aio::auth::TOTP_PENDING_MS: i64
 const aio::auth::USERS_RECHECK: std::time::Duration
 const aio::auth::USERS_WAIT: std::time::Duration
 const aio::auth::VERIFY_MS: i64
-const aio::auth::budget::FAILS: (usize, i64)
-const aio::auth::budget::GUESSES: (usize, i64)
-const aio::auth::budget::MAILS: (usize, i64)
-const aio::auth::budget::SIGNUPS: (usize, i64)
-const aio::auth::budget::WORK: (usize, i64)
 const aio::auth::client::SESSION_HEADER: &str
 const aio::auth::client::SSO_WAIT: std::time::Duration
 const aio::auth::password::ITERATIONS: u32
@@ -2789,7 +2759,6 @@ const aio::cli::ERROR: i32
 const aio::cli::OK: i32
 const aio::cli::TICK: std::time::Duration
 const aio::cli::USAGE: i32
-const aio::cost::KEPT: i64
 const aio::cpace::SUITE: &str
 const aio::db::MAX_PARAMS: usize
 const aio::db::PRAGMAS: [&str; 5]
@@ -3048,7 +3017,6 @@ impl Clone for MenuItem
 impl Clone for MenuProps
 impl Clone for Merge
 impl Clone for Merged
-impl Clone for Meter
 impl Clone for Metrics
 impl Clone for ModalProps
 impl Clone for Mode
@@ -3298,7 +3266,6 @@ impl Debug for MemoryReport
 impl Debug for MenuItem
 impl Debug for Merge
 impl Debug for Merged
-impl Debug for Meter
 impl Debug for Metrics
 impl Debug for Mode
 impl Debug for Moment
@@ -3405,7 +3372,6 @@ impl Default for Ask
 impl Default for Backs
 impl Default for Blocked
 impl Default for BrowserTab
-impl Default for Budgets
 impl Default for By
 impl Default for Caller
 impl Default for Cancel
@@ -3421,7 +3387,6 @@ impl Default for Done
 impl Default for Drained
 impl Default for Feedback
 impl Default for Filter
-impl Default for Guesses
 impl Default for Head
 impl Default for Heads
 impl Default for HostKey
@@ -3431,7 +3396,6 @@ impl Default for Known
 impl Default for Loc
 impl Default for Me
 impl Default for Merged
-impl Default for Meter
 impl Default for Metrics
 impl Default for Mode
 impl Default for Mount
@@ -3696,7 +3660,6 @@ impl PartialEq for MemoryReport
 impl PartialEq for MenuItem
 impl PartialEq for Merge
 impl PartialEq for Merged
-impl PartialEq for Meter
 impl PartialEq for Metrics
 impl PartialEq for Mode
 impl PartialEq for Moment
@@ -3929,7 +3892,6 @@ impl StructuralPartialEq for MemoryReport
 impl StructuralPartialEq for MenuItem
 impl StructuralPartialEq for Merge
 impl StructuralPartialEq for Merged
-impl StructuralPartialEq for Meter
 impl StructuralPartialEq for Metrics
 impl StructuralPartialEq for Mode
 impl StructuralPartialEq for Moment
@@ -4151,7 +4113,6 @@ macro aio::use_css!
 macro aio::warn!
 mod aio
 mod aio::auth
-mod aio::auth::budget
 mod aio::auth::client
 mod aio::auth::oidc
 mod aio::auth::password
@@ -4172,7 +4133,6 @@ mod aio::compat::local
 mod aio::compat::scatter
 mod aio::config
 mod aio::connect
-mod aio::cost
 mod aio::cpace
 mod aio::cron
 mod aio::db
@@ -4266,9 +4226,6 @@ struct aio::auth::Mail
 struct aio::auth::Session
 struct aio::auth::User
 struct aio::auth::Users
-struct aio::auth::budget::Budgets
-struct aio::auth::budget::Guesses
-struct aio::auth::budget::Meter
 struct aio::auth::client::AuthError
 struct aio::auth::client::Client
 struct aio::auth::client::Me
@@ -4300,7 +4257,6 @@ struct aio::compat::scatter::Move
 struct aio::config::Listen
 struct aio::connect::Near
 struct aio::connect::Server
-struct aio::cost::Meter
 struct aio::cpace::Keys
 struct aio::cpace::Offer
 struct aio::cpace::Start
