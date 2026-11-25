@@ -604,9 +604,12 @@ pub fn test_shape(i: &Issue) -> bool {
     i.area == "migrate" && i.message.contains("TestUi")
 }
 
+/// `--from`'s value, the switches and the dir of an `ax lint` line.
+type Words<'a> = (Option<&'a str>, Vec<&'a str>, Vec<&'a str>);
+
 /// `ax lint`'s words read (pure): `--from`'s value, the switches, the dir
 /// (at most one); `Err`: what is wrong with them.
-pub fn read_args(args: &[String]) -> Result<(Option<&str>, Vec<&str>, Vec<&str>), String> {
+pub fn read_args(args: &[String]) -> Result<Words<'_>, String> {
     // `--from v` (or `--from=v`) takes a value; the rest are switches or the dir.
     let mut from = None;
     let mut rest: Vec<&str> = vec![];
