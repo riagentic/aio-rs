@@ -2239,9 +2239,7 @@ mod tests {
         let dev_only = pkg(serde_json::json!([{ "name": "aio-rs-shell", "rename": null, "kind": "dev" }]));
         assert_eq!(shell_dev_feature(&dev_only), None);
         // The window's door: only from an aio-rs-shell that has the feature.
-        let meta = |features: serde_json::Value| {
-            serde_json::json!({ "packages": [{ "name": "aio-rs-shell", "features": features }] })
-        };
+        let meta = |features: serde_json::Value| serde_json::json!({ "packages": [{ "name": "aio-rs-shell", "features": features }] });
         let now = meta(serde_json::json!({ "door": [], "dev": ["door"] }));
         assert_eq!(shell_door_feature(&now, Some("aio-shell/dev")).as_deref(), Some("aio-shell/door"));
         assert_eq!(shell_door_feature(&now, None), None, "no window shell");
@@ -2454,7 +2452,11 @@ mod tests {
         );
         let fed = Pkg { features: vec!["aio-shell/updates".into()], ..shell.clone() };
         assert_eq!(build_features(&fed, true), ["--features", "aio-shell/dev,aio-shell/updates"], "an [updates] url");
-        assert_eq!(build_features(&fed, false), ["--features", "aio-shell/door,aio-shell/updates"], "ax start updates as the release");
+        assert_eq!(
+            build_features(&fed, false),
+            ["--features", "aio-shell/door,aio-shell/updates"],
+            "ax start updates as the release"
+        );
         let old = Pkg { door_feature: None, ..fed.clone() };
         assert_eq!(build_features(&old, false), ["--features", "aio-shell/updates"], "an aio-rs without the door");
         assert_eq!(watched(&pkg, Path::new("/w"), &Watching::Only(s(&["src/ui"]))), [PathBuf::from("/w/src/ui")]);

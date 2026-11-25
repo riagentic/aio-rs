@@ -463,6 +463,16 @@
       },
     };
   }
+  // `ax expect-ui`'s check: does `path` pass `op` (eq, contains: its text,
+  // as TestUi's until_text and until_contains read it; present, absent:
+  // showing or not)? Two or more it could name are refused, never guessed.
+  if (op === "expect") {
+    const el = find(arg.path), gone = el ? null : missing(arg.path);
+    if (gone && gone.many) return gone;
+    const shows = !!el && !hidden(el), text = el ? el.textContent : null;
+    const pass = { present: shows, absent: !shows, eq: text === arg.want, contains: text !== null && text.includes(arg.want) }[arg.op];
+    return { ok: { pass, text, why: gone && gone.error } };
+  }
   // What the island element's script would emit (`TestUi::emit`), to its view.
   if (op === "emit") {
     const el = find(arg.path);

@@ -439,6 +439,28 @@ window: a key to the window itself (a global key); --window: which
 (default: the newest open); --wait-client, the protocol: as ax surface",
     ),
     v(
+        "expect-ui",
+        "expect-ui <app> <path> <op> [text] [--wait s] [--cdp port] [--window n]",
+        "assert on what the running app's window shows, in TestUi's words (exit
+1: it fails); path as ax trigger names it; op: eq <text> (its whole
+text, until_text), contains <text> (a part of it, until_contains),
+present, absent (showing or not); a path two showing elements answer
+fails, each named with the path that names it alone; --wait: until it
+passes, s seconds at most (the window waited for too); --window, the
+protocol: as ax eval",
+    ),
+    v(
+        "wait",
+        "wait <app> [--idle] [--for ms] [--wait s]",
+        "--idle: wait until the running app is idle: nothing in flight (an
+effect, a blocking or off_thread job, a commit its views aren't told of)
+and its window still for --for ms (default 500: no DOM change, no
+animation that ends running); exit 1 after --wait s (default 30),
+naming what is still busy; through the app's own door (ax start's and
+ax dev's builds). Work it can't see (a task spawned on its own): wait
+for what it shows instead, ax expect-ui --wait",
+    ),
+    v(
         "timetravel",
         "timetravel <app> <cell> [step] [seq]",
         "where the running cell is in its history, its newest calls and their

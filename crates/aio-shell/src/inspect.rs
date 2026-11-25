@@ -42,6 +42,9 @@ impl Relay {
         if method == COMPONENTS {
             return Err(answer(&m["id"], Ok(&components())));
         }
+        if method == BUSY {
+            return Err(answer(&m["id"], Ok(&json!({ "busy": aio::effect::busy() }))));
+        }
         // `ax dev`'s template hot reload: the views built again, answered here.
         if method == HOT {
             return Err(answer(&m["id"], hot(&m["params"]).as_ref().map_err(String::as_str)));
@@ -85,6 +88,10 @@ impl Relay {
 /// renders, `"renders": [{component, key, at, ms, trigger}]` (a dev build's),
 /// and `"total"` renders.
 pub const COMPONENTS: &str = "Aio.components";
+
+/// The door's own method: what the app is still doing,
+/// `{"busy": [what]}` ([`aio::effect::busy`]; `ax wait --idle`).
+pub const BUSY: &str = "Aio.busy";
 
 /// The door's own method: `ax dev`'s template hot reload. Its params:
 /// `{"files": [file], "templates": [{file, line, col, idx, nodes (base64),

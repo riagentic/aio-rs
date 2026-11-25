@@ -1796,6 +1796,53 @@ fn run(args: &[String]) -> Result<String, Fail> {
                 surface::trigger(&mut s, path, action, text.first().copied()).await
             })
         }
+        ("expect-ui", [app, path, op, want @ ..]) => {
+            let wait = secs(value("--wait"), std::time::Duration::ZERO).map_err(usage)?;
+            let want = want.first().copied();
+            surface::expect_usage(op, want).map_err(usage)?;
+            let (at, n) = (reach(&t(app)?)?, window()?);
+            let passed = aio::rt().block_on(async {
+                let t0 = std::time::Instant::now();
+                let mut s = cdp::window_within(&at, n, wait).await?;
+                surface::expect(&mut s, (path, op, want), wait.saturating_sub(t0.elapsed())).await
+            });
+            match json {
+                true => {
+                    let v = |pass: bool, text: &str| {
+                        serde_json::json!({
+                            "pass": pass, "error": (!pass).then_some(text), "path": path, "op": op, "value": want,
+                            "text": text,
+                        })
+                        .to_string()
+                    };
+                    passed.map(|t| v(true, &t)).map_err(|e| v(false, &e))
+                }
+                false => passed,
+            }
+        }
+        ("wait", [app]) => {
+            if !has("--idle") {
+                return Err(usage(
+                    "ax wait <app> --idle: say what to wait for (--idle: nothing in flight, the window still)",
+                ));
+            }
+            let quiet = match value("--for") {
+                Some(ms) => ms
+                    .parse()
+                    .map(std::time::Duration::from_millis)
+                    .map_err(|_| usage(format!("--for {ms}: milliseconds")))?,
+                None => std::time::Duration::from_millis(500),
+            };
+            let wait = secs(value("--wait"), std::time::Duration::from_secs(30)).map_err(usage)?;
+            let t = t(app)?;
+            let door =
+                cdp::door(&t.id, &t.plan).ok_or(format!("{app} is not running: start it with `ax start {app}`"))?;
+            aio::rt().block_on(async {
+                let t0 = std::time::Instant::now();
+                let mut s = cdp::window_within(&cdp::Reach::Door(door), 0, wait).await?;
+                surface::idle(&mut s, quiet, wait.saturating_sub(t0.elapsed())).await
+            })
+        }
         ("timetravel", [app, cell, rest @ ..]) => {
             let (step, to) = live::travel_args(rest.first().copied(), rest.get(1).copied())?;
             live::travel(&door(&t(app)?, cell)?, cell, (step, to), &user(None), json)
@@ -2833,5 +2880,9 @@ mod tests {
             assert_eq!(secs(Some(bad), zero), Err(format!("--wait {bad}: seconds, 0 or more")), "{bad}");
         }
         assert_eq!(cli("expect no-such-app-0a1b c p eq 1 --wait -1").0, 2, "bad usage, no panic");
+        assert_eq!(cli("expect-ui no-such-app-0a1b p smash").0, 2);
+        assert!(cli("expect-ui no-such-app-0a1b p eq").1.unwrap_err().contains("eq needs a text"));
+        assert!(cli("wait no-such-app-0a1b").1.unwrap_err().contains("say what to wait for"));
+        assert!(cli("wait no-such-app-0a1b --idle").1.unwrap_err().contains("is not running"));
     }
 }

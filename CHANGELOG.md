@@ -193,6 +193,18 @@ version may break things.
   ([relay](docs/examples/relay.md)).
 - `Source::for_server_with(cfg, dirs, http)`: `for_server` serving the
   app's own routes too, without the sync client `for_app_with` holds.
+- `ax expect-ui <app> <path> eq|contains <text>` and `present|absent
+  [--wait s]`: what the running window shows asserted, and waited for, in
+  `TestUi`'s words (`until_text`, `until_contains`), as `ax expect` does
+  for a cell's state; exit 1 with what it shows. A result only a view
+  holds (a `Global`) can be awaited without a sleep.
+- `ax wait <app> --idle [--for ms] [--wait s]`: until the app has nothing
+  in flight (an effect, a `blocking` or `off_thread` job, a commit its
+  views aren't told of) and its window has been still for `--for` ms (no
+  DOM change, no animation that ends running); exit 1 naming what is
+  busy. `aio::effect::busy()` says what the app is still doing, and the
+  window's door answers it (`Aio.busy`).
+- aio-shell's `door` feature: the window's `ui` door alone (`dev` has it).
 
 ### Changed
 
@@ -203,6 +215,9 @@ version may break things.
   window). An app on an aio-rs without the feature builds as before; a
   release build still opens no door, and the message says what to run:
   `ax restart <app>` in its workspace.
+- A handle two showing elements share is refused naming the path of
+  handles that names each alone (`<button> "Fleet" at side/fleet`), in
+  `TestUi`, `ax trigger` and `ax expect-ui` alike.
 - **Breaking: ax's plumbing is out of the API**: `aio_shell`'s `runtime`,
   `splash`, `place`, `prune`, `pidlock`, `macmove`, `oneclick`, `fuses`,
   `swap`, `switches`, `inspect` and `delta`, `html_open`, every
