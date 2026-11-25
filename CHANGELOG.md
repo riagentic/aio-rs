@@ -349,6 +349,12 @@ version may break things.
 
 ### Changed
 
+- A web build is ~8 KB smaller (the template's: 449 KB, from 458 KB): its
+  page scripts as its glue (no indentation or comment lines), the token
+  sheet's comments left out, a declaration's last `;` dropped from the
+  kit's sheet, no second JSON printer (an effect's key) and no standard
+  library sort beside aio-rs's own (the page's saved state). A list's
+  rows keep one hash table per key type, not two.
 - ax reads and writes objects with object 0.39 (from 0.37): one hashbrown
   in the workspace, a crate fewer in ax's graph.
 - **Breaking:** a module named `prelude` beside an `aio::client!(..)`
