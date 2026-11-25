@@ -335,18 +335,22 @@ aio_config::version::Declared.base: (u64, u64)
 aio_config::version::Declared.pinned: Option<u64>
 aio_config::version::Declared.stage: Option<&'static str>
 aio_config::version::declared: fn declared(v: &str) -> Result<Declared, String>
+aio_config::vitals::Counts.degraded: u64
+aio_config::vitals::Counts.frozen: u64
+aio_config::vitals::Counts.warning: u64
+aio_config::vitals::Counts::grade: fn grade(&self, n: u64) -> Status
 aio_config::vitals::Status::Degraded
 aio_config::vitals::Status::Frozen
 aio_config::vitals::Status::Healthy
 aio_config::vitals::Status::Recovered
 aio_config::vitals::Status::Warning
-aio_config::vitals::Tier.degraded: u64
-aio_config::vitals::Tier.frozen: u64
-aio_config::vitals::Tier.warning: u64
-aio_config::vitals::Tier::grade: fn grade(&self, measured: u64) -> Status
+aio_config::vitals::Tier.degraded: std::time::Duration
+aio_config::vitals::Tier.frozen: std::time::Duration
+aio_config::vitals::Tier.warning: std::time::Duration
+aio_config::vitals::Tier::grade: fn grade(&self, ms: u64) -> Status
 aio_config::vitals::Vitals.event_loop: Tier
 aio_config::vitals::Vitals.hints: bool
-aio_config::vitals::Vitals.queue: Tier
+aio_config::vitals::Vitals.queue: Counts
 aio_config::vitals::Vitals.render: Tier
 aio_config::vitals::Vitals.transport: Tier
 aio_config::vitals::Vitals::check: fn check(&self) -> Result<(), String>
@@ -389,6 +393,7 @@ impl Clone for Capabilities
 impl Clone for Client
 impl Clone for ColorScheme
 impl Clone for Config
+impl Clone for Counts
 impl Clone for Css
 impl Clone for Data
 impl Clone for Dev
@@ -436,6 +441,7 @@ impl Copy for BarPosition
 impl Copy for BarStyle
 impl Copy for Budgets
 impl Copy for ColorScheme
+impl Copy for Counts
 impl Copy for Dir
 impl Copy for Durability
 impl Copy for Extras
@@ -471,6 +477,7 @@ impl Debug for Capabilities
 impl Debug for Client
 impl Debug for ColorScheme
 impl Debug for Config
+impl Debug for Counts
 impl Debug for Css
 impl Debug for Data
 impl Debug for Declared
@@ -574,6 +581,7 @@ impl Eq for Capabilities
 impl Eq for Client
 impl Eq for ColorScheme
 impl Eq for Config
+impl Eq for Counts
 impl Eq for Css
 impl Eq for Data
 impl Eq for Dev
@@ -628,6 +636,7 @@ impl Lit for Capabilities
 impl Lit for Client
 impl Lit for ColorScheme
 impl Lit for Config
+impl Lit for Counts
 impl Lit for Css
 impl Lit for Data
 impl Lit for Dev
@@ -682,6 +691,7 @@ impl PartialEq for Capabilities
 impl PartialEq for Client
 impl PartialEq for ColorScheme
 impl PartialEq for Config
+impl PartialEq for Counts
 impl PartialEq for Css
 impl PartialEq for Data
 impl PartialEq for Declared
@@ -738,6 +748,7 @@ impl Serialize for Capabilities
 impl Serialize for Client
 impl Serialize for ColorScheme
 impl Serialize for Config
+impl Serialize for Counts
 impl Serialize for Css
 impl Serialize for Data
 impl Serialize for Dev
@@ -790,6 +801,7 @@ impl StructuralPartialEq for Capabilities
 impl StructuralPartialEq for Client
 impl StructuralPartialEq for ColorScheme
 impl StructuralPartialEq for Config
+impl StructuralPartialEq for Counts
 impl StructuralPartialEq for Css
 impl StructuralPartialEq for Data
 impl StructuralPartialEq for Declared
@@ -845,6 +857,7 @@ impl<'de> Deserialize<'de> for Capabilities
 impl<'de> Deserialize<'de> for Client
 impl<'de> Deserialize<'de> for ColorScheme
 impl<'de> Deserialize<'de> for Config
+impl<'de> Deserialize<'de> for Counts
 impl<'de> Deserialize<'de> for Css
 impl<'de> Deserialize<'de> for Data
 impl<'de> Deserialize<'de> for Dev where Dev: _serde::__private229::Default
@@ -931,6 +944,7 @@ struct aio_config::perf::Budgets
 struct aio_config::perf::Storm
 struct aio_config::security::Security
 struct aio_config::version::Declared
+struct aio_config::vitals::Counts
 struct aio_config::vitals::Tier
 struct aio_config::vitals::Vitals
 trait aio_config::config::Lit

@@ -281,6 +281,8 @@ pub fn start(cfg: &aio::config::Config, version: &str) -> io::Result<Start> {
     };
     // Started by a link (`myapp://…`): the app hears it once it listens.
     open_links(&args);
+    // An update may have added a scheme: the OS's record follows the app.
+    crate::schemes::on_start(cfg);
     // macOS hands links as Apple events to the running `.app`.
     #[cfg(target_os = "macos")]
     if !cfg.app.schemes.is_empty() {

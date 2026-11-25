@@ -148,6 +148,15 @@ pub(crate) fn opens_with(said: &str, exe: &str) -> bool {
     said.to_lowercase().contains(&format!("\"{}\" -- ", exe.to_lowercase()))
 }
 
+/// Whether a start of the installed app `id` at `exe` sets its handler of
+/// a scheme again, by `reg query`'s answer (`said`; `None`: no handler)
+/// (pure): none, or this app's at another path; never another app's.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn rehandle(said: Option<&str>, exe: &str, id: &str) -> bool {
+    let Some(said) = said else { return true };
+    !opens_with(said, exe) && said.to_lowercase().contains(&format!("\\{}.exe\" -- ", id.to_lowercase()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +177,25 @@ mod tests {
         assert!(opens_with(&said, exe), "paths are case-blind");
         assert!(!opens_with("    (Default)    REG_SZ    \"C:\\other\\mail.exe\" \"%1\"", exe), "another app's stays");
         assert!(!opens_with(&said, r"C:\Users\a\AppData\Local\Programs\notes\notes"), "the whole path");
+    }
+
+    #[test]
+    fn a_start_sets_a_missing_handler_or_its_own_at_another_path_never_another_apps() {
+        let exe = r"C:\Users\a\AppData\Local\Programs\notes\notes.exe";
+        let said = |cmd: &str| {
+            format!(
+                "\r\nHKEY_CURRENT_USER\\Software\\Classes\\notes\\shell\\open\\command\r\n    (Default)    REG_SZ    {cmd}\r\n"
+            )
+        };
+        assert!(rehandle(None, exe, "notes"), "none: an update added the scheme");
+        assert!(!rehandle(Some(&said(&format!("\"{exe}\" -- \"%1\""))), exe, "notes"), "this exe's: left alone");
+        let moved = said(r#""D:\Apps\Notes.exe" -- "%1""#);
+        assert!(rehandle(Some(&moved), exe, "notes"), "this app's at another path");
+        assert!(!rehandle(Some(&said(r#""C:\mail\mail.exe" "%1""#)), exe, "notes"), "another app's stays");
+        assert!(
+            !rehandle(Some(&said(r#""C:\x\mynotes.exe" -- "%1""#)), exe, "notes"),
+            "a name that only ends the same"
+        );
     }
 
     #[test]
