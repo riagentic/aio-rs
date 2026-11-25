@@ -456,6 +456,10 @@ mod tests {
     fn a_kept_answer_answers_the_same_call_within_its_ttl() {
         let mut c = Cache::default();
         let key = crate::effect::key("price", &json!(["ABC"])).unwrap();
+        // Compact JSON, as `Value`'s `{}` writes it (keys kept across versions).
+        assert_eq!(key, r#"price:["ABC"]"#);
+        let obj = json!({ "b": 1, "a": [1.5, "x\"y", null] });
+        assert_eq!(crate::effect::key("k", &obj).unwrap(), format!("k:{obj}"));
         c.keep(key, 1000, 500, json!(42));
         assert_eq!(c.get("price", &json!(["ABC"]), None, 1200), Some(json!(42)));
         assert_eq!(c.get("price", &json!(["XYZ"]), None, 1200), None, "other arguments: another call");
