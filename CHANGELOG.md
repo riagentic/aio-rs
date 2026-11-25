@@ -231,6 +231,14 @@ version may break things.
   busy. `aio::effect::busy()` says what the app is still doing, and the
   window's door answers it (`Aio.busy`).
 - aio-shell's `door` feature: the window's `ui` door alone (`dev` has it).
+- A text in `rsx!` takes `format!`'s arguments after it:
+  `span { "By threads ({} per SM)", g.threads_sm }`, as many as its
+  `{}`s take (`{0}`, `{:.*}`, `{:1$}` counted as `format!` does), then
+  named ones (`w = 2`); a `{x}` beside them still reads `x`. A value
+  after a text with no `{}` says to put it in the string
+  (`"{g.threads_sm}"`), where it said `expected a { … } block`.
+- `air::Root::faults()`: what views did wrong that drawing went past (a
+  list's repeated key), taken; `TestPage` and `TestUi` fail on them.
 
 ### Changed
 
@@ -263,6 +271,9 @@ version may break things.
   `machine_errors`, `machine_ends`, `async_mode` and `redacts`. Code that
   named one still compiles; it may break in any release: ask for what it
   needs in an issue.
+- **Breaking: `aio::auth::budget` is gone from the API** (the login
+  doors' per-address budgets: the server's own), and `aio::cost` (what
+  `ax cost` reads) is `#[doc(hidden)]`.
 - **Breaking: every time in `aio.toml` is a span**, one parser
   (`aio::config::span_ms`) for all of them and for `#[every]`, `#[ttl]`
   and `#[long]`, with `ms` as a unit now (`"250ms"`): `[data] coalesce`,
@@ -277,6 +288,11 @@ version may break things.
   `Duration::from_millis(n)` where a number was. A span under a second is
   refused where a second was the least before (`[history] keep`,
   `[data] backup_every`, `[updates] every`…).
+- **Breaking: `[vitals]` times are spans too** (`frozen = "2s"`; a number
+  is ms, as before): `render`, `transport` and `loop`. `[vitals.queue]`
+  stays a count of effects waiting, its own type now: `aio::vitals::Tier`'s
+  fields are `Duration`s (`grade` still takes ms), `Vitals::queue` is an
+  `aio::vitals::Counts`.
 - **Breaking: `TestCells` takes `Duration`s**, as `TestUi` does:
   `advance(d)`, `settle_for(d)` and `budget::<C>(method, d)` (were ms):
   `t.advance(Duration::from_secs(60))`. A step back is `rewind(d)`
@@ -403,6 +419,31 @@ version may break things.
   (no GPU: SwiftShader on a nested display, llvmpipe in a VM) as the app's:
   a render warning and a "1 problem" badge. It is said once at info,
   labelled "software rendering", and never graded.
+- Two rows of a `for` with one key no longer panic the window dead (in
+  every build, with no place of the app's): the window draws every row,
+  the second keyed by its repeat, and says once, through the log and
+  the problem bus (`ui:duplicate-key`), the component and the `for`'s
+  `file:line:col`. A test (`TestUi`, `TestPage`) fails with that message
+  in every build (before: in a debug build only). A server render draws
+  every row too.
+- A borrow error in an `rsx!` hole (`E0716` for a temporary a view keeps,
+  `E0597` for a local a handler borrows) is said at the hole, not over
+  the whole `rsx!`: the code the macro makes for a hole carries its
+  place. The views guide's Common mistakes shows the three shapes and
+  their fix.
+- A saved copy that couldn't be read for a moment (Windows' sharing
+  violation while another program held it, a refused permission, a disk
+  error) was taken as damaged: moved aside as `copy.unreadable-<ms>` and
+  the copy started over, the calls made offline in it no longer shown or
+  sent. Only damaged content is moved aside now; a file that can't be
+  read is tried again for 315 ms, then the open fails naming it, and the
+  file stays as it was.
+- A scheme an update added to `[app] schemes` was never registered on
+  Linux and Windows (only an install registers, and an update swaps the
+  program in place): its links didn't open the app. An installed app now
+  sets what differs at each start, in the background: its menu entry's
+  `MimeType` and `xdg-mime` handlers (Linux), a handler that is missing or
+  this app's at another path (Windows; another app's stays).
 - With `theme = "full"` the look's button reached the kit's quiet ones:
   a `Menu`'s items were centred and shadowed, tabs had a shadow, rounded
   corners and a press nudge. They start from `.aio-plain` now.

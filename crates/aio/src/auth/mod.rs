@@ -21,7 +21,8 @@
 //!
 //! The HTTP doors (`/__aio/auth/*`, with per-address budgets) are served by
 //! `aio::sync` when `Options::auth` is set.
-pub mod budget;
+#[cfg(feature = "server")]
+pub(crate) mod budget;
 #[cfg(feature = "server")]
 pub mod client;
 #[cfg(feature = "oidc")]

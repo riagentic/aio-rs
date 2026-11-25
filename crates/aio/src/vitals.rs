@@ -9,8 +9,9 @@
 //! back is said as recovered. The grading and the hints are pure.
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
+use std::time::Duration;
 
-pub use aio_config::vitals::{Status, Tier, Vitals};
+pub use aio_config::vitals::{Counts, Status, Tier, Vitals};
 
 /// A client's paint, as it reports it.
 #[derive(Clone, Debug, PartialEq)]
@@ -116,13 +117,13 @@ pub fn hint(s: &Snapshot, t: &Vitals, loopback: bool) -> Option<Hint> {
     }
     if let Some((call, ms)) = &lp.last
         && r.status == Status::Frozen
-        && *ms > t.event_loop.degraded
+        && Duration::from_millis(*ms) > t.event_loop.degraded
         && r.last_call.as_ref() == Some(call)
     {
         return Some(Hint {
             cause: format!("The call {call} took {ms} ms"),
             evidence: vec![
-                format!("{call} took {ms} ms (budget: {} ms)", t.event_loop.degraded),
+                format!("{call} took {ms} ms (budget: {} ms)", t.event_loop.degraded.as_millis()),
                 format!("render frozen for {} ms", r.measured),
             ],
             fix: "Make the method cheaper, or move the slow part into an effect.".into(),
@@ -146,7 +147,7 @@ pub fn hint(s: &Snapshot, t: &Vitals, loopback: bool) -> Option<Hint> {
         });
     }
     if tr.status == Status::Frozen && r.status == Status::Healthy && lp.layer.status == Status::Healthy {
-        let evidence = format!("transport frozen: {} ms (threshold: {} ms)", tr.measured, t.transport.frozen);
+        let evidence = format!("transport frozen: {} ms (threshold: {} ms)", tr.measured, t.transport.frozen.as_millis());
         return Some(match loopback {
             true => Hint {
                 cause: format!(
@@ -329,7 +330,9 @@ pub fn doc(snap: &Snapshot, loopback: bool, t: &Vitals) -> serde_json::Value {
     use serde_json::json;
     let word = |s: Status| format!("{s:?}").to_lowercase();
     let layer = |l: &Layer| json!({ "status": word(l.status), "measured": l.measured, "since": l.since });
-    let tier = |t: &Tier| json!({ "degraded": t.degraded, "warning": t.warning, "frozen": t.frozen });
+    let ms = |d: Duration| d.as_millis() as u64;
+    let tier = |t: &Tier| json!({ "degraded": ms(t.degraded), "warning": ms(t.warning), "frozen": ms(t.frozen) });
+    let q = &t.queue;
     let r = &snap.render;
     let h = hint(snap, t, loopback);
     let mut transport = layer(&snap.transport);
@@ -355,7 +358,7 @@ pub fn doc(snap: &Snapshot, loopback: bool, t: &Vitals) -> serde_json::Value {
             "render": tier(&t.render),
             "transport": tier(&t.transport),
             "loop": tier(&t.event_loop),
-            "queue": tier(&t.queue),
+            "queue": { "degraded": q.degraded, "warning": q.warning, "frozen": q.frozen },
         },
     })
 }
@@ -381,7 +384,7 @@ pub fn served(links: &[Link], cells: &[(&str, usize, bool)], t: &Vitals) -> serd
     let clients: Vec<_> = links
         .iter()
         .map(|l| {
-            let frozen = l.gap > t.transport.frozen;
+            let frozen = Duration::from_millis(l.gap) > t.transport.frozen;
             let mut row = json!({
                 "id": l.id,
                 "cell": l.cell,
@@ -451,7 +454,7 @@ impl Drop for Waiting {
 }
 
 /// A call ran: its cell, method and own time.
-pub(crate) fn ran(cell: &'static str, method: &str, took: std::time::Duration) {
+pub(crate) fn ran(cell: &'static str, method: &str, took: Duration) {
     last(|l| {
         l.0 = cell;
         l.1.clear();
@@ -481,7 +484,7 @@ pub fn says(step: Status, lp: &Loop, t: &Vitals) -> String {
     let mut line = format!("loop {what}: {} ms late, {} effects waiting", lp.layer.measured, lp.queue);
     let (snap, loopback) = snapshot();
     let snap = Snapshot { event_loop: lp.clone(), ..snap };
-    let slow = lp.last.as_ref().filter(|(_, ms)| *ms > t.event_loop.degraded);
+    let slow = lp.last.as_ref().filter(|(_, ms)| Duration::from_millis(*ms) > t.event_loop.degraded);
     let h = hint(&snap, t, loopback).map(|h| h.cause).or_else(|| slow.map(|(c, ms)| format!("the call {c} took {ms} ms")));
     if let Some(h) = h.filter(|_| t.hints) {
         line += &format!(" · likely: {h}");
@@ -535,11 +538,19 @@ mod tests {
         );
         assert_eq!(t().event_loop.grade(2500), Status::Frozen);
         assert_eq!(t().check(), Ok(()));
-        let bad = Vitals { render: Tier { degraded: 300, warning: 200, frozen: 2000 }, ..t() };
+        let ms = Duration::from_millis;
+        let bad = Vitals { render: Tier { degraded: ms(300), warning: ms(200), frozen: ms(2000) }, ..t() };
         assert_eq!(bad.check().unwrap_err(), "aio.toml: [vitals.render] needs degraded < warning < frozen");
         let v: Vitals = toml::from_str("hints = false\n[loop]\ndegraded = 10\nwarning = 20\nfrozen = 30").unwrap();
-        assert_eq!((v.hints, v.event_loop.frozen, v.queue), (false, 30, t().queue), "the rest stay aio's");
+        assert_eq!((v.hints, v.event_loop.frozen, v.queue), (false, ms(30), t().queue), "the rest stay aio's");
         let cfg = |more: &str| crate::config::Config::parse(&format!("[app]\nid = \"t\"\n{more}"));
+        // A time takes a span, as every other in aio.toml; a number is ms, as before.
+        let spans = cfg("[vitals.transport]\ndegraded = \"250ms\"\nwarning = 1000\nfrozen = \"5s\"").unwrap().vitals;
+        assert_eq!(spans.transport, Tier { degraded: ms(250), warning: ms(1000), frozen: ms(5000) });
+        assert_eq!(spans.transport.grade(4999), Status::Warning);
+        assert!(cfg("[vitals.loop]\ndegraded = \"1.5s\"\nwarning = \"2s\"\nfrozen = \"3s\"").unwrap_err().contains("1.5s"));
+        // A queue is a count of effects, never a span.
+        assert!(cfg("[vitals.queue]\ndegraded = \"1s\"\nwarning = 2\nfrozen = 3").is_err());
         assert_eq!(cfg("[vitals.queue]\ndegraded = 1\nwarning = 2\nfrozen = 3").unwrap().vitals.queue.frozen, 3);
         assert!(cfg("[vitals.queue]\ndegraded = 3\nwarning = 2\nfrozen = 1").unwrap_err().contains("[vitals.queue]"));
         // The server's own probe grades how late its tick is.

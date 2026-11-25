@@ -265,16 +265,28 @@ fn gate_2_hooks_called_in_another_order_on_a_rerun_fail() {
     assert!(e.contains("another order"), "{e}");
 }
 
-#[test]
-fn gate_2_two_rows_with_one_key_fail() {
-    fn app() -> View {
-        let rows = signal(|| vec![1, 2]);
-        rsx! {
-            button { "data-t": "dup", onclick: move |_| rows.set(vec![1, 1]), "dup" }
-            for r in rows.get() { p { key: r, "{r}" } }
-        }
+#[component]
+fn Dups() -> View {
+    let rows = signal(|| vec![1, 2]);
+    rsx! {
+        button { "data-t": "dup", onclick: move |_| rows.set(vec![1, 1, 2]), "dup" }
+        button { "data-t": "turn", onclick: move |_| rows.set(vec![2, 1, 1]), "turn" }
+        ul { "data-t": "list", for r in rows.get() { li { key: r, "{r}" } } }
     }
-    let mut p = TestPage::mount(app);
-    let e = says(std::panic::AssertUnwindSafe(move || p.click("dup")));
+}
+const DUPS_FOR: u32 = line!() - 3;
+
+/// Two rows with one key fail a test, saying the component and where its
+/// `for` is; the window draws on with every row (no dead window).
+#[test]
+fn gate_2_two_rows_with_one_key_fail_a_test_saying_where_and_draw_on() {
+    let mut p = TestPage::mount(|| rsx! { Dups {} });
+    let e = says(std::panic::AssertUnwindSafe(|| p.click("dup")));
     assert!(e.contains("has the key of a row before it"), "{e}");
+    assert!(e.contains(&format!("the `for` at {}:{DUPS_FOR}:", file!().replace('\\', "/"))), "{e}");
+    assert!(e.contains("in `Dups`"), "{e}");
+    assert_eq!(p.text("list"), "112", "every row drawn");
+    // Said once per list: the window goes on and follows its state.
+    p.click("turn");
+    assert_eq!(p.text("list"), "211");
 }

@@ -227,6 +227,9 @@ async fn pump(
         }
         let uncaught = root.uncaught();
         assert!(uncaught.is_empty(), "a view failed and no ErrorBoundary is above it: {}", uncaught.join("; "));
+        // A fault the window draws past (a list's repeated key) fails a test.
+        let faults = root.faults();
+        assert!(faults.is_empty(), "{}", faults.join("; "));
         tokio::select! {
             f = from_page.recv() => match f {
                 Some(f) => _ = root.event(&f),

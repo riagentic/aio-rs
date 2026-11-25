@@ -100,6 +100,8 @@ struct Dom {
     /// The mounted root's owner and the errors no boundary caught.
     root: Option<Owner>,
     uncaught: Vec<String>,
+    /// What views did wrong that drawing went past (a list's repeated key).
+    faults: Vec<String>,
     /// A server root's page ([`Root::serving`]): no edits go out.
     server: Option<Box<dyn Serve>>,
 }
@@ -1308,6 +1310,7 @@ struct Placed {
 #[doc(hidden)]
 pub fn each<I, K>(
     at: u32,
+    site: &'static crate::hot::At,
     items: impl Fn() -> Vec<I> + 'static,
     key: impl Fn(&I) -> K + 'static,
     row: impl Fn(I) -> View + 'static,
@@ -1316,12 +1319,17 @@ pub fn each<I, K>(
     K: Hash + Eq + Clone + 'static,
 {
     // The closures' signatures from here; the keys' work once per item type.
-    each_dyn(at, Box::new(items), Box::new(key), Box::new(row))
+    each_dyn(at, site, Box::new(items), Box::new(key), Box::new(row))
 }
 
 #[allow(clippy::type_complexity)]
-fn each_dyn<I, K>(at: u32, items: Box<dyn Fn() -> Vec<I>>, key: Box<dyn Fn(&I) -> K>, row: Box<dyn Fn(I) -> View>)
-where
+fn each_dyn<I, K>(
+    at: u32,
+    site: &'static crate::hot::At,
+    items: Box<dyn Fn() -> Vec<I>>,
+    key: Box<dyn Fn(&I) -> K>,
+    row: Box<dyn Fn(I) -> View>,
+) where
     I: PartialEq + Clone + 'static,
     K: Hash + Eq + Clone + 'static,
 {
@@ -1329,11 +1337,15 @@ where
         true => crate::reactive::probe(&items),
         false => (vec![], true),
     };
+    // The component whose view holds the list, for what a fault says.
+    let comp = crate::tree::current_name();
     if !read {
         // Each row once, in order, under the list's owner (nothing re-runs).
         let mut seen = std::collections::HashSet::with_capacity(first.len());
         for (i, item) in first.into_iter().enumerate() {
-            unique(i, seen.insert(key(&item)), std::any::type_name::<K>());
+            if !seen.insert(key(&item)) {
+                repeated(site, comp, i, std::any::type_name::<K>());
+            }
             let r = place(row(item));
             dom(|d| d.insert(at, r));
         }
@@ -1341,18 +1353,30 @@ where
     }
     let outer = current_owner();
     let placed = placed_rows();
-    // Row `i`'s key and item, as `placed[i]`.
-    let mut rows: Vec<(K, I)> = vec![];
+    // Row `i`'s key (with its repeat: 0, the key's first row) and item, as `placed[i]`.
+    let mut rows: Vec<((K, u32), I)> = vec![];
     render(move || {
         let next = items();
         untrack(|| {
-            let mut by_key: HashMap<K, usize> = rows.iter().enumerate().map(|(i, (k, _))| (k.clone(), i)).collect();
+            let mut by_key: HashMap<(K, u32), usize> =
+                rows.iter().enumerate().map(|(i, (k, _))| (k.clone(), i)).collect();
             let mut src = Vec::with_capacity(next.len());
             let mut seen = std::collections::HashSet::with_capacity(next.len());
+            // A key's repeats so far (none in a right list: no allocation).
+            let mut repeats: HashMap<K, u32> = HashMap::new();
             let old = std::mem::take(&mut rows);
             for (at, item) in next.into_iter().enumerate() {
                 let k = key(&item);
-                unique(at, seen.insert(k.clone()), std::any::type_name::<K>());
+                let n = match seen.insert(k.clone()) {
+                    true => 0,
+                    false => {
+                        repeated(site, comp, at, std::any::type_name::<K>());
+                        let n = repeats.entry(k.clone()).or_default();
+                        *n += 1;
+                        *n
+                    }
+                };
+                let k = (k, n);
                 let kept = by_key.remove(&k).filter(|i| old[*i].1 == item);
                 src.push(kept.map_or(-1, |i| i as isize));
                 rows.push((k, item));
@@ -1362,14 +1386,26 @@ where
     });
 }
 
-/// Row `at`'s key is not one a row before it has (`new`).
-fn unique(at: usize, new: bool, key: &str) {
-    if !new {
-        panic!(
-            "air: row {at} of a list has the key of a row before it (a `{key}` key): keyed siblings must each have a \
-             unique key (an id, not a place or a name)"
-        );
+/// Row `row` of the list at `site` (in component `comp`) has the key of a
+/// row before it: said once per list site, and a fault of the root (a test
+/// fails on it). The row is drawn all the same, keyed by its repeat (not
+/// generic: one copy for all lists): every item shows, where dropping it
+/// would hide data and a panic would leave the window dead.
+#[cold]
+fn repeated(site: &'static crate::hot::At, comp: &str, row: usize, key: &str) {
+    thread_local!(static SAID: RefCell<std::collections::HashSet<usize>> = RefCell::default());
+    if !SAID.with_borrow_mut(|s| s.insert(site as *const _ as usize)) {
+        return;
     }
+    let comp = if comp.is_empty() { String::new() } else { format!(" in `{comp}`") };
+    let msg = format!(
+        "air: row {row} of the `for` at {}:{}:{}{comp} has the key of a row before it (a `{key}` key): keyed \
+         siblings must each have a unique key (an id, not a place or a name). Drawn anyway, keyed by its repeat: \
+         its state may follow another row's when the list changes",
+        site.file, site.line, site.col
+    );
+    crate::warn("ui:duplicate-key", &msg);
+    dom(|d| d.faults.push(msg));
 }
 
 /// A list's rows in the page; the list's owner ending ends them (they
@@ -1987,6 +2023,13 @@ impl Root {
     /// The errors no boundary caught (each also said on stderr), taken.
     pub fn uncaught(&self) -> Vec<String> {
         in_root(self.id, || dom(|d| std::mem::take(&mut d.uncaught)))
+    }
+
+    /// What views did wrong that drawing went past (a list's repeated key:
+    /// its rows are all drawn, said once with where its `for` is), taken.
+    /// A test fails on them; an app's window draws on.
+    pub fn faults(&self) -> Vec<String> {
+        in_root(self.id, || dom(|d| std::mem::take(&mut d.faults)))
     }
 }
 
