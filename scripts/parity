@@ -155,7 +155,8 @@ def main():
     run(["cargo", "build", "-q", "--locked", "-p", "aio-rs-cli"], ROOT, env)
     ax = here / "debug" / ("ax.exe" if WINDOWS else "ax")
     # The app's builds in one folder kept between runs (its libraries built once).
-    env["CARGO_TARGET_DIR"] = str(pathlib.Path(os.environ.get("AIO_PARITY_TARGET") or ROOT / "target" / "parity"))
+    # Beside ax's own build: a CARGO_TARGET_DIR set for it holds the app's too.
+    env["CARGO_TARGET_DIR"] = str(pathlib.Path(os.environ.get("AIO_PARITY_TARGET") or here / "parity"))
     (ROOT / "target").mkdir(exist_ok=True)
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="aio-parity-", dir=ROOT / "target"))
     try:
