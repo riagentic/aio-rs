@@ -8,7 +8,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-[dependencies]
+# Only the held-arrow harness (`hold`, Unix sockets) runs an aio app; `gen`
+# writes source text.
+[target.'cfg(unix)'.dependencies]
 aio = { workspace = true, features = ["kit"] }
 air = { workspace = true }
 
