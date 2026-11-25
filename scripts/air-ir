@@ -21,10 +21,14 @@ subprocess.run(["cargo", "run", "-q", "--release", "-p", "air-bench", "--bin", "
 crate = os.path.join(work, "air-50")
 target = os.path.join(work, "target")
 env = dict(os.environ, CARGO_TARGET_DIR=target)
-for f in glob.glob(os.path.join(target, "debug", "deps", "views-*.ll")):
+# Where cargo puts the crate's IR: `deps/`, or its own folder in cargo's newer build layout.
+emitted = lambda: glob.glob(os.path.join(target, "debug", "**", "views-*.ll"), recursive=True)
+for f in emitted():
     os.remove(f)
 subprocess.run(["cargo", "rustc", "-q", "--lib", "--", "--emit=llvm-ir"], check=True, cwd=crate, env=env)
-lines = sum(sum(1 for _ in open(f)) for f in glob.glob(os.path.join(target, "debug", "deps", "views-*.ll")))
+lines = sum(sum(1 for _ in open(f)) for f in emitted())
+if lines == 0:
+    sys.exit(f"air-ir: no IR of the views crate under {target}: nothing measured")
 per = lines // 50
 print(f"air-ir: {lines} lines of LLVM IR, {per} a view (limit {LIMIT})")
 if per > LIMIT:
