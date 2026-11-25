@@ -342,6 +342,12 @@ version may break things.
 
 ### Fixed
 
+- A scheme an update added to `[app] schemes` was never registered on
+  Linux and Windows (only an install registers, and an update swaps the
+  program in place): its links didn't open the app. An installed app now
+  sets what differs at each start, in the background: its menu entry's
+  `MimeType` and `xdg-mime` handlers (Linux), a handler that is missing or
+  this app's at another path (Windows; another app's stays).
 - A `TestUi` step waits for the files its event reads: a form's submit
   read its files as the event went out, and a click that submitted it
   could end before they were read (the submit unheard on a loaded

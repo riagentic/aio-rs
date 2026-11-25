@@ -165,6 +165,7 @@ mod presplash;
 pub mod prune;
 #[doc(hidden)]
 pub mod runtime;
+mod schemes;
 #[doc(hidden)]
 pub mod splash;
 mod stderr;
