@@ -136,6 +136,10 @@ def built_deb(ax_bin):
     env["CARGO_TARGET_DIR"] = str(pathlib.Path(env.get("CARGO_TARGET_DIR") or ROOT / "target") / "mutants-app")
     subprocess.run([ax_bin, "create", APP, "--aio", ROOT], cwd=work, env=env, check=True, capture_output=True)
     shutil.copy(ROOT / "Cargo.lock", work / APP / "Cargo.lock")
+    # A package needs a maintainer: ax create leaves it to the app.
+    toml = work / APP / "aio.toml"
+    text = toml.read_text().replace('# maintainer = "Name <email>"', 'maintainer = "aio-rs <262168319+riagentic@users.noreply.github.com>"', 1)
+    toml.write_text(text)
     subprocess.run([ax_bin, "build", APP, "--deb"], cwd=work / APP, env=env, check=True, capture_output=True)
     debs = list((work / APP / "dist").glob("*.deb"))
     if len(debs) != 1:
