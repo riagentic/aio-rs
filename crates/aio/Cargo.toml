@@ -86,8 +86,16 @@ compat = []
 # `ax dev`: cell methods hot-patched (through `aio-shell/dev`); a release has none of it.
 dev = ["dep:aio-hotpatch", "air?/dev", "aio-config/dev"]
 # `aio::secrets`: the OS's secret store (Keychain, Secret Service, DPAPI,
-# Android's Keystore), on what each OS already has: no crate.
-secrets = ["windows-sys/Win32_Security_Cryptography"]
+# Android's Keystore; in a page a passkey's PRF and WebCrypto), on what each
+# OS and browser already has: no crate.
+secrets = [
+    "windows-sys/Win32_Security_Cryptography",
+    "web-sys/CredentialCreationOptions",
+    "web-sys/CredentialRequestOptions",
+    "web-sys/CredentialsContainer",
+    "web-sys/CryptoKey",
+    "web-sys/SubtleCrypto",
+]
 # `aio::imbl`: persistent collections, so a call's copy of big state is O(1).
 imbl = ["dep:imbl"]
 # The `updates` cell (`aio::update::Updates`, `share`): what an app's UI shows

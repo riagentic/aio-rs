@@ -105,6 +105,16 @@ version may break things.
   `spawn_forever` + `off_thread`, read by a test with `ui.read(&GLOBAL)`
   ([views](docs/ui/views.md#app-lifetime-state-that-isnt-saved)); `ax
   agent ui` says both.
+- `aio::secrets` in a page (`ax build --web`): the same `set`, `get`,
+  `delete` and `set_biometric`, on web standards only. The first `set`
+  makes the app's passkey; each call derives the secret's AES-GCM key from
+  the passkey's PRF (WebAuthn's `prf` extension, user verification
+  required) with HKDF in WebCrypto, and `localStorage` keeps only the
+  ciphertext. A browser or passkey without PRF, or a page not on https or
+  on an IP, is `Unsupported` saying so: nothing falls back to plain or a
+  key kept beside it. Before, every call in a page was `Unsupported`. An
+  app without `secrets` builds none of it
+  ([keychain](docs/auth/keychain.md#the-web-a-passkey)).
 - `aio::kit::NavList` and `NavItem`: a sidebar's rail of pages, the
   current one `aria-current="page"` (marked by a bar and weight, not
   colour alone), one tab stop with ↑/↓, Home and End moving focus and
