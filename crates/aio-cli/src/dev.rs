@@ -382,7 +382,7 @@ fn pkg_with(meta: &serde_json::Value, name: &str, kind: &str) -> Option<Pkg> {
     let pkg_name = pkg["name"].as_str().unwrap_or(name).to_string();
     let version = pkg["version"].as_str().unwrap_or("0.0.0").to_string();
     let dev_feature = shell_dev_feature(pkg);
-    let door_feature = shell_door_feature(meta, dev_feature.as_deref());
+    let door_feature = shell_door_feature(meta, pkg, dev_feature.as_deref());
     let cfg = aio_config::config::find(&dirs[0])
         .and_then(|f| std::fs::read_to_string(f).ok())
         .and_then(|t| aio::config::Config::parse(&t).ok());
@@ -401,10 +401,27 @@ pub fn shell_dev_feature(pkg: &serde_json::Value) -> Option<String> {
 }
 
 /// The `door` feature beside `dev` (`aio-shell/door`), when the aio-rs-shell
-/// `meta` resolved has one (pure): one before aio-rs 0.5.0 hasn't.
-pub fn shell_door_feature(meta: &serde_json::Value, dev: Option<&str>) -> Option<String> {
-    let has = |p: &serde_json::Value| p["name"] == "aio-rs-shell" && p["features"].get("door").is_some();
-    meta["packages"].as_array()?.iter().any(has).then(|| Some(format!("{}/door", dev?.strip_suffix("/dev")?)))?
+/// package `pkg` builds with has one ([`has_door`]; reads its manifest, or
+/// the workspace's Cargo.lock).
+fn shell_door_feature(meta: &serde_json::Value, pkg: &serde_json::Value, dev: Option<&str>) -> Option<String> {
+    let shell = dev?.strip_suffix("/dev")?;
+    let dep = pkg["dependencies"].as_array()?.iter().find(|d| d["name"] == "aio-rs-shell" && d["kind"].is_null())?;
+    let read = |p: PathBuf| std::fs::read_to_string(p).ok();
+    let manifest = dep["path"].as_str().and_then(|p| read(Path::new(p).join("Cargo.toml")));
+    let lock = meta["workspace_root"].as_str().and_then(|w| read(Path::new(w).join("Cargo.lock")));
+    has_door(manifest.as_deref(), lock.as_deref()).then(|| format!("{shell}/door"))
+}
+
+/// Whether the app's aio-rs-shell has the `door` feature (pure): a path
+/// dependency's own manifest (a checkout) says; else the version
+/// Cargo.lock holds, 0.5.0 on (cargo refuses a feature a package lacks).
+pub fn has_door(manifest: Option<&str>, lock: Option<&str>) -> bool {
+    match manifest {
+        Some(m) => m.lines().any(|l| l.trim_start().starts_with("door = ")),
+        None => crate::pin::locked(lock.unwrap_or_default()).iter().any(|l| {
+            l.name == "aio-rs-shell" && aio::update::parse_version(&l.version).is_some_and(|(v, _)| v >= vec![0, 5, 0])
+        }),
+    }
 }
 
 /// Binary `name` of a debug build into `target` ([`layout`]).
@@ -2239,12 +2256,15 @@ mod tests {
         let dev_only = pkg(serde_json::json!([{ "name": "aio-rs-shell", "rename": null, "kind": "dev" }]));
         assert_eq!(shell_dev_feature(&dev_only), None);
         // The window's door: only from an aio-rs-shell that has the feature.
-        let meta = |features: serde_json::Value| serde_json::json!({ "packages": [{ "name": "aio-rs-shell", "features": features }] });
-        let now = meta(serde_json::json!({ "door": [], "dev": ["door"] }));
-        assert_eq!(shell_door_feature(&now, Some("aio-shell/dev")).as_deref(), Some("aio-shell/door"));
-        assert_eq!(shell_door_feature(&now, None), None, "no window shell");
-        let old = meta(serde_json::json!({ "dev": [] }));
-        assert_eq!(shell_door_feature(&old, Some("aio-shell/dev")), None, "aio-rs before 0.5.0: cargo would refuse it");
+        let lock = |v: &str| {
+            format!("[[package]]\nname = \"aio-rs-shell\"\nversion = \"{v}\"\nsource = \"git+https://x?tag=v{v}#c\"\n")
+        };
+        assert!(has_door(None, Some(&lock("0.5.0"))) && has_door(None, Some(&lock("0.6.1"))));
+        assert!(!has_door(None, Some(&lock("0.4.2"))), "aio-rs before 0.5.0: cargo would refuse the feature");
+        assert!(!has_door(None, None), "no lock yet: as before");
+        let checkout = "[features]\ndev = [\"door\", \"dep:aio-hotpatch\"]\ndoor = []\n";
+        assert!(has_door(Some(checkout), Some(&lock("0.4.2"))), "a checkout: its manifest, whatever its version");
+        assert!(!has_door(Some("[features]\ndev = []\n"), Some(&lock("0.5.0"))));
     }
 
     #[test]
