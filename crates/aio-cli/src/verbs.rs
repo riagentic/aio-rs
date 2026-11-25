@@ -855,12 +855,16 @@ pub fn verb_help(v: &Verb) -> String {
         (true, false) => "no flags of its own".into(),
         _ => own.join(" "),
     };
+    // `dev` hands every other flag after <app> to the app: its --json is the app's.
+    let also = match v.name {
+        "dev" => "--help --version (any other flag after <app>, --json and --text too, goes to the app)".into(),
+        _ => GLOBAL.join(" "),
+    };
     format!(
-        "ax {}\n\n{}\n\n{} takes {takes}; every verb also: {}\n{FOOT}",
+        "ax {}\n\n{}\n\n{} takes {takes}; every verb also: {also}\n{FOOT}",
         v.usage,
         v.about.lines().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n"),
         v.name,
-        GLOBAL.join(" ")
     )
 }
 
@@ -915,12 +919,15 @@ fn read_one(args: &[String], here: &dyn Fn() -> Result<String, String>) -> Resul
         return Ok(Ask::Say(verb_help(verb)));
     }
     if verb.name == "help" {
-        let every = args[1..own].iter().any(|a| a == "--commands" || a == "--all");
-        return match args.get(1) {
+        // Its words, but the output flags every verb takes (help is text).
+        let words: Vec<&str> =
+            args[1..own].iter().map(String::as_str).filter(|a| !["--json", "--text", "--quiet"].contains(a)).collect();
+        let every = words.iter().any(|a| *a == "--commands" || *a == "--all");
+        return match words.first() {
             None => Ok(Ask::Say(help())),
-            Some(_) if every && own == 2 => Ok(Ask::Say(commands())),
+            Some(_) if every && words.len() == 1 => Ok(Ask::Say(commands())),
             Some(_) => {
-                let name = args[1..own].join(" ");
+                let name = words.join(" ");
                 find(&name).map(|v| Ask::Say(verb_help(v))).ok_or_else(|| format!("no verb `{name}`"))
             }
         };

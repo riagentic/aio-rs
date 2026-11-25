@@ -334,6 +334,13 @@ version may break things.
 
 ### Fixed
 
+- `ax logs --text` (and `--quiet`) were refused (`no flag --text`): the
+  verb read its flags again past the gate every verb shares; `ax help
+  <verb> --json` read `--json` as a verb. A test runs each verb's parser
+  with `--json` and `--text`; `ax help dev` says that its flags after
+  `<app>`, `--json` too, go to the app.
+- `ax expect … --wait -1` (or `inf`, `1e30`) panicked; it is bad usage
+  now (exit 2).
 - A `TestUi` step waits for the files its event reads: a form's submit
   read its files as the event went out, and a click that submitted it
   could end before they were read (the submit unheard on a loaded

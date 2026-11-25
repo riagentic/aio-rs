@@ -604,7 +604,9 @@ pub fn test_shape(i: &Issue) -> bool {
     i.area == "migrate" && i.message.contains("TestUi")
 }
 
-pub fn main(args: &[String]) -> ExitCode {
+/// `ax lint`'s words read (pure): `--from`'s value, the switches, the dir
+/// (at most one); `Err`: what is wrong with them.
+pub fn read_args(args: &[String]) -> Result<(Option<&str>, Vec<&str>, Vec<&str>), String> {
     // `--from v` (or `--from=v`) takes a value; the rest are switches or the dir.
     let mut from = None;
     let mut rest: Vec<&str> = vec![];
@@ -624,9 +626,19 @@ pub fn main(args: &[String]) -> ExitCode {
             .iter()
             .map(|f| format!("unknown flag {f}"))
             .chain((pos.len() > 1).then(|| "one dir at most".into()));
-        eprintln!("ax lint: {}\n\n{USAGE}", what.collect::<Vec<_>>().join(", "));
-        return ExitCode::from(2);
+        return Err(what.collect::<Vec<_>>().join(", "));
     }
+    Ok((from, flags, pos))
+}
+
+pub fn main(args: &[String]) -> ExitCode {
+    let (from, flags, pos) = match read_args(args) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("ax lint: {e}\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
     let has = |f: &str| flags.contains(&f);
     if has("--help") || has("-h") {
         println!("{USAGE}");

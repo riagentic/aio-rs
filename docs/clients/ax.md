@@ -133,7 +133,8 @@ is refused with exit 2 and the right usage, never guessed or dropped:
   `AIORT_OUTPUT=text` or `json` sets it for every run. The verbs whose
   answer is a document or a stream stay as they are in a pipe: `dev`,
   `lint`, `agent`, `testgen`, `record`, `peer`, `snapshot`, `logs`,
-  `help`, `version`.
+  `help`, `version`. Every verb takes `--json` and `--text` but `ax dev`,
+  which hands every flag after `<app>` but its own to the app.
 - With `--json` (or a pipe), every verb prints one object: `{"ok":true,"value":…}` when
   the answer is JSON (a state, a call's answer, a list), `{"ok":true,
   "text":"…"}` when it is text, `{"ok":false,"error":"…","exit":1}` when it
