@@ -91,13 +91,21 @@ fn is_scheme(s: &str) -> bool {
         && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+-.".contains(&b))
 }
 
-/// Chromium's spellchecker fetches a dictionary it lacks (Linux; Windows,
-/// a language the OS has none for) from Google's CDN, `redirector.gvt1.com`,
-/// sent on to another `*.gvt1.com` host: only when the app's `[capabilities]
-/// network` reaches both. `None` (not an app): never. Pure.
-pub(crate) fn fetches_dictionaries(network: Option<&[String]>) -> bool {
-    network
-        .is_some_and(|n| ["redirector.gvt1.com", "cdn.gvt1.com"].iter().all(|h| aio::capabilities::allows(n, h, None)))
+/// `Window { spellcheck }` (unset: `os`) for an app holding to `network`
+/// (`None`: not an app, only the value is checked), as the runtime takes
+/// it: whether it checks, and where Chromium fetches a dictionary it lacks:
+/// its own (`null`: Google's CDN), the app's folder, or no host (`data:,`).
+/// Pure.
+fn spellcheck(v: Option<&str>, network: Option<&[String]>) -> Result<(bool, Value), String> {
+    let v = v.unwrap_or("os");
+    if let Some(e) = aio::config::spellcheck_refused(v, network.unwrap_or(&["*".to_string()])) {
+        return Err(e.replace("[app] spellcheck", "Window { spellcheck }"));
+    }
+    Ok(match v {
+        "google" => (true, Value::Null),
+        "os" | "off" => (v == "os", "data:,".into()),
+        url => (true, url.into()),
+    })
 }
 
 /// `shell.json`: what the runtime allows, checked. A preload name, or a
@@ -119,6 +127,7 @@ pub(crate) fn shell_json(win: &Window) -> io::Result<String> {
     if let Some(s) = win.web.schemes.iter().find(|s| !is_scheme(s)) {
         return Err(bad(format!("Web {{ schemes }}: {s:?} is not a scheme's name, like \"data\" (no `:`)")));
     }
+    let (spell, dictionaries) = spellcheck(win.spellcheck, aio::capabilities::network().as_deref()).map_err(bad)?;
     let names: Vec<&str> = win.web.preloads.iter().map(|(n, _)| *n).collect();
     Ok(json!({
         "browser": win.web.browser,
@@ -135,7 +144,8 @@ pub(crate) fn shell_json(win: &Window) -> io::Result<String> {
         "keys": { "reload": win.keys.reload, "print": win.keys.print },
         "showCapMs": win.show_cap_ms.unwrap_or(5000),
         "frame": win.chrome == crate::Chrome::Standard,
-        "dictionaries": fetches_dictionaries(aio::capabilities::network().as_deref()),
+        "spellcheck": spell,
+        "dictionaries": dictionaries,
     })
     .to_string())
 }
@@ -309,14 +319,28 @@ mod tests {
     }
 
     #[test]
-    fn spellcheck_dictionaries_come_from_google_only_when_the_app_reaches_its_cdn() {
-        let n = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(!fetches_dictionaries(None), "not an app");
-        assert!(!fetches_dictionaries(Some(&n(&[]))));
-        assert!(!fetches_dictionaries(Some(&n(&["redirector.gvt1.com"]))), "it redirects to another host");
-        assert!(!fetches_dictionaries(Some(&n(&["lan", "api.example.org"]))));
-        assert!(fetches_dictionaries(Some(&n(&["*.gvt1.com"]))));
-        assert!(fetches_dictionaries(Some(&n(&["*"]))));
+    fn the_spellchecker_fetches_from_where_the_app_says_or_from_no_host() {
+        let none: &[String] = &[];
+        assert_eq!(spellcheck(None, Some(none)), Ok((true, json!("data:,"))), "the OS's, nothing fetched");
+        assert_eq!(spellcheck(Some("os"), Some(none)), Ok((true, json!("data:,"))));
+        assert_eq!(spellcheck(Some("off"), Some(none)), Ok((false, json!("data:,"))));
+        assert_eq!(spellcheck(Some("google"), None), Ok((true, Value::Null)), "Chromium's own, not an app");
+        let e = spellcheck(Some("google"), Some(none)).unwrap_err();
+        assert!(
+            e.starts_with("Window { spellcheck } \"google\" reaches redirector.gvt1.com: add \"*.gvt1.com\""),
+            "{e}"
+        );
+        let gvt1 = ["*.gvt1.com".to_string()];
+        assert_eq!(spellcheck(Some("google"), Some(&gvt1)), Ok((true, Value::Null)));
+        let own = "https://dl.example.org/dictionaries/";
+        assert_eq!(spellcheck(Some(own), Some(&["dl.example.org".to_string()])), Ok((true, json!(own))));
+        assert!(spellcheck(Some(own), Some(&gvt1)).is_err());
+        let e = spellcheck(Some("https://dl.example.org/d"), None).unwrap_err();
+        assert!(e.starts_with("Window { spellcheck } \"https://dl.example.org/d\" is \"os\""), "{e}");
+        let mut cfg = aio::config::Config::default();
+        assert_eq!(Window::of(&cfg).spellcheck, Some("os"));
+        cfg.app.spellcheck = "off".into();
+        assert_eq!(Window::of(&cfg).spellcheck, Some("off"), "[app] spellcheck reaches the window");
     }
 
     #[test]
@@ -328,7 +352,7 @@ mod tests {
         assert_eq!((v["preloads"].clone(), v["schemes"].clone()), (json!([]), json!([])));
         assert_eq!((v["allow"].clone(), v["confirmUnload"].clone()), (json!([]), json!(false)));
         assert_eq!(v["keys"], json!({ "reload": false, "print": false }), "the shell keeps its keys");
-        assert_eq!(v["dictionaries"], false, "no spellcheck dictionary from the internet");
+        assert_eq!(v["dictionaries"], "data:,", "no spellcheck dictionary from the internet");
         static PRE: [(&str, &str); 2] = [("dapp/preload.js", "1"), ("reader.js", "2")];
         let win = Window {
             web: Web {
