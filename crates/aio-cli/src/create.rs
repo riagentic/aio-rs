@@ -644,6 +644,14 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# A CPU-heavy crate of your own (a parser, a simulator, a codec) runs 10-30x
+# slower unoptimized: optimize it even in debug builds. `dev` covers every
+# debug build ax makes (desktop-dev inherits it); release's "z" is for size.
+# [profile.dev.package.my-crate]
+# opt-level = 3
+# [profile.release.package.my-crate]
+# opt-level = 3
+
 # Every debug build ax makes: one copy of the libraries (ax dev, test, lint).
 # Its Rust runs as the release build's (no debug assertions, no overflow
 # checks): what you try under ax dev is what people get.
@@ -1009,6 +1017,12 @@ mod tests {
                 ),
                 "ax dev's profile"
             );
+            // The heavy-crate example, uncommented, is valid and in place.
+            let on = get("Cargo.toml").replace("# [profile.", "[profile.").replace("# opt-level = 3", "opt-level = 3");
+            let on: toml::Table = toml::from_str(&on).unwrap_or_else(|e| panic!("{t}: {e}"));
+            for p in ["dev", "release"] {
+                assert_eq!(on["profile"][p]["package"]["my-crate"]["opt-level"].as_integer(), Some(3), "{t} {p}");
+            }
             assert_eq!(get("CLAUDE.md"), "@AGENTS.md\n", "aio: every template's CLAUDE.md imports AGENTS.md");
             let docs = format!("https://github.com/riagentic/aio-rs/blob/{tag}/docs");
             for f in ["AGENTS.md", "README.md", "aio.toml"] {

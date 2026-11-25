@@ -193,6 +193,10 @@ version may break things.
   ([relay](docs/examples/relay.md)).
 - `Source::for_server_with(cfg, dirs, http)`: `for_server` serving the
   app's own routes too, without the sync client `for_app_with` holds.
+- The template's `Cargo.toml` shows how to optimize a CPU-heavy crate of
+  the app's own in debug builds (`[profile.dev.package.<crate>] opt-level
+  = 3`, which every debug profile of ax inherits): unoptimized, it ran
+  10-30x slower under `ax dev`.
 
 ### Changed
 
