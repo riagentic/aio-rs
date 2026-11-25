@@ -382,3 +382,16 @@ fn what_runs_beside_the_app_leaves_its_markup_the_servers() {
     assert!(RAN.get(), "it runs");
     assert_eq!(page.markup(), render_to_string(app).unwrap(), "the page holds the app alone");
 }
+
+/// A list with a repeated key renders every row on the server, as the
+/// window does: said once, never a failed page.
+#[test]
+fn a_list_with_a_repeated_key_renders_every_row() {
+    fn app() -> View {
+        rsx! { ul { for i in [1, 1, 2] { li { key: i, "{i}" } } } }
+    }
+    assert_eq!(
+        air::ssr::render_to_string(app).unwrap(),
+        "<!----><ul><li>1</li><li>1</li><li>2</li><!----></ul><!---->"
+    );
+}

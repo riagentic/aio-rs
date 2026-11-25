@@ -460,15 +460,15 @@ fn duplicated() -> View {
     }
 }
 
-/// aio's duplicate-key tripwire: a debug build refuses keyed siblings that
-/// share a key, once the list changes.
-#[cfg(debug_assertions)]
+/// aio's duplicate-key tripwire: keyed siblings that share a key fail a
+/// test in every build, saying where their `for` is (a window draws on).
 #[test]
 fn siblings_with_one_key_are_refused() {
     let why = fails(|| {
         TestUi::new(duplicated).click("DupButton");
     });
     assert!(why.contains("keyed siblings must each have a unique key"), "{why}");
+    assert!(why.contains(&format!("the `for` at {}:", file!().replace('\\', "/"))), "{why}");
 }
 
 /// A flake seen in an app: a commit made off the UI thread is readable before

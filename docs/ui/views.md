@@ -283,6 +283,7 @@ compile error naming it.
 | Want | Write |
 |---|---|
 | text with values | `"{name} ({count})"` (format args; `{x:?}` too): a hole, following what it reads |
+| text with `format!`'s arguments | `"By threads ({} per SM)", g.threads_sm` (as many as its `{}`s take, then `w = 2` named ones; `{x}` beside them still reads `x`) |
 | a value that follows state | any expression in a text, attribute or `{child}`: `{n.get() * 2}`, `disabled: !ok.get()` |
 | an attribute | `class: "row"`, `"data-t": "x"`, `"aria-label": "Close"`; any string (`String`, `&str`, `Cow`), number or `bool`: `title: t(&name.get())` |
 | a value that may be absent | `title: tip` where `tip: Option<String>`: `None` leaves it out |
@@ -293,7 +294,7 @@ compile error naming it.
 | a value that may be absent | `if let Some(n) = note.get() { p { "{n}" } }`: made again when what it binds changes |
 | a match | `match page.get() { Page::A => { A {} } Page::B(id) if id > 9 => p { "{id}" }, _ => {} }`: an arm's view is kept until another arm matches (one that binds names: until they change) |
 | a repeat | `for`, never `while` or `loop` (refused): a view says what shows, not how long to repeat |
-| a list | `for x in xs.get() { li { key: "{x.id}", .. } }` (`key:` on every row's first node: `rsx!` refuses a row without one; items are `Clone + PartialEq`) |
+| a list | `for x in xs.get() { li { key: "{x.id}", .. } }` (`key:` on every row's first node: `rsx!` refuses a row without one; items are `Clone + PartialEq`). A row's component keeps its state by its key while rows move, come and go |
 | a fresh start | `key:` outside a list: `Editor { key: "{doc.id}", .. }` is made again (its state afresh) when the key changes |
 | several roots | a component may return them side by side: `rsx! { A {} B {} }` |
 | an element made elsewhere | `{elem}` where `elem: View` |
@@ -797,6 +798,20 @@ Routes are [routing](routing.md); styles and dark mode are
 - `e.prevent_default()` on keys in a window comes too late: put
   `data-aio-prevent` on the element ([kit](kit.md#keys)).
 - A `for` row without `key:` on its first node: `rsx!` refuses it.
+- Two rows with one key (`key: "{s.line}"` where lines repeat): a test
+  (`TestUi`, `TestPage`) fails, naming the component and the `for`'s
+  `file:line:col`; a window draws every row, the second keyed by its
+  repeat, and says it once (`ui:duplicate-key` in the log). Key by an id.
+- A borrow in a hole: a hole's view outlives the body that made it, so
+  what it holds must be owned. rustc says `E0716` (a temporary dropped
+  while borrowed) or `E0597` (a local that doesn't live long enough) at
+  the hole. Clone or own the value first:
+
+  | Shape | Fix |
+  |---|---|
+  | `{match &rep.get().error { Some(e) => rsx! { p { "{e}" } }, None => rsx! {} }}` | `{match rep.get().error { Some(e) => …, None => … }}`: match the owned value |
+  | `{rep.get().probes.get(i).map(\|p\| rsx! { span { "{p}" } })}` | `{rep.get().probes.get(i).cloned().map(\|p\| …)}`, or `let p = …;` before `rsx!` |
+  | `let r = &name;` … `onclick: move \|_\| f(r.clone())` | `onclick: move \|_\| f(name.clone())`: a hole clones the names it reads; a reference to a local can't go with it |
 - A 0.1 app's renderer left in (its paths, its dependency, a page
   script's `send`): `ax lint` refuses them, and the migration guide's
   section 8, [0.1 → 0.2](../migration/README.md), has the names.

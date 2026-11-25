@@ -215,6 +215,14 @@ version may break things.
   busy. `aio::effect::busy()` says what the app is still doing, and the
   window's door answers it (`Aio.busy`).
 - aio-shell's `door` feature: the window's `ui` door alone (`dev` has it).
+- A text in `rsx!` takes `format!`'s arguments after it:
+  `span { "By threads ({} per SM)", g.threads_sm }`, as many as its
+  `{}`s take (`{0}`, `{:.*}`, `{:1$}` counted as `format!` does), then
+  named ones (`w = 2`); a `{x}` beside them still reads `x`. A value
+  after a text with no `{}` says to put it in the string
+  (`"{g.threads_sm}"`), where it said `expected a { … } block`.
+- `air::Root::faults()`: what views did wrong that drawing went past (a
+  list's repeated key), taken; `TestPage` and `TestUi` fail on them.
 
 ### Changed
 
@@ -369,6 +377,18 @@ version may break things.
 
 ### Fixed
 
+- Two rows of a `for` with one key no longer panic the window dead (in
+  every build, with no place of the app's): the window draws every row,
+  the second keyed by its repeat, and says once, through the log and
+  the problem bus (`ui:duplicate-key`), the component and the `for`'s
+  `file:line:col`. A test (`TestUi`, `TestPage`) fails with that message
+  in every build (before: in a debug build only). A server render draws
+  every row too.
+- A borrow error in an `rsx!` hole (`E0716` for a temporary a view keeps,
+  `E0597` for a local a handler borrows) is said at the hole, not over
+  the whole `rsx!`: the code the macro makes for a hole carries its
+  place. The views guide's Common mistakes shows the three shapes and
+  their fix.
 - With `theme = "full"` the look's button reached the kit's quiet ones:
   a `Menu`'s items were centred and shadowed, tabs had a shadow, rounded
   corners and a press nudge. They start from `.aio-plain` now.
