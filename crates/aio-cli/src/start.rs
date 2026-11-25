@@ -478,8 +478,9 @@ mod tests {
             "appId": "notes", "status": "healthy", "pid": std::process::id(), "updatedAt": now,
             "startedAt": aio::log::stamp(now), "uptimeS": 0, "memory": { "rssBytes": 0, "machinePct": 0, "level": "ok" },
         });
-        std::fs::write(home.join("data/health.json"), doc.to_string()).unwrap();
+        // Said before it is healthy, as an app logs before its health says up.
         println!("up");
+        std::fs::write(home.join("data/health.json"), doc.to_string()).unwrap();
         #[cfg(target_os = "linux")]
         if home.join(X11).exists() {
             // An X client that connects once the start said up, as Chromium's GPU process does.
@@ -603,7 +604,12 @@ mod tests {
         let (rec2, h2) = (record(&p.logs).unwrap(), health(&p));
         assert_ne!(rec2["pid"], rec["pid"]);
         assert_eq!((rec2["args"].clone(), started_by(&rec2, &h2)), (json!(args), "aio start"));
-        assert!(std::fs::read_to_string(p.logs.join(LOG)).unwrap().contains("up"));
+        // Its output reaches the log through a copy: given the time it takes.
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while !std::fs::read_to_string(p.logs.join(LOG)).unwrap_or_default().contains("up") {
+            assert!(std::time::Instant::now() < end, "{:?}", std::fs::read_to_string(p.logs.join(LOG)));
+            std::thread::sleep(Duration::from_millis(20));
+        }
         crate::stop::one("notes", &target, true, Duration::ZERO).unwrap();
         // A sibling test's fresh fork holds a copy of the lock until it execs.
         let end = std::time::Instant::now() + Duration::from_secs(10);
