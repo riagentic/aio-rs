@@ -728,7 +728,8 @@ impl<T: Cell> Handle<T> {
             _ => (None, None),
         };
         let id = self.inner.ran.fetch_add(1, Ordering::Relaxed);
-        let end = Ended { inner: self.inner.clone(), key: e.key.clone(), id, _next: next };
+        let counted = crate::effect::Running::new(format!("effect {}.{}", T::ID, e.key));
+        let end = Ended { inner: self.inner.clone(), key: e.key.clone(), id, _next: next, _running: counted };
         let (h, timeout) = (self.by(By::Effect(e.key.clone())), e.timeout);
         let me = self.clone();
         let (mut run, key) = ((e.run)(h), e.key.clone());
@@ -1414,6 +1415,8 @@ struct Ended<T: Cell> {
     key: String,
     id: u64,
     _next: Option<oneshot::Sender<()>>,
+    /// Counted in [`crate::effect::busy`] until it ends.
+    _running: crate::effect::Running,
 }
 
 impl<T: Cell> Drop for Ended<T> {

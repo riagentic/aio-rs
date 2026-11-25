@@ -341,7 +341,7 @@ the links open to its cell",
         "shot <app> [file] [--cdp port] [--window n] [--check base] [--update base] [--threshold n] [--max-diff r] [--selector css] [--full] [--size WxH] [--video file] [--duration s] [--markers]",
         "a PNG of the app's window (default <id>-<time>.png; --json: {file,
 bytes, width, height}), over the DevTools
-protocol (a dev build's own door: no flag; --cdp port, else AIORT_CDP,
+protocol (the own door of ax start's and ax dev's builds: no flag; --cdp port, else AIORT_CDP,
 else the port a launch with --cdp opened, when there is one);
 --check: exit 1 unless it looks like base (a channel may move --threshold,
 default 2; a share --max-diff of pixels may differ, default 0);
@@ -437,6 +437,28 @@ keys: click dblclick hover focus blur, type <text> (appends), setValue
 select <value>, check uncheck, scroll <top[,left]>, dragTo <path>; path
 window: a key to the window itself (a global key); --window: which
 (default: the newest open); --wait-client, the protocol: as ax surface",
+    ),
+    v(
+        "expect-ui",
+        "expect-ui <app> <path> <op> [text] [--wait s] [--cdp port] [--window n]",
+        "assert on what the running app's window shows, in TestUi's words (exit
+1: it fails); path as ax trigger names it; op: eq <text> (its whole
+text, until_text), contains <text> (a part of it, until_contains),
+present, absent (showing or not); a path two showing elements answer
+fails, each named with the path that names it alone; --wait: until it
+passes, s seconds at most (the window waited for too); --window, the
+protocol: as ax eval",
+    ),
+    v(
+        "wait",
+        "wait <app> [--idle] [--for ms] [--wait s]",
+        "--idle: wait until the running app is idle: nothing in flight (an
+effect, a blocking or off_thread job, a commit its views aren't told of)
+and its window still for --for ms (default 500: no DOM change, no
+animation that ends running); exit 1 after --wait s (default 30),
+naming what is still busy; through the app's own door (ax start's and
+ax dev's builds). Work it can't see (a task spawned on its own): wait
+for what it shows instead, ax expect-ui --wait",
     ),
     v(
         "timetravel",
@@ -855,12 +877,16 @@ pub fn verb_help(v: &Verb) -> String {
         (true, false) => "no flags of its own".into(),
         _ => own.join(" "),
     };
+    // `dev` hands every other flag after <app> to the app: its --json is the app's.
+    let also = match v.name {
+        "dev" => "--help --version (any other flag after <app>, --json and --text too, goes to the app)".into(),
+        _ => GLOBAL.join(" "),
+    };
     format!(
-        "ax {}\n\n{}\n\n{} takes {takes}; every verb also: {}\n{FOOT}",
+        "ax {}\n\n{}\n\n{} takes {takes}; every verb also: {also}\n{FOOT}",
         v.usage,
         v.about.lines().map(|l| format!("  {l}")).collect::<Vec<_>>().join("\n"),
         v.name,
-        GLOBAL.join(" ")
     )
 }
 
@@ -915,12 +941,15 @@ fn read_one(args: &[String], here: &dyn Fn() -> Result<String, String>) -> Resul
         return Ok(Ask::Say(verb_help(verb)));
     }
     if verb.name == "help" {
-        let every = args[1..own].iter().any(|a| a == "--commands" || a == "--all");
-        return match args.get(1) {
+        // Its words, but the output flags every verb takes (help is text).
+        let words: Vec<&str> =
+            args[1..own].iter().map(String::as_str).filter(|a| !["--json", "--text", "--quiet"].contains(a)).collect();
+        let every = words.iter().any(|a| *a == "--commands" || *a == "--all");
+        return match words.first() {
             None => Ok(Ask::Say(help())),
-            Some(_) if every && own == 2 => Ok(Ask::Say(commands())),
+            Some(_) if every && words.len() == 1 => Ok(Ask::Say(commands())),
             Some(_) => {
-                let name = args[1..own].join(" ");
+                let name = words.join(" ");
                 find(&name).map(|v| Ask::Say(verb_help(v))).ok_or_else(|| format!("no verb `{name}`"))
             }
         };

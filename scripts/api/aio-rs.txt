@@ -815,6 +815,7 @@ aio::effect::Mode::First
 aio::effect::Mode::Newest
 aio::effect::Mode::Queue
 aio::effect::blocking: async fn blocking<R: Send + 'static>(key: &str, f: impl FnOnce(&Cancel) -> R + Send + 'static) -> crate::Result<R>
+aio::effect::busy: fn busy() -> Vec<String>
 aio::effect::call_ceiling: fn call_ceiling() -> std::time::Duration
 aio::effect::cancel_blocking: fn cancel_blocking(key: &str) -> usize
 aio::effect::key: fn key(name: &str, args: &impl serde::Serialize) -> crate::Result<String>
