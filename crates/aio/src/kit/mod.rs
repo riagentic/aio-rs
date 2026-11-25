@@ -15,8 +15,10 @@
 
 mod back;
 mod browser;
+#[cfg(feature = "draw")]
 mod canvas;
 mod change;
+#[cfg(feature = "draw")]
 mod chart;
 mod code;
 #[cfg(not(target_arch = "wasm32"))]
@@ -25,6 +27,7 @@ mod controls;
 mod defer;
 mod form;
 mod forms;
+#[cfg(feature = "draw")]
 mod heatmap;
 mod held;
 mod island;
@@ -55,8 +58,10 @@ mod zoom;
 
 pub use back::use_back_button;
 pub use browser::{Browser, Go, Guest, GuestEvent, GuestInput, HostKey, WEBVIEW_METHODS, go, run_js, webview};
+#[cfg(feature = "draw")]
 pub use canvas::{Canvas, CanvasPointer, Draw, Pixels, PointerKind};
 pub use change::{use_on_change, use_on_change_now};
+#[cfg(feature = "draw")]
 pub use chart::{Axis, Chart, Mark, Scale, Series};
 pub use code::{CodeArea, CodeAreaProps};
 #[cfg(not(target_arch = "wasm32"))]
@@ -65,6 +70,7 @@ pub use controls::*;
 pub use defer::{Defer, Load, Trigger, lazy_view, load};
 pub use form::*;
 pub use forms::{Bind, FieldArray, FieldOf, Form, Problems, move_item, use_async_rule, use_field_array, use_form};
+#[cfg(feature = "draw")]
 pub use heatmap::{Heatmap, Palette};
 pub use held::use_held;
 pub use island::{Island, WebIsland};

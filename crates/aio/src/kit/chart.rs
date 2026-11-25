@@ -288,7 +288,7 @@ fn plot(series: &[Series], x: &Axis, y: &Axis, w: f64, h: f64) -> Plot {
                 .flat_map(|s| s.points.iter().map(|p| p.0))
                 .filter(|v| v.is_finite())
                 .collect();
-            v.sort_by(f64::total_cmp);
+            crate::sort_by(&mut v, f64::total_cmp);
             v.windows(2).map(|w| w[1] - w[0]).filter(|d| *d > 0.0).reduce(f64::min).unwrap_or(1.0) / 2.0
         }
         false => 0.0,
@@ -305,7 +305,7 @@ fn plot(series: &[Series], x: &Axis, y: &Axis, w: f64, h: f64) -> Plot {
         .filter(|s| s.mark == Mark::Bar)
         .flat_map(|s| {
             let mut v: Vec<f64> = s.points.iter().map(|p| px(p.0)).filter(|v| v.is_finite()).collect();
-            v.sort_by(f64::total_cmp);
+            crate::sort_by(&mut v, f64::total_cmp);
             v.windows(2).map(|w| w[1] - w[0]).filter(|d| *d > 0.5).collect::<Vec<_>>()
         })
         .fold(pw / 2.0, f64::min);

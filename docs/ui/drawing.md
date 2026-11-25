@@ -1,6 +1,6 @@
 # Charts, heat maps and drawing
 
-Three kit components (`aio::kit`, feature `kit`) draw data with no
+Three kit components (`aio::kit`, feature `draw`) draw data with no
 JavaScript in the app, the same page code on the desktop, Android and the
 web:
 
@@ -10,8 +10,15 @@ web:
 | a grid of values as colours (thousands of cells) | `Heatmap` | one canvas bitmap |
 | anything else 2-D (a gauge, a diagram, a sprite) | `Canvas` + `Draw` | a canvas, from a list made in Rust |
 
-An app that shows none of them builds none of it: the painter's script is
-in the binary only when `Canvas` (or `Heatmap`) is.
+They come with aio-rs's `draw` feature (it brings `kit`), so an app that
+draws nothing compiles none of them, not even in a debug build:
+
+```toml
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", features = ["draw"] }
+```
+
+A release links only what it shows: the painter's script is in the binary
+only when `Canvas` (or `Heatmap`) is.
 
 ## Charts
 

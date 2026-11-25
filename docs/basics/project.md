@@ -80,12 +80,28 @@ shop/
   assets/
 ```
 
+A big one keeps its views by area in page crates (`ax add <app> page
+<name>`), so an edit recompiles one small crate; the first page moves the
+cells to the core crate the library and every page depend on
+([ax add](../clients/ax.md#ax-add)):
+
+```text
+shop/
+  Cargo.toml          # members ".", "app", "core", "pages/cart", ...
+  src/lib.rs          # App, routes!; pub use shop_core::*;
+  core/src/lib.rs     # shop-core: the cells' modules, types they share
+  core/src/cart.rs    # #[cell] Cart + its tests
+  pages/cart/src/lib.rs  # use shop_core::cart::prelude::*;
+  app/src/main.rs
+```
+
 Growing:
 
 - One module per cell once there are two cells; one file per screen once
   a view passes a couple of hundred lines.
 - A second crate (a workspace member) only when another app or a tool
-  needs the code too: cells and types in a library both depend on.
+  needs the code too: cells and types in a library both depend on; or
+  when views move to page crates, which make the core crate themselves.
 - Cell ids and `[app] id` never change while you move code: they name the
   data, not the module.
 
@@ -170,6 +186,7 @@ of aio-rs.
 | none | the core: cells, the log, replay, persistence, the local door, `aio::cli` |
 | `testing` | `aio::testing`, the test kit (`TestCells`; `TestServer` with `server`, `TestUi` with `kit`): a dev-dependency only, so the app's builds leave it out |
 | `kit` | the UI kit, `client!`, `router!` |
+| `draw` | `kit` + the kit's `Chart`, `Heatmap` and `Canvas` ([drawing](../ui/drawing.md)) |
 | `net` | `tls` + `oidc`: everything networked |
 | `server` | sync and its server, HTTP routes, server functions, accounts' doors |
 | `tls` | the server over TLS, pairing, LAN discovery |

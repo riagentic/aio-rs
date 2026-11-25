@@ -274,7 +274,10 @@ pub(crate) struct Abort(pub String);
 /// The key of effect `name` run for `args`: `scan` for `"/a"` and for `"/b"`
 /// then neither cancel, skip nor wait for each other.
 pub fn key(name: &str, args: &impl serde::Serialize) -> crate::Result<String> {
-    Ok(format!("{name}:{}", crate::json(args)?))
+    // Written as `Value`'s `{}` writes it, without its `{:#}` (pretty) half
+    // linked into every app.
+    let args = serde_json::to_string(&crate::json(args)?).map_err(|e| crate::Rejected::new(e.to_string()))?;
+    Ok(format!("{name}:{args}"))
 }
 
 /// Async work a call asks for, keyed: it starts once the call commits,

@@ -75,6 +75,24 @@ version may break things.
 
 ### Added
 
+- The app's core crate, made on demand: a page crate (`ax add <app> page
+  <name>`) could read no cell, since the cells live in the library and
+  the library depends on its pages. The first `ax add page` of an app
+  whose library holds its cells now moves them (their methods, `client!`
+  and its `prelude`, the types and functions they use, each module that
+  holds a cell) to `core/` (`<app>-core`), which the library and every
+  page depend on; the library re-exports it whole (`pub use
+  <app>_core::*;`), so `crate::prelude`, `crate::tally::Tally`, the
+  launchers' `app::SOURCE` and Android's library read as before. It says
+  what moves and asks first (`--yes`: not; `--json`: the plan, nothing
+  done without `--yes`), tries it on a copy (`cargo check` of every crate
+  and target) and writes it only if that builds; else nothing changes and
+  the compiler's errors are said. A new page reads the app's cell through
+  the core crate's prelude (`use <app>_core::prelude::*;`, a field of it
+  shown); `ax add cell` writes into `core/` from then on. An app without
+  pages stays one crate. `ax dev` patches an edit in a page in ~0.1 s, in
+  the core crate in ~0.24 s (the template with two pages)
+  ([ax add](docs/clients/ax.md#ax-add)).
 - `[app] spellcheck` (`aio_shell::Window { spellcheck }`, `Window::of`
   reads it): where the window's spellchecker finds a language the OS
   doesn't check. `"os"` (default): the OS's (macOS, Windows' language
@@ -160,8 +178,9 @@ version may break things.
 - `data-aio-prevent` on a field keeps the keys it names (Tab in a
   `textarea` that indents), even as a modal dialog's last control: a
   field's keys were always its own, so Tab left it whatever the view did.
-- `aio::kit::Chart`: lines, bars and dots on linear, log or category
-  axes as SVG, with ticks at round numbers, a legend for two series or
+- `aio::kit::Chart` (feature `draw`, as `Heatmap` and `Canvas`: an app
+  that draws nothing compiles none of them, ~21 MB off its debug build):
+  lines, bars and dots on linear, log or category axes as SVG, with ticks at round numbers, a legend for two series or
   more, the nearest point's values on hover and a description a screen
   reader hears; `Chart { series: vec![Series::line("load", points)] }` is
   a whole chart. A line of more points than its plot has pixel columns
@@ -368,6 +387,12 @@ version may break things.
   (`rt_gate`, release, p10 over 5 interleaved runs): a call in memory
   takes 3.93 µs, up from 3.79 µs (one indirect call per step). A boot, a
   saved call and a call's accounting are unchanged.
+- A web build is ~8 KB smaller (the template's: 449 KB, from 458 KB): its
+  page scripts as its glue (no indentation or comment lines), the token
+  sheet's comments left out, a declaration's last `;` dropped from the
+  kit's sheet, no second JSON printer (an effect's key) and no standard
+  library sort beside aio-rs's own (the page's saved state). A list's
+  rows keep one hash table per key type, not two.
 - ax reads and writes objects with object 0.39 (from 0.37): one hashbrown
   in the workspace, a crate fewer in ax's graph.
 - **Breaking:** a module named `prelude` beside an `aio::client!(..)`
@@ -549,6 +574,9 @@ version may break things.
 
 ### Fixed
 
+- `ax add <app> page core` (or `std`, `alloc`, `proc_macro`, `test`) is
+  refused: its crate took the name of one of Rust's own, which it hid
+  from the app.
 - A dev build's Redux DevTools lost the calls made while its bridge
   connected: a cell's instance began recording only once the page
   answered (up to 250 ms after the first frame, plus an eval's round

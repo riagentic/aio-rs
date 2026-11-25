@@ -1341,9 +1341,10 @@ fn each_dyn<I, K>(
     let comp = crate::tree::current_name();
     if !read {
         // Each row once, in order, under the list's owner (nothing re-runs).
-        let mut seen = std::collections::HashSet::with_capacity(first.len());
+        // A map as the re-run's (one hash table per key type, not two).
+        let mut seen: HashMap<K, u32> = HashMap::with_capacity(first.len());
         for (i, item) in first.into_iter().enumerate() {
-            if !seen.insert(key(&item)) {
+            if seen.insert(key(&item), 0).is_some() {
                 repeated(site, comp, i, std::any::type_name::<K>());
             }
             let r = place(row(item));
@@ -1361,21 +1362,17 @@ fn each_dyn<I, K>(
             let mut by_key: HashMap<(K, u32), usize> =
                 rows.iter().enumerate().map(|(i, (k, _))| (k.clone(), i)).collect();
             let mut src = Vec::with_capacity(next.len());
-            let mut seen = std::collections::HashSet::with_capacity(next.len());
-            // A key's repeats so far (none in a right list: no allocation).
-            let mut repeats: HashMap<K, u32> = HashMap::new();
+            // Each key's rows so far: a row's repeat is how many came before it.
+            let mut seen: HashMap<K, u32> = HashMap::with_capacity(next.len());
             let old = std::mem::take(&mut rows);
             for (at, item) in next.into_iter().enumerate() {
                 let k = key(&item);
-                let n = match seen.insert(k.clone()) {
-                    true => 0,
-                    false => {
-                        repeated(site, comp, at, std::any::type_name::<K>());
-                        let n = repeats.entry(k.clone()).or_default();
-                        *n += 1;
-                        *n
-                    }
-                };
+                let count = seen.entry(k.clone()).or_default();
+                let n = *count;
+                *count += 1;
+                if n > 0 {
+                    repeated(site, comp, at, std::any::type_name::<K>());
+                }
                 let k = (k, n);
                 let kept = by_key.remove(&k).filter(|i| old[*i].1 == item);
                 src.push(kept.map_or(-1, |i| i as isize));
