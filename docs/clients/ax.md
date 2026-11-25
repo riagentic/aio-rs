@@ -29,6 +29,7 @@ buttons ([below](#ax-ui-the-visual-app-manager)).
 | Step back through a cell's history | `ax timetravel` |
 | Reproduce a bug, turn it into a test | `ax replay`, `ax record` |
 | What does the window show? Click it | `ax surface`, `ax trigger`, `ax shot`, `ax eval` |
+| Wait for the window to show something, or to be done | `ax expect-ui`, `ax wait --idle` |
 | One component alone, with props I pick | `ax preview` |
 | Is the running process the code on disk? | `ax doctor` |
 | Where does it keep its data? | `ax data` |
@@ -133,7 +134,8 @@ is refused with exit 2 and the right usage, never guessed or dropped:
   `AIORT_OUTPUT=text` or `json` sets it for every run. The verbs whose
   answer is a document or a stream stay as they are in a pipe: `dev`,
   `lint`, `agent`, `testgen`, `record`, `peer`, `snapshot`, `logs`,
-  `help`, `version`.
+  `help`, `version`. Every verb takes `--json` and `--text` but `ax dev`,
+  which hands every flag after `<app>` but its own to the app.
 - With `--json` (or a pipe), every verb prints one object: `{"ok":true,"value":…}` when
   the answer is JSON (a state, a call's answer, a list), `{"ok":true,
   "text":"…"}` when it is text, `{"ok":false,"error":"…","exit":1}` when it
@@ -382,7 +384,8 @@ ax dev notes -- --verbose                 # an arg for the app itself
 ```
 
 A failed build's errors are in the app's `logs/build.log`. `ax shot`, `ax eval`,
-`ax surface` and `ax trigger` reach a dev build without `--cdp`.
+`ax surface`, `ax trigger`, `ax expect-ui` and `ax wait` reach a build of `ax dev`
+or `ax start` without `--cdp`.
 [Develop](../build/README.md#develop-ax-dev).
 
 ### `ax test`
@@ -476,8 +479,10 @@ process group: a Ctrl-C there doesn't reach it), and waits until it is
 up: its lock held, its `health.json` written by this start, and, for a
 window app, its window ready. In a workspace it is built first, to run as
 the release build does (none of `ax dev`'s tooling: no operator door, no
-DevTools port, the process hardened; `--cdp` asks for that tooling);
-elsewhere the installed one runs.
+DevTools port, the process hardened; `--cdp` asks for that tooling) but
+for the window's own door, local and the user's only, so `ax shot`, `ax
+eval`, `ax trigger`, `ax expect-ui` and `ax wait` reach it with no flag;
+elsewhere the installed one runs (a release build: no door).
 
 | Flag | Does |
 |---|---|
@@ -1320,6 +1325,57 @@ trigger does on the newest client.
 ax trigger notes draft type "buy milk"
 ax trigger notes AddButton click
 ax trigger notes window press mod+k
+```
+
+### `ax expect-ui`
+
+```text
+ax expect-ui <app> <path> <op> [text] [--wait s] [--cdp port] [--window n]
+```
+
+Asserts on what the running window shows, in `TestUi`'s words: `PASS …`
+(exit 0) or `FAIL …` (exit 1) with what the element shows, or why there is
+none. `path` as `ax trigger`'s.
+
+| Op | Passes when |
+|---|---|
+| `eq <text>` | its whole text is that (`TestUi::until_text`) |
+| `contains <text>` | its text holds that (`until_contains`) |
+| `present` | it is there and showing |
+| `absent` | nothing it names shows |
+
+A path that two showing elements answer fails at once, each named with
+the path that names it alone (`2 elements have data-t="gpu": <button>
+"GPU" at tabs/gpu, <select> … at side/gpu`): a check never reads a guess.
+`--wait s` asks again every 50 ms until it passes, at most `s` seconds,
+the window waited for too (right after a start). `--json`: `{pass, error,
+path, op, value, text}`, as `ax expect`'s.
+
+```sh
+ax trigger notes RunButton click
+ax expect-ui notes result contains "done" --wait 20
+ax expect-ui notes spinner absent --wait 5
+```
+
+### `ax wait`
+
+```text
+ax wait <app> [--idle] [--for ms] [--wait s]
+```
+
+`--idle`: waits until the running app is idle: nothing in flight (an
+effect, a `blocking` or `off_thread` job, a commit its views aren't told
+of yet; `aio::effect::busy`) and its window still for `--for` ms (500: no
+DOM change, no animation that ends running). After `--wait s` (30) it
+fails (exit 1), naming what is still busy. It asks the app through its
+own door (a build of `ax start` or `ax dev`). Work it can't see (a task a
+view spawned on its own, a timer) isn't waited for: wait for what it shows
+with `ax expect-ui --wait`.
+
+```sh
+ax trigger notes ImportButton click
+ax wait notes --idle
+ax shot notes after-import.png
 ```
 
 ### `ax testgen`

@@ -512,10 +512,11 @@ AIORT_ELECTRON_ARGS="--disable-dev-shm-usage --disable-gpu" ax dev notes
 
 ## Inspecting a running window
 
-A dev build's window (`ax dev`, or a build with the `dev` features of
-aio and aio-shell) opens a private door for aio-rs's tools: `ax
-surface`, `ax trigger`, `ax shot`, `ax eval` and `ax components` reach it
-with no flag and no port. `ax dev <app> --cdp` (or `AIORT_CDP=<port>`)
+A window built by `ax dev` or `ax start` (aio-shell's `door` feature;
+`dev` has it) opens a private door for aio-rs's tools, in the user's own
+sockets folder: `ax surface`, `ax trigger`, `ax shot`, `ax eval`, `ax
+expect-ui`, `ax wait` and `ax components` reach it with no flag and no
+port. `ax dev <app> --cdp` (or `AIORT_CDP=<port>`)
 also opens Chrome's DevTools protocol on loopback for other tools. A
 release build opens neither, and reads no debug setting from the
 environment (aio's `ignoreDebugEnv`, always on): nothing outside the app can

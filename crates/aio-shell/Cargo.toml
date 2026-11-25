@@ -52,7 +52,12 @@ air = []
 web = ["aio/br"]
 # `ax dev` (it passes `--features aio-shell/dev`): Rust hot-patched, `rsx!`
 # markup reloaded live. A release build leaves it out.
-dev = ["dep:aio-hotpatch", "aio/dev"]
+dev = ["door", "dep:aio-hotpatch", "aio/dev"]
+# The window's `ui` door (`inspect`), in the user's private sockets dir:
+# ax's shot, eval, surface, trigger, expect-ui and wait reach the window
+# there. `ax start` builds with it, `ax dev` too (`dev`); a release build
+# leaves it out.
+door = []
 # The splash drawn by the OS before Electron starts (`presplash`): `ax build`
 # turns it on for an app with a `[build.splash]`, so an app without one (and
 # `ax dev`) carries none of it; Electron draws the splash there.

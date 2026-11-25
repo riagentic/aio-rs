@@ -435,6 +435,19 @@ fn call_wait(s: Option<&str>) -> Result<Option<std::time::Duration>, String> {
     .transpose()
 }
 
+/// A `--wait` in seconds (`0.5`; 0: no wait), else `default` (pure): never
+/// negative, endless or past what a `Duration` holds.
+fn secs(v: Option<&str>, default: std::time::Duration) -> Result<std::time::Duration, String> {
+    match v {
+        Some(s) => s
+            .parse()
+            .ok()
+            .and_then(|n| std::time::Duration::try_from_secs_f64(n).ok())
+            .ok_or(format!("--wait {s}: seconds, 0 or more")),
+        None => Ok(default),
+    }
+}
+
 /// Who the verbs that reach the running app are: `--as`, else this OS user.
 fn user(as_user: Option<&str>) -> String {
     as_user.map(String::from).unwrap_or_else(|| {
@@ -666,8 +679,9 @@ fn asks_dev(args: &[String]) -> bool {
 
 /// The binary `ax start` runs for `t` with `args`: built now in its
 /// workspace, else the installed one (its bin link). Built as the release
-/// build runs (no operator door, no DevTools port, hardened), but with
-/// `--cdp`: asking for DevTools is asking for ax dev's tooling.
+/// build runs (no operator door, no DevTools port, hardened) but for the
+/// window's `ui` door, which ax shot, eval and trigger reach; with `--cdp`:
+/// asking for DevTools is asking for ax dev's tooling.
 fn app_bin(t: &Target, args: &[String]) -> Result<PathBuf, String> {
     match &t.pkg {
         Some(pkg) => dev::build(pkg, Some(&t.plan.logs), asks_dev(args))
@@ -1623,10 +1637,7 @@ fn run(args: &[String]) -> Result<String, Fail> {
             )
         }
         ("expect", [app, cell, path, op, want @ ..]) => {
-            let wait = match value("--wait") {
-                Some(s) => std::time::Duration::from_secs_f64(s.parse().map_err(|_| usage("--wait needs seconds"))?),
-                None => std::time::Duration::ZERO,
-            };
+            let wait = secs(value("--wait"), std::time::Duration::ZERO).map_err(usage)?;
             live::expect_usage(op, want.first().copied())?;
             let passed = live::expect(
                 &door(&t(app)?, cell)?,
@@ -1787,6 +1798,53 @@ fn run(args: &[String]) -> Result<String, Fail> {
                     video::note(&journal, path, action, rect);
                 }
                 surface::trigger(&mut s, path, action, text.first().copied()).await
+            })
+        }
+        ("expect-ui", [app, path, op, want @ ..]) => {
+            let wait = secs(value("--wait"), std::time::Duration::ZERO).map_err(usage)?;
+            let want = want.first().copied();
+            surface::expect_usage(op, want).map_err(usage)?;
+            let (at, n) = (reach(&t(app)?)?, window()?);
+            let passed = aio::rt().block_on(async {
+                let t0 = std::time::Instant::now();
+                let mut s = cdp::window_within(&at, n, wait).await?;
+                surface::expect(&mut s, (path, op, want), wait.saturating_sub(t0.elapsed())).await
+            });
+            match json {
+                true => {
+                    let v = |pass: bool, text: &str| {
+                        serde_json::json!({
+                            "pass": pass, "error": (!pass).then_some(text), "path": path, "op": op, "value": want,
+                            "text": text,
+                        })
+                        .to_string()
+                    };
+                    passed.map(|t| v(true, &t)).map_err(|e| v(false, &e))
+                }
+                false => passed,
+            }
+        }
+        ("wait", [app]) => {
+            if !has("--idle") {
+                return Err(usage(
+                    "ax wait <app> --idle: say what to wait for (--idle: nothing in flight, the window still)",
+                ));
+            }
+            let quiet = match value("--for") {
+                Some(ms) => ms
+                    .parse()
+                    .map(std::time::Duration::from_millis)
+                    .map_err(|_| usage(format!("--for {ms}: milliseconds")))?,
+                None => std::time::Duration::from_millis(500),
+            };
+            let wait = secs(value("--wait"), std::time::Duration::from_secs(30)).map_err(usage)?;
+            let t = t(app)?;
+            let door =
+                cdp::door(&t.id, &t.plan).ok_or(format!("{app} is not running: start it with `ax start {app}`"))?;
+            aio::rt().block_on(async {
+                let t0 = std::time::Instant::now();
+                let mut s = cdp::window_within(&cdp::Reach::Door(door), 0, wait).await?;
+                surface::idle(&mut s, quiet, wait.saturating_sub(t0.elapsed())).await
             })
         }
         ("timetravel", [app, cell, rest @ ..]) => {
@@ -2780,5 +2838,58 @@ mod tests {
         assert!(run("call no-such-app-0a1b notes set 1 --args [1]").unwrap_err().contains("not both"));
         assert!(run("dispatch notes:set x").unwrap_err().contains("ax call"));
         assert_eq!(cli("call no-such-app-0a1b notes set").0, 1);
+    }
+
+    /// The help footer's promise: every verb takes `--json` and `--text`,
+    /// through the gate and through a verb that reads its flags again (`ax
+    /// logs`, `ax lint`); `dev` hands them to the app, and its help says so.
+    #[test]
+    fn every_verb_takes_json_and_text() {
+        for v in verbs::VERBS {
+            for f in ["--json", "--text"] {
+                if v.name == "dev" {
+                    continue;
+                }
+                let need = verbs::shape(v.usage).need;
+                let words = std::iter::repeat_n("w", need).collect::<Vec<_>>().join(" ");
+                let args: Vec<String> =
+                    format!("{} {words} {f}", v.name).split(' ').filter(|w| !w.is_empty()).map(String::from).collect();
+                if v.name == "lint" {
+                    assert!(lint::read_args(&args[1..]).is_ok(), "lint {f}");
+                    continue;
+                }
+                match verbs::read(&args, &|| Ok("app".into())) {
+                    Ok(verbs::Ask::Run(a)) => {
+                        let cut = a.iter().position(|w| w == "--").unwrap_or(a.len());
+                        assert!(a[1..cut].contains(&f.to_string()), "{}: {a:?}", v.name);
+                        if v.name == "logs" {
+                            let flags: Vec<&str> = a[1..cut].iter().map(String::as_str).collect();
+                            assert!(logs::filter(&flags, 0).is_ok(), "logs {f}");
+                        }
+                    }
+                    Ok(verbs::Ask::Say(_)) => assert!(["help", "version"].contains(&v.name), "{}", v.name),
+                    Err(e) => panic!("{} {f}: {e}", v.name),
+                }
+            }
+        }
+        let dev = verbs::verb_help(verbs::find("dev").unwrap());
+        assert!(dev.contains("--json and --text too, goes to the app"), "{dev}");
+    }
+
+    #[test]
+    fn a_wait_is_seconds_never_negative_or_endless() {
+        let zero = std::time::Duration::ZERO;
+        assert_eq!(secs(Some("1.5"), zero), Ok(std::time::Duration::from_millis(1500)));
+        assert_eq!(secs(None, std::time::Duration::from_secs(30)), Ok(std::time::Duration::from_secs(30)));
+        assert_eq!(secs(Some("0"), std::time::Duration::from_secs(30)), Ok(zero));
+        // `ax expect … --wait -1` panicked here (Duration::from_secs_f64).
+        for bad in ["-1", "inf", "NaN", "1e30", "x"] {
+            assert_eq!(secs(Some(bad), zero), Err(format!("--wait {bad}: seconds, 0 or more")), "{bad}");
+        }
+        assert_eq!(cli("expect no-such-app-0a1b c p eq 1 --wait -1").0, 2, "bad usage, no panic");
+        assert_eq!(cli("expect-ui no-such-app-0a1b p smash").0, 2);
+        assert!(cli("expect-ui no-such-app-0a1b p eq").1.unwrap_err().contains("eq needs a text"));
+        assert!(cli("wait no-such-app-0a1b").1.unwrap_err().contains("say what to wait for"));
+        assert!(cli("wait no-such-app-0a1b --idle").1.unwrap_err().contains("is not running"));
     }
 }

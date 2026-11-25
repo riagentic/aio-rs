@@ -706,7 +706,7 @@ fn a_handle_two_showing_elements_share_is_refused_naming_both() {
     let ui = TestUi::new(app);
     let got = fails(|| _ = ui.text("fleet"));
     assert!(
-        got.starts_with(r#"2 elements have data-t="fleet" (<button> "Fleet" in data-t="side", <table> "gpu 1"): give each its own handle"#),
+        got.starts_with(r#"2 elements have data-t="fleet": <button> "Fleet" at side/fleet, <table> "gpu 1" (no path of handles names it): give each its own handle"#),
         "{got}"
     );
     assert_eq!(ui.text("side/fleet"), "Fleet", "a path names one");

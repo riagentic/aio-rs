@@ -439,7 +439,8 @@ ax install notes         # or: a release bundle, installed for this user
 
 `ax start` builds in the workspace and runs the result as the release
 build runs (no operator door, no DevTools port, its process hardened;
-`--cdp` asks for ax dev's tooling), waiting until it is up; `ax install` builds this OS's bundle and installs it as a user
+`--cdp` asks for ax dev's tooling) but for the window's own door, which
+`ax shot`, `ax trigger`, `ax expect-ui` and `ax wait` reach, waiting until it is up; `ax install` builds this OS's bundle and installs it as a user
 would ([build](README.md#install-and-try-it)). The app's aio-rs comes from
 git (or a checkout, `--aio`): [setup](../basics/setup.md#where-an-app-gets-aio-rs-from).
 
