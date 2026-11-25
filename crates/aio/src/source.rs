@@ -550,7 +550,7 @@ impl<T: Cell> Source<T> {
         let (calls, hooks, _) = (crate::link::no_calls(), crate::link::Hooks::default(), http);
         match l {
             Ok(l) => drop(crate::rt().spawn(async move {
-                let r = crate::door::serve_with(h, l, Default::default(), calls, crate::door::OPERATOR, hooks).await;
+                let r = crate::door::serve_with(h.raw, l, Default::default(), calls, crate::door::OPERATOR, hooks).await;
                 if let Err(e) = r {
                     eprintln!("[aio] {}: the local door stopped: {e}", T::ID);
                 }

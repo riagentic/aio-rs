@@ -657,7 +657,7 @@ async fn linked<T: Cell>(
     let hello = crate::link::hello(&mut w, &mut pulse, &limits, &mut bytes).await.ok_or("no hello")?;
     match beside.iter().find(|c| c.id() != T::ID && hello["cell"] == c.id()) {
         Some(c) => c.session(w, limits, from, gate, viewer, calls, hooks, hello).await,
-        None => session(h, w, limits, from, gate, viewer, calls, hooks, Some(hello)).await,
+        None => session(h.raw, w, limits, from, gate, viewer, calls, hooks, Some(hello)).await,
     }
 }
 
@@ -782,7 +782,7 @@ pub async fn serve_door_with<T: Cell>(
     http: &crate::http::Http,
 ) -> std::io::Result<()> {
     let calls = crate::fns::Served { fns: Arc::new(http.fns.clone()), ..crate::link::no_calls() };
-    crate::door::serve_with(h, l, limits, calls, crate::door::OPERATOR, http.door_hooks()).await
+    crate::door::serve_with(h.raw, l, limits, calls, crate::door::OPERATOR, http.door_hooks()).await
 }
 
 /// Serve `h` at `/ws` (and pairing, the app's HTTP, over TLS, as `opts` say)
@@ -1179,7 +1179,7 @@ fn monitored<T: Cell>(h: &Handle<T>, started: std::time::Instant) -> String {
         clients: lock(clients()).values().filter(|c| c.cell == T::ID).count(),
         calls: crate::log::calls(),
         broadcast: crate::link::broadcast(),
-        cell: (T::ID.into(), h.enabled(), h.failures()),
+        cell: (T::ID.into(), h.enabled(), h.raw.failures()),
         up: crate::health::now(T::ID)["status"] == "healthy",
         degraded: degraded.into_iter().map(|(n, e)| (n, e.failures)).collect(),
         gauges: crate::health::gauges(),
@@ -1190,7 +1190,7 @@ fn monitored<T: Cell>(h: &Handle<T>, started: std::time::Instant) -> String {
 /// `GET /__aio/health`: what `health.json` says, now, and the served cell.
 fn health_now<T: Cell>(h: &Handle<T>) -> Value {
     let mut d = crate::health::now(T::ID);
-    d["cell"] = json!({ "id": T::ID, "enabled": h.enabled(), "failures": h.failures() });
+    d["cell"] = json!({ "id": T::ID, "enabled": h.enabled(), "failures": h.raw.failures() });
     d
 }
 

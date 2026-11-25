@@ -219,11 +219,18 @@ impl Inflight {
     }
 }
 
-/// The effect key a call of async `method` with `args` runs under: its
-/// arguments too for a `#[ttl]` or `#[mode(first)]` method (a second call
-/// joins only one with the same arguments, as aio's `"first"`).
-pub(crate) fn key_of<T: crate::Cell>(method: &str, args: &Value, who: Option<&crate::Caller>) -> String {
-    match T::TTL.contains(&method) || T::async_mode(method) == Some(crate::Mode::First) {
+/// The effect key a call of async `method` (its `mode`; `ttl`: its cell's
+/// `#[ttl]` methods) with `args` runs under: its arguments too for a
+/// `#[ttl]` or `#[mode(first)]` method (a second call joins only one with
+/// the same arguments, as aio's `"first"`).
+pub(crate) fn key_of(
+    ttl: &[&str],
+    mode: Option<crate::Mode>,
+    method: &str,
+    args: &Value,
+    who: Option<&crate::Caller>,
+) -> String {
+    match ttl.contains(&method) || mode == Some(crate::Mode::First) {
         true => joined(method, args, who).unwrap_or_else(|_| method.into()),
         false => method.into(),
     }
@@ -247,9 +254,9 @@ pub fn call_key(cx: &Cx, method: &str, args: &Value) -> Result<String> {
 }
 
 /// Does `cx.abort(name)` stop the effect keyed `key`: its own, or a call
-/// of async method `name` keyed by its arguments (`name:[..]`)?
-pub(crate) fn aborts<T: crate::Cell>(name: &str, key: &str) -> bool {
-    key == name || (T::async_mode(name).is_some() && key.strip_prefix(name).is_some_and(|r| r.starts_with(':')))
+/// of async method `name` (`is_async`) keyed by its arguments (`name:[..]`)?
+pub(crate) fn aborts(is_async: bool, name: &str, key: &str) -> bool {
+    key == name || (is_async && key.strip_prefix(name).is_some_and(|r| r.starts_with(':')))
 }
 
 /// Asked by a call whose method ended: its answer is sent once the call

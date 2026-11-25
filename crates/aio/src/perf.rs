@@ -255,8 +255,8 @@ pub(crate) fn ceiling() -> Duration {
 }
 
 /// The budgets set for methods `T` does not have.
-pub(crate) fn unknown<T: crate::Cell>() -> Vec<String> {
-    budgets(|b| b.unknown(T::ID, T::METHODS))
+pub(crate) fn unknown(id: &str, methods: &[&str]) -> Vec<String> {
+    budgets(|b| b.unknown(id, methods))
 }
 
 /// A method committed: over its budget?

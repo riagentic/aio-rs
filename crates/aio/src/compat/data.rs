@@ -853,15 +853,10 @@ fn has_table(db: &Connection, name: &str) -> Result<bool, String> {
         .map_err(|e| format!("storage: {e}"))
 }
 
-/// The method of `T` that aio's `<cell>:<method>` is (pure): `T`'s own
-/// under its id; under a `#[aio_cell]` field's cell `<cell>_<method>` when `T`
-/// has it, else `<method>`. `None`: no cell of `T`'s, or an internal method.
-pub(crate) fn method_of<T: crate::Cell>(cell: &str, method: &str) -> Option<String> {
-    method_in(<T as crate::kind::KindOf>::KIND, cell, method)
-}
-
-/// [`method_of`] cell `k`.
-pub(crate) fn method_in(k: &crate::kind::Kind, cell: &str, method: &str) -> Option<String> {
+/// The method of cell `k` that aio's `<cell>:<method>` is (pure): `k`'s own
+/// under its id; under a `#[aio_cell]` field's cell `<cell>_<method>` when `k`
+/// has it, else `<method>`. `None`: no cell of `k`'s, or an internal method.
+pub(crate) fn method_of(k: &crate::kind::Kind, cell: &str, method: &str) -> Option<String> {
     if method.is_empty() || method.starts_with("__") {
         return None;
     }
@@ -1067,7 +1062,7 @@ pub(crate) fn journal_tail(k: &crate::kind::Kind, journal: &Path, wm: i64) -> Re
             ours.push(Journaled::Skip { seq, why: None });
             continue;
         }
-        let Some(method) = method_in(k, cell, m) else {
+        let Some(method) = method_of(k, cell, m) else {
             match m.starts_with("__") && (cell == k.id || k.aio_cells.iter().any(|s| s.cell == cell)) || cell == "aio" {
                 true => {
                     return Err(format!("journal entry {seq} ({kind}) carries state, not a call aio-rs can replay"));

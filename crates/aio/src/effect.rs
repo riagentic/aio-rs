@@ -11,8 +11,10 @@ pub(crate) type Fut = Pin<Box<dyn Future<Output = ()> + Send>>;
 #[cfg(target_arch = "wasm32")]
 pub(crate) type Fut = Pin<Box<dyn Future<Output = ()>>>;
 
+/// An effect's run: natively on its cell's handle, the cell's type erased
+/// (the runtime that starts it is compiled once, not once per cell).
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) type Run<T> = Box<dyn FnOnce(Handle<T>) -> Fut + Send>;
+pub(crate) type Run = Box<dyn FnOnce(crate::handle::Raw) -> Fut + Send>;
 #[cfg(target_arch = "wasm32")]
 pub(crate) type Run<T> = Box<dyn FnOnce(Handle<T>) -> Fut>;
 
@@ -306,7 +308,23 @@ pub struct Effect<T: Cell> {
     pub(crate) key: String,
     pub(crate) mode: Mode,
     pub(crate) timeout: Option<Duration>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) run: Run,
+    #[cfg(not(target_arch = "wasm32"))]
+    cell: std::marker::PhantomData<T>,
+    #[cfg(target_arch = "wasm32")]
     pub(crate) run: Run<T>,
+}
+
+/// An effect as a call hands it to the runtime, its cell's type erased.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct Erased {
+    /// Its cell's type: an effect of another cell is never started on this one.
+    pub cell: std::any::TypeId,
+    pub key: String,
+    pub mode: Mode,
+    pub timeout: Option<Duration>,
+    pub run: Run,
 }
 
 impl<T: Cell> Effect<T> {
@@ -315,7 +333,33 @@ impl<T: Cell> Effect<T> {
     where
         F: Future<Output = ()> + MaybeSend + 'static,
     {
-        Self { key: key.into(), mode: Mode::Queue, timeout: None, run: Box::new(move |h| Box::pin(f(h))) }
+        #[cfg(not(target_arch = "wasm32"))]
+        let run: Run = Box::new(move |h| Box::pin(f(Handle::of(h))));
+        #[cfg(target_arch = "wasm32")]
+        let run: Run<T> = Box::new(move |h| Box::pin(f(h)));
+        Self {
+            key: key.into(),
+            mode: Mode::Queue,
+            timeout: None,
+            run,
+            #[cfg(not(target_arch = "wasm32"))]
+            cell: std::marker::PhantomData,
+        }
+    }
+
+    /// As a call's [`crate::cx::Asks`] hold it.
+    pub(crate) fn asked(self) -> crate::cx::Asked {
+        #[cfg(not(target_arch = "wasm32"))]
+        let me = Erased {
+            cell: std::any::TypeId::of::<T>(),
+            key: self.key,
+            mode: self.mode,
+            timeout: self.timeout,
+            run: self.run,
+        };
+        #[cfg(target_arch = "wasm32")]
+        let me = self;
+        Box::new(me)
     }
 
     pub fn mode(mut self, m: Mode) -> Self {

@@ -57,6 +57,7 @@ pub(crate) struct Kind {
     pub diagnostics: bool,
     pub saved: bool,
     pub coalesce: bool,
+    pub redact: bool,
     pub migrates: bool,
     pub screened: bool,
     pub transient: &'static [&'static str],
@@ -68,9 +69,15 @@ pub(crate) struct Kind {
     pub transaction: Option<Transaction>,
     pub fields: &'static [Field],
     pub methods: &'static [&'static str],
+    pub signatures: &'static [&'static str],
+    pub client: &'static [&'static str],
     pub redacted: &'static [&'static str],
     pub coalesced: &'static [&'static str],
+    pub skip_if_running: &'static [&'static str],
     pub untraveled: &'static [&'static str],
+    pub ttl: &'static [&'static str],
+    pub on_start: Option<&'static str>,
+    pub on_stop: Option<&'static str>,
     pub on_aio: Option<&'static str>,
     pub schedules: &'static [Declared],
     pub default: fn() -> St,
@@ -81,6 +88,9 @@ pub(crate) struct Kind {
     pub blind: fn(&str) -> u64,
     pub async_mode: fn(&str) -> Option<Mode>,
     pub redacts: fn(&str) -> bool,
+    /// Its type's name, as a test names it.
+    #[cfg(feature = "testing")]
+    pub name: fn() -> &'static str,
 }
 
 /// [`Kind`] of each cell type, made as it builds.
@@ -96,6 +106,7 @@ impl<T: Cell> KindOf for T {
         diagnostics: T::DIAGNOSTICS,
         saved: T::SAVED,
         coalesce: T::COALESCE,
+        redact: T::REDACT,
         migrates: T::MIGRATES,
         screened: T::SCREENED,
         transient: T::TRANSIENT,
@@ -107,9 +118,15 @@ impl<T: Cell> KindOf for T {
         transaction: T::TRANSACTION,
         fields: T::FIELDS,
         methods: T::METHODS,
+        signatures: T::SIGNATURES,
+        client: T::CLIENT,
         redacted: T::REDACTED,
         coalesced: T::COALESCED,
+        skip_if_running: T::SKIP_IF_RUNNING,
         untraveled: T::UNTRAVELED,
+        ttl: T::TTL,
+        on_start: T::ON_START,
+        on_stop: T::ON_STOP,
         on_aio: T::ON_AIO,
         schedules: T::SCHEDULES,
         default: || Arc::new(T::default()),
@@ -120,6 +137,8 @@ impl<T: Cell> KindOf for T {
         blind: T::blind,
         async_mode: T::async_mode,
         redacts: T::redacts,
+        #[cfg(feature = "testing")]
+        name: crate::testing::name::<T>,
     };
 }
 

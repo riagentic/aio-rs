@@ -2934,6 +2934,37 @@ fn written(c: &Kept, w: Write<'_>) -> Result<(Vec<u64>, u64, Value)> {
     Ok((logged_seqs, seq, kept_saved))
 }
 
+/// A [`Store`], its cell's type erased: its [`Core`] (by `Deref`), or
+/// itself again (as `dyn Any`).
+pub(crate) trait AnyStore: std::any::Any + Send {
+    fn core(&self) -> &Core;
+    fn core_mut(&mut self) -> &mut Core;
+}
+
+impl<T: Cell> AnyStore for Store<T> {
+    fn core(&self) -> &Core {
+        &self.core
+    }
+
+    fn core_mut(&mut self) -> &mut Core {
+        &mut self.core
+    }
+}
+
+impl std::ops::Deref for dyn AnyStore {
+    type Target = Core;
+
+    fn deref(&self) -> &Core {
+        self.core()
+    }
+}
+
+impl std::ops::DerefMut for dyn AnyStore {
+    fn deref_mut(&mut self) -> &mut Core {
+        self.core_mut()
+    }
+}
+
 impl<T: Cell> Drop for Store<T> {
     fn drop(&mut self) {
         self.core.close();

@@ -123,13 +123,13 @@ pub const OPERATOR: bool = cfg!(feature = "dev");
 /// tools there may also call any method, list the open links, travel in
 /// time and load a state.
 pub async fn serve<T: Cell>(h: Handle<T>, l: crate::ipc::Listener, limits: Limits) -> std::io::Result<()> {
-    serve_with(h, l, limits, crate::link::no_calls(), OPERATOR, Default::default()).await
+    serve_with(h.raw, l, limits, crate::link::no_calls(), OPERATOR, Default::default()).await
 }
 
 /// [`serve`], each link running `calls`' server functions, heard and its
 /// peers resolved by `hooks`.
-pub(crate) async fn serve_with<T: Cell>(
-    h: Handle<T>,
+pub(crate) async fn serve_with(
+    h: crate::handle::Raw,
     mut l: crate::ipc::Listener,
     limits: Limits,
     calls: Calls,
@@ -153,8 +153,8 @@ pub(crate) async fn serve_with<T: Cell>(
 }
 
 /// One link on the door, until it leaves.
-async fn link<T: Cell>(
-    h: Handle<T>,
+async fn link(
+    h: crate::handle::Raw,
     mut s: crate::ipc::Stream,
     limits: Limits,
     calls: Calls,
@@ -231,7 +231,7 @@ mod tests {
         let l = crate::ipc::Listener::bind(&addr).unwrap();
         let h = Handle::<Vault>::memory();
         h.store(|s| s.load(&crate::By::System, serde_json::json!({ "n": 1, "secret": "key" }))).unwrap();
-        tokio::spawn(serve_with(h, l, Limits::default(), crate::link::no_calls(), operator, Default::default()));
+        tokio::spawn(serve_with(h.raw.clone(), l, Limits::default(), crate::link::no_calls(), operator, Default::default()));
         let mut s = crate::ipc::connect(&addr).await.unwrap();
         tokio::io::AsyncWriteExt::write_u8(&mut s, VERSION).await.unwrap();
         let mut f = frames(s);

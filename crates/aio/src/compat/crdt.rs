@@ -178,7 +178,7 @@ pub(crate) async fn take<T: Cell>(
         let why = "malformed sync op — this server cannot accept it (an op needs string id/cell/action, an [number, number, string] hlc, and an action that is not framework-internal)";
         return Ok(Taken::Said(named.map(|(id, cell)| rejected(id, cell, why.into(), None))));
     };
-    let Some(method) = method_of::<T>(op.cell, op.action) else {
+    let Some(method) = method_of(<T as crate::kind::KindOf>::KIND, op.cell, op.action) else {
         let why = format!("unknown cell \"{}\" — this server does not sync it", op.cell);
         return Ok(Taken::Said(Some(rejected(op.id, op.cell, why, None))));
     };
@@ -201,15 +201,15 @@ pub(crate) async fn take<T: Cell>(
     let args = if args.is_array() { args } else { json!([]) };
     let stale = now - op.hlc.0 > crate::cx::Op::MAX_AGE_MS - MAX_DRIFT_MS;
     let ran = tokio::task::spawn_blocking(move || {
-        let known = hh.op_seq(&id);
+        let known = hh.raw.op_seq(&id);
         if known.is_none() && stale {
             return None;
         }
         let r = match known {
             Some(_) => Ok(None),
-            None => gate.call(&hh, &by, req.as_ref(), &method, args, Some(&id)),
+            None => gate.call(&hh.raw, &by, req.as_ref(), &method, args, Some(&id)),
         };
-        Some(r.map(|v| (v.is_some(), hh.op_seq(&id))))
+        Some(r.map(|v| (v.is_some(), hh.raw.op_seq(&id))))
     });
     let (new, seq) = match ran.await.map_err(|e| e.to_string())? {
         None => {
@@ -228,7 +228,7 @@ pub(crate) async fn take<T: Cell>(
         Some(Ok(r)) => r,
     };
     let server = {
-        let mut c = h.aio_sync().clock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut c = h.raw.aio_sync().clock.lock().unwrap_or_else(|e| e.into_inner());
         c.receive(op.hlc, now);
         c.tick(crate::store::now_ms())
     };
@@ -242,7 +242,7 @@ pub(crate) async fn take<T: Cell>(
         if let Some(s) = seq {
             frame["serverTs"] = s.into();
         }
-        _ = h.aio_sync().ops.send(Passed { from: link, cell: op.cell.into(), frame: enc("op", frame) });
+        _ = h.raw.aio_sync().ops.send(Passed { from: link, cell: op.cell.into(), frame: enc("op", frame) });
     }
     Ok(Taken::Said(Some(enc("sync-ack", ack))))
 }
@@ -311,7 +311,7 @@ pub(crate) async fn answer<T: Cell>(
             }
         }
     }
-    let view = View::of(h, seer);
+    let view = View::of(&h.raw, seer);
     let shown = cells::<T>(&view.shown);
     let (mut snapshot, mut at, mut reset) = (serde_json::Map::new(), serde_json::Map::new(), Vec::new());
     for (cell, last) in asked {

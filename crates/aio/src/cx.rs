@@ -236,7 +236,7 @@ impl Cx {
     pub fn then<T: crate::Cell>(&self, effect: crate::Effect<T>) {
         let mut es = self.effects.borrow_mut();
         self.then.set(Some(es.len()));
-        es.push(Box::new(effect));
+        es.push(effect.asked());
     }
 
     /// A call whose end goes to `reply` (an async method's caller waits).
@@ -329,7 +329,7 @@ impl Cx {
 
     /// Start an effect after this call commits (never if it is refused).
     pub fn run<T: crate::Cell>(&self, effect: crate::Effect<T>) {
-        self.effects.borrow_mut().push(Box::new(effect));
+        self.effects.borrow_mut().push(effect.asked());
     }
 
     /// Tell the people using the app `t` after this call commits (aio

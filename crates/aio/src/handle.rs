@@ -1,7 +1,9 @@
 //! A shareable door to one store: one call at a time (the cell is an actor),
 //! listeners told after each commit, resources the cell owns, and the
 //! runtime part: effects started after commits, schedules fired on time.
-use crate::effect::{Abort, Effect, Mode};
+use crate::effect::{Abort, Erased, Mode};
+use crate::kind::{Kind, KindOf, St, typed};
+use crate::store::AnyStore;
 use crate::{By, Cell, Door, Error, Result, Store};
 use serde_json::Value;
 use std::{
@@ -19,7 +21,7 @@ use tokio::{
     task::AbortHandle,
 };
 
-type Listener<T> = Arc<dyn Fn(&Arc<T>) + Send + Sync>;
+type Listener = Arc<dyn Fn(&St) + Send + Sync>;
 type Reaction = Arc<dyn Fn(&crate::Event) + Send + Sync>;
 
 /// A caller refused while the app closes may retry after this.
@@ -149,15 +151,19 @@ type Reach = Arc<dyn Fn(&By, &str, Value) -> Result<Value> + Send + Sync>;
 #[derive(Clone, Default)]
 pub(crate) struct Dir(Arc<Mutex<HashMap<&'static str, Reach>>>);
 
-struct Inner<T: Cell> {
-    store: Mutex<Store<T>>,
+struct Inner {
+    kind: &'static Kind,
+    /// Its cell's type: an effect of another cell is never started here.
+    cell: std::any::TypeId,
+    /// Its [`Store`], the cell's type erased.
+    store: Mutex<Box<dyn AnyStore>>,
     /// Its store's file: its turn at it is taken before the store's lock.
     file: crate::store::Shared,
     /// The app's other cells, once it joined them ([`Handle::join`]).
     dir: Mutex<Option<Dir>>,
     /// The last committed state and its event, readable while a call runs.
-    shown: Mutex<(u64, Arc<T>)>,
-    listeners: Mutex<Vec<Listener<T>>>,
+    shown: Mutex<(u64, St)>,
+    listeners: Mutex<Vec<Listener>>,
     in_order: InOrder,
     /// Other cells' reactions to its committed calls ([`Handle::listens_to`]).
     reactions: Mutex<Vec<Reaction>>,
@@ -182,7 +188,7 @@ struct Inner<T: Cell> {
     /// What its calls told the people using the app, for synced clients.
     tells: tokio::sync::broadcast::Sender<crate::tell::Tell>,
     /// Set by a test (`aio::testing`): effects wait here until it starts them.
-    held: Mutex<Option<Vec<Effect<T>>>>,
+    held: Mutex<Option<Vec<Erased>>>,
     /// Held, what its last commit asked for, stamped in commit order
     /// across cells (`TestCells::last_asked`).
     #[cfg(feature = "testing")]
@@ -216,13 +222,21 @@ struct Inner<T: Cell> {
 /// (`FeedbackCalls`, `UpdatesCalls`: `dismiss`, `refresh`, `apply`, …) are
 /// those of aio's own cells, for a `Handle` of that cell only.
 pub struct Handle<T: Cell> {
-    inner: Arc<Inner<T>>,
+    pub(crate) raw: Raw,
+    cell: std::marker::PhantomData<T>,
+}
+
+/// A handle, its cell's type erased: what the runtime does with a cell
+/// is compiled once, not once per cell ([`crate::kind`]).
+#[derive(Clone)]
+pub(crate) struct Raw {
+    inner: Arc<Inner>,
     by: By,
 }
 
-impl<T: Cell> crate::store::Member for Inner<T> {
+impl crate::store::Member for Inner {
     fn end(&self, joint: u64, kept: bool) {
-        lock(&self.store).core.joint_end(joint, kept);
+        lock(&self.store).joint_end(joint, kept);
     }
 
     fn react(&self) {
@@ -230,12 +244,12 @@ impl<T: Cell> crate::store::Member for Inner<T> {
         if rs.is_empty() {
             return;
         }
-        let done = lock(&self.store).core.unreacted();
+        let done = lock(&self.store).unreacted();
         done.iter().for_each(|e| rs.iter().for_each(|r| r(e)));
     }
 
     fn show(self: Arc<Self>, t: Then) -> Box<dyn FnOnce()> {
-        let h = Handle { inner: self, by: By::System };
+        let h = Raw { inner: self, by: By::System };
         let shown = match t {
             Then::Told { wake } => Some(h.after_commit(wake)),
             Then::Fired => Some(h.after_commit(false)),
@@ -256,7 +270,7 @@ impl<T: Cell> crate::store::Member for Inner<T> {
 
 impl<T: Cell> Clone for Handle<T> {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone(), by: self.by.clone() }
+        Self::of(self.raw.clone())
     }
 }
 
@@ -268,44 +282,11 @@ fn lock<X>(m: &Mutex<X>) -> MutexGuard<'_, X> {
 
 impl<T: Cell> Handle<T> {
     pub fn new(store: Store<T>) -> Self {
-        let inner = Inner {
-            shown: Mutex::new((store.seq(), store.shared())),
-            file: store.core.file(),
-            store: Mutex::new(store),
-            dir: Mutex::default(),
-            listeners: Mutex::default(),
-            in_order: InOrder::default(),
-            reactions: Mutex::default(),
-            watchers: Mutex::default(),
-            owned: Mutex::default(),
-            running: Mutex::default(),
-            skipped: Mutex::default(),
-            tails: Mutex::default(),
-            order: Mutex::default(),
-            ran: AtomicU64::new(0),
-            ended: Notify::new(),
-            wake: Notify::new(),
-            closing: AtomicBool::new(false),
-            events: tokio::sync::broadcast::channel(1024).0,
-            tells: tokio::sync::broadcast::channel(64).0,
-            held: Mutex::default(),
-            #[cfg(feature = "testing")]
-            last_held: Mutex::default(),
-            failed: Mutex::default(),
-            off: AtomicBool::new(false),
-            paused: AtomicBool::new(false),
-            live: AtomicBool::new(false),
-            tally: Mutex::default(),
-            counting: Mutex::default(),
-            answered: Mutex::default(),
-            inflight: Default::default(),
-            #[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]
-            aio_sync: Default::default(),
-        };
-        for k in crate::perf::unknown::<T>() {
-            crate::warn!(cat: "perf", "aio.toml [perf.methods] \"{k}\" names no method of {}: it has {}", T::ID, T::METHODS.join(", "));
-        }
-        Self { inner: Arc::new(inner), by: By::System }
+        Self::of(Raw::new(T::KIND, std::any::TypeId::of::<T>(), Box::new(store)))
+    }
+
+    pub(crate) fn of(raw: Raw) -> Self {
+        Self { raw, cell: std::marker::PhantomData }
     }
 
     pub fn memory() -> Self {
@@ -324,46 +305,35 @@ impl<T: Cell> Handle<T> {
     /// Is `other` a handle of this same store?
     #[cfg(all(feature = "kit", feature = "server"))]
     pub(crate) fn same(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.inner, &other.inner)
+        Arc::ptr_eq(&self.raw.inner, &other.raw.inner)
     }
 
     /// The same store, with calls recorded as caused by `by`.
     pub fn by(&self, by: By) -> Self {
-        Self { inner: self.inner.clone(), by }
+        Self::of(self.raw.by(by))
     }
 
     /// The state now, cheap to keep. Never waits for a running call: it is
     /// the last committed state (a busy cell stays readable).
     pub fn state(&self) -> Arc<T> {
-        lock(&self.inner.shown).1.clone()
+        typed(self.raw.state())
     }
 
     /// Run `f` with the store (history, time travel). `f` must not use this handle.
     /// A state it changes (a rewind) forgets the `#[ttl]` answers.
     pub fn store<R>(&self, f: impl FnOnce(&mut Store<T>) -> R) -> R {
-        let turn = self.turn();
-        let r = {
-            let mut s = lock(&self.inner.store);
-            let before = s.shared();
-            // What it reads (the log, the history) has the held run in it.
-            if let Err(e) = s.flush() {
-                eprintln!("[aio] {}: a held run could not be saved: {e}", T::ID);
-            }
-            let r = f(&mut s);
-            if !Arc::ptr_eq(&before, &s.shared()) {
-                lock(&self.inner.answered).clear();
-            }
-            r
-        };
-        if let Err(e) = self.end(turn, Then::Told { wake: true }) {
-            eprintln!("[aio] {}: {e}", T::ID);
-        }
-        r
+        let (mut f, mut r) = (Some(f), None);
+        self.raw.store_dyn(&mut |s| {
+            let s: &mut dyn Any = s;
+            let s = s.downcast_mut::<Store<T>>().expect("a handle's own store");
+            r = f.take().map(|f| f(s));
+        });
+        r.expect("the store ran it")
     }
 
     /// Call `f` with the new state after each commit.
     pub fn listen(&self, f: impl Fn(&Arc<T>) + Send + Sync + 'static) {
-        lock(&self.inner.listeners).push(Arc::new(f));
+        self.raw.listen(Arc::new(move |st: &St| f(&typed(st.clone()))));
     }
 
     /// Call `on` with `f(state)` (a field, a `#[derived]` value) now and
@@ -419,35 +389,308 @@ impl<T: Cell> Handle<T> {
         method: &'static str,
         f: impl Fn(&Handle<T>, &crate::Event) -> Result<R> + Send + Sync + 'static,
     ) {
+        let me = self.clone();
+        let react = move |e: &crate::Event| f(&me.by(e.by.clone()), e).map(drop);
+        self.raw.listens_to(&source.raw, method, Arc::new(react));
+    }
+
+    /// The state and the last event in it, read together.
+    pub fn snapshot(&self) -> (u64, Arc<T>) {
+        let (seq, st) = self.raw.snapshot();
+        (seq, typed(st))
+    }
+
+    /// [`Raw::resume`] (an async method's next step).
+    pub(crate) fn resume(&self, method: &str, args: Value, reply: Option<crate::answer::Reply>) -> Result<Value> {
+        self.raw.resume(method, args, reply)
+    }
+
+    /// [`Raw::failed`] (an async method's await refused).
+    pub(crate) fn failed(&self, why: &str) {
+        self.raw.failed(why)
+    }
+
+    /// Wait until `f` holds on the state (aio's `until`), checked now and after
+    /// each commit; refused if it doesn't within `timeout`.
+    pub async fn until(&self, timeout: Duration, f: impl Fn(&T) -> bool) -> Result {
+        let mut ev = self.events();
+        let wait = async {
+            // A lagged receiver only skipped events: the state is checked anew.
+            while !f(&self.state()) {
+                _ = ev.recv().await;
+            }
+        };
+        match tokio::time::timeout(timeout, wait).await {
+            Ok(()) => Ok(()),
+            Err(_) => crate::reject!("{}: the condition did not hold within {timeout:?}", T::ID),
+        }
+    }
+
+    /// The whole state as aio's `app.snapshot()` has it: an object of cells,
+    /// each its whole state (`#[server]` fields too), a `#[aio_cell]` field
+    /// under its aio cell's name. What [`Self::load_snapshot`] takes back.
+    pub fn export_snapshot(&self) -> Result<Value> {
+        self.raw.export_snapshot()
+    }
+
+    /// Replace the state with `snap`, as [`Self::export_snapshot`] made it (aio's
+    /// `loadSnapshot`): a new event, saved before it returns, sent to every
+    /// client. Refused when it isn't an object of objects, or when its cells
+    /// aren't this app's (a file from another app would wipe the cells it
+    /// lacks); `force` loads it anyway: a missing cell starts from its
+    /// defaults, an unknown one is dropped (said).
+    pub fn load_snapshot(&self, snap: &Value, force: bool) -> Result {
+        self.raw.load_snapshot(snap, force)
+    }
+
+    /// Call `f` when `pending` may have changed (an effect started or ended).
+    pub fn on_pending(&self, f: impl Fn() + Send + Sync + 'static) {
+        self.raw.on_pending(f)
+    }
+
+    pub fn owns(&self, key: &str) -> bool {
+        self.raw.owns(key)
+    }
+
+    /// Is the cell enabled (taking calls, firing schedules)?
+    pub fn enabled(&self) -> bool {
+        self.raw.enabled()
+    }
+
+    /// Wait until no effect with this key runs or waits. A caller whose
+    /// `Mode::First` effect was skipped waits here for the running one, and
+    /// then reads the state it left: the first's result, shared.
+    pub async fn done(&self, key: &str) {
+        self.raw.done(key).await
+    }
+
+    /// Shutting down: only the running effects' own calls still commit.
+    pub fn closing(&self) -> bool {
+        self.raw.closing()
+    }
+
+    /// Pause (`true`) or resume time travel: while paused every call is
+    /// refused, never dropped as if it ran, and schedules are held
+    /// (those missed fire once on resume); running effects still commit,
+    /// and rewinds still move the state.
+    pub fn pause(&self, on: bool) {
+        self.raw.pause(on)
+    }
+
+    /// Is time travel paused?
+    pub fn paused(&self) -> bool {
+        self.raw.paused()
+    }
+
+    /// Time travel (aio's `tt-cmd`, `useTimeTravel`): `ask` it a step (`None`:
+    /// only where the cell is), then the [`Timeline`]. A step pauses the
+    /// cell, as [`Self::pause`] does, so it stays where travel put it.
+    pub fn travel(&self, ask: Option<TimeAsk>) -> Result<Timeline> {
+        self.raw.travel(ask)
+    }
+
+    /// Shut down within `budget`: refuse new calls (`retry after`),
+    /// stop the schedules, let running effects finish and commit; those
+    /// still running at the deadline are aborted and named.
+    pub async fn shutdown(&self, budget: Duration) -> Drained {
+        self.raw.shutdown(budget).await
+    }
+
+    /// The held run into the log and the state snapshotted now (`ax dev`
+    /// does it before each hot-patch): a later start replays only calls
+    /// the new code made.
+    pub fn checkpoint(&self) -> crate::Result {
+        self.raw.checkpoint()
+    }
+
+    /// A synced client's call (see `Store::call_from`); `Ok(None)`: a re-send, not applied again.
+    pub fn call_from(&self, method: &str, args: Value, op: &str) -> Result<Option<Value>> {
+        self.raw.call_from(method, args, op)
+    }
+
+    /// Committed events from now on, each with the event before it. A
+    /// subscriber that falls behind gets `Lagged` and must take a full state.
+    pub fn events(&self) -> tokio::sync::broadcast::Receiver<(u64, crate::Event)> {
+        self.raw.events()
+    }
+
+    /// What its calls tell the people using the app (`cx.tell`), from now on.
+    pub fn tells(&self) -> tokio::sync::broadcast::Receiver<crate::tell::Tell> {
+        self.raw.tells()
+    }
+
+    /// How many calls of async method `method` are in flight (its effects
+    /// running or queued, under any `#[ttl]` key); `None`: every effect of
+    /// the cell. A count, never a flag: two overlapping calls are two.
+    /// `on_pending` tells when it changes, so a view re-renders on it.
+    pub fn pending(&self, method: Option<&str>) -> usize {
+        self.raw.pending(method)
+    }
+
+    /// Is an effect with this key still running?
+    pub fn busy(&self, key: &str) -> bool {
+        self.raw.busy(key)
+    }
+
+    /// Fire saved schedules on time, until the task is dropped or aborted.
+    /// Schedules missed while the app was off fire once, right away.
+    pub fn start(&self) -> tokio::task::JoinHandle<()> {
+        self.raw.start()
+    }
+}
+
+impl Raw {
+    fn new(kind: &'static Kind, cell: std::any::TypeId, store: Box<dyn AnyStore>) -> Self {
+        let inner = Inner {
+            kind,
+            cell,
+            shown: Mutex::new((store.seq(), store.shared())),
+            file: store.file(),
+            store: Mutex::new(store),
+            dir: Mutex::default(),
+            listeners: Mutex::default(),
+            in_order: InOrder::default(),
+            reactions: Mutex::default(),
+            watchers: Mutex::default(),
+            owned: Mutex::default(),
+            running: Mutex::default(),
+            skipped: Mutex::default(),
+            tails: Mutex::default(),
+            order: Mutex::default(),
+            ran: AtomicU64::new(0),
+            ended: Notify::new(),
+            wake: Notify::new(),
+            closing: AtomicBool::new(false),
+            events: tokio::sync::broadcast::channel(1024).0,
+            tells: tokio::sync::broadcast::channel(64).0,
+            held: Mutex::default(),
+            #[cfg(feature = "testing")]
+            last_held: Mutex::default(),
+            failed: Mutex::default(),
+            off: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            live: AtomicBool::new(false),
+            tally: Mutex::default(),
+            counting: Mutex::default(),
+            answered: Mutex::default(),
+            inflight: Default::default(),
+            #[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]
+            aio_sync: Default::default(),
+        };
+        for m in crate::perf::unknown(kind.id, kind.methods) {
+            crate::warn!(cat: "perf", "aio.toml [perf.methods] \"{m}\" names no method of {}: it has {}", kind.id, kind.methods.join(", "));
+        }
+        Self { inner: Arc::new(inner), by: By::System }
+    }
+
+    pub(crate) fn by(&self, by: By) -> Self {
+        Self { inner: self.inner.clone(), by }
+    }
+
+    /// Its cell's constants.
+    pub(crate) fn kind(&self) -> &'static Kind {
+        self.inner.kind
+    }
+
+    pub(crate) fn state(&self) -> St {
+        lock(&self.inner.shown).1.clone()
+    }
+
+    pub(crate) fn snapshot(&self) -> (u64, St) {
+        lock(&self.inner.shown).clone()
+    }
+
+    /// [`Handle::store`]: `f` with the store, then the listeners told.
+    pub(crate) fn store_dyn(&self, f: &mut dyn FnMut(&mut dyn AnyStore)) {
+        let turn = self.turn();
+        {
+            let mut s = lock(&self.inner.store);
+            let before = s.shared();
+            // What it reads (the log, the history) has the held run in it.
+            if let Err(e) = s.flush() {
+                eprintln!("[aio] {}: a held run could not be saved: {e}", self.inner.kind.id);
+            }
+            f(&mut **s);
+            if !Arc::ptr_eq(&before, &s.shared()) {
+                lock(&self.inner.answered).clear();
+            }
+        }
+        if let Err(e) = self.end(turn, Then::Told { wake: true }) {
+            eprintln!("[aio] {}: {e}", self.inner.kind.id);
+        }
+    }
+
+    /// [`Self::store_dyn`], with what `f` returns.
+    pub(crate) fn store<R>(&self, f: impl FnOnce(&mut crate::store::Core) -> R) -> R {
+        let (mut f, mut r) = (Some(f), None);
+        self.store_dyn(&mut |s| r = f.take().map(|f| f(s)));
+        r.expect("the store ran it")
+    }
+
+    pub(crate) fn listen(&self, f: Listener) {
+        lock(&self.inner.listeners).push(f);
+    }
+
+    /// [`Handle::listens_to`], `f` the reaction.
+    fn listens_to(&self, source: &Raw, method: &'static str, f: Arc<dyn Fn(&crate::Event) -> Result + Send + Sync>) {
+        let (k, s) = (self.inner.kind, source.inner.kind);
         assert!(
-            S::METHODS.contains(&method),
+            s.methods.contains(&method),
             "{}.listens_to: {} has no method `{method}` (its methods: {})",
-            T::ID,
-            S::ID,
-            S::METHODS.join(", ")
+            k.id,
+            s.id,
+            s.methods.join(", ")
         );
         let me = self.clone();
         let react = move |e: &crate::Event| {
             if e.method != method {
                 return;
             }
-            let why = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&me.by(e.by.clone()), e))) {
-                Ok(Ok(_)) => return,
+            let why = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(e))) {
+                Ok(Ok(())) => return,
                 Ok(Err(err)) => format!("refused: {err}"),
                 Err(p) => format!("panicked: {}", crate::report::panic_text(&*p)),
             };
-            let msg = format!("{}: its reaction to {}.{method} {why}", T::ID, S::ID);
+            let msg = format!("{}: its reaction to {}.{method} {why}", k.id, s.id);
             eprintln!("[aio] {msg}");
             me.problem("reaction", &msg);
         };
         source.inner.file.react();
         self.inner.file.react();
-        lock(&source.inner.store).core.listened();
+        lock(&source.inner.store).listened();
         lock(&source.inner.reactions).push(Arc::new(react));
     }
 
-    /// Call `f` when `pending` may have changed (an effect started or ended).
-    pub fn on_pending(&self, f: impl Fn() + Send + Sync + 'static) {
+    /// The whole state as aio's `app.snapshot()` has it (see [`Handle::export_snapshot`]).
+    pub(crate) fn export_snapshot(&self) -> Result<Value> {
+        Ok(snapshot_cells(self.inner.kind, crate::kind::json(&*self.state())?))
+    }
+
+    /// [`Handle::load_snapshot`].
+    pub(crate) fn load_snapshot(&self, snap: &Value, force: bool) -> Result {
+        let st = snapshot_state(self.inner.kind, snap, force)?;
+        self.store(|s| s.load(&By::System, st))
+    }
+
+    pub(crate) fn call(&self, method: &str, args: Value) -> Result<Value> {
+        self.enter(None, None, method, args, None, None).map(|(v, _)| v.unwrap_or_default())
+    }
+
+    pub(crate) fn ask(&self, method: &str, args: Value) -> Result<crate::Answer> {
+        self.enter(None, None, method, args, None, None).map(|(_, a)| a)
+    }
+
+
+
+
+
+
+
+
+
+
+
+    pub(crate) fn on_pending(&self, f: impl Fn() + Send + Sync + 'static) {
         lock(&self.inner.watchers).push(Arc::new(f));
     }
 
@@ -459,7 +702,7 @@ impl<T: Cell> Handle<T> {
         drop(old);
     }
 
-    pub fn owns(&self, key: &str) -> bool {
+    pub(crate) fn owns(&self, key: &str) -> bool {
         lock(&self.inner.owned).contains_key(key)
     }
 
@@ -468,6 +711,7 @@ impl<T: Cell> Handle<T> {
     /// and let the scheduler see changed schedules. A joint commit shows
     /// every cell in it before it tells any, so each listener sees all of it.
     fn after_commit(&self, wake: bool) -> Shown {
+        let k = self.inner.kind;
         // Before the state is shown: from then until its listeners are told.
         let telling = Telling::new();
         // In the file's turn: never a joint commit's state before it commits.
@@ -478,9 +722,9 @@ impl<T: Cell> Handle<T> {
             // and queued effects keep commit order.
             let _order = lock(&self.inner.order);
             let (effects, events, changed) = {
-                let s = &mut lock(&self.inner.store).core;
+                let mut s = lock(&self.inner.store);
                 let mut shown = lock(&self.inner.shown);
-                let now = crate::kind::typed::<T>(s.shared());
+                let now = s.shared();
                 let changed = shown.0 != s.seq() || !Arc::ptr_eq(&shown.1, &now);
                 *shown = (s.seq(), now);
                 (s.take_effects(), s.take_committed(), changed)
@@ -502,11 +746,12 @@ impl<T: Cell> Handle<T> {
             #[cfg(feature = "testing")]
             let mut note = |a| _ = holding.then(|| asked.push(a));
             for e in effects {
-                match e.downcast::<Effect<T>>() {
+                match e.downcast::<Erased>() {
+                    Ok(e) if e.cell != self.inner.cell => eprintln!("[aio] {}: an effect for another cell was dropped", k.id),
                     Ok(e) => match lock(&self.inner.held).as_mut() {
                         #[cfg(feature = "testing")]
                         Some(held) => {
-                            note(crate::testing::AskedFor::effect::<T>(e.key.clone(), e.mode, e.timeout));
+                            note(crate::testing::AskedFor::effect((k.name)(), e.key.clone(), e.mode, e.timeout));
                             held.push(*e)
                         }
                         #[cfg(not(feature = "testing"))]
@@ -531,7 +776,7 @@ impl<T: Cell> Handle<T> {
                                 Err(e) if e.is::<crate::Plan>() => {
                                     note(crate::testing::AskedFor::Schedule(*e.downcast().expect("a plan")))
                                 }
-                                Err(_) => eprintln!("[aio] {}: an effect for another cell was dropped", T::ID),
+                                Err(_) => eprintln!("[aio] {}: an effect for another cell was dropped", k.id),
                             },
                         },
                     },
@@ -549,6 +794,7 @@ impl<T: Cell> Handle<T> {
     }
 
     fn tell_committed(&self, s: Shown) {
+        let k = self.inner.kind;
         let Shown { telling, started, done, changed, acting, wake } = s;
         // A call that changed nothing (a cursor already at the end) tells nobody.
         if changed {
@@ -560,8 +806,8 @@ impl<T: Cell> Handle<T> {
         }
         drop(telling);
         if !acting.is_empty() && !done.is_empty() {
-            let st = serde_json::to_value(&*self.state()).unwrap_or_default();
-            done.iter().for_each(|e| crate::acted(&acting, T::ID, e, &st));
+            let st = self.state().to_json().unwrap_or_default();
+            done.iter().for_each(|e| crate::acted(&acting, k.id, e, &st));
         }
         if started {
             tell(&self.inner);
@@ -571,11 +817,11 @@ impl<T: Cell> Handle<T> {
         }
         self.count_failures();
         // A transaction its aborts ended: the next serialized call's turn.
-        if T::TRANSACTION.is_some() {
+        if k.transaction.is_some() {
             let turn = self.turn();
-            let swept = lock(&self.inner.store).core.tx_sweep();
+            let swept = lock(&self.inner.store).tx_sweep();
             if let Err(e) = self.end(turn, if swept { Then::Told { wake } } else { Then::Nothing }) {
-                eprintln!("[aio] {}: {e}", T::ID);
+                eprintln!("[aio] {}: {e}", k.id);
             }
         }
     }
@@ -600,13 +846,14 @@ impl<T: Cell> Handle<T> {
     /// that took them tripped the breaker, so a caller never sees the cell
     /// enabled past its trip. A count within the trip (its `#[on_stop]`) goes on.
     fn count_failures(&self) {
+        let k = self.inner.kind;
         let me = Arc::as_ptr(&self.inner) as usize;
         let _one = (!COUNTING.with_borrow(|c| c.contains(&me))).then(|| {
             let g = lock(&self.inner.counting);
             COUNTING.with_borrow_mut(|c| c.push(me));
             (g, Counting(me))
         });
-        let fs = lock(&self.inner.store).core.take_failures();
+        let fs = lock(&self.inner.store).take_failures();
         let Some((_, last)) = fs.last() else { return };
         if lock(&self.inner.held).is_some() {
             let unseen = fs.iter().filter_map(|(by, why)| match by {
@@ -623,9 +870,9 @@ impl<T: Cell> Handle<T> {
             (tripped, t.count(now))
         };
         if tripped && self.enabled() {
-            let msg = format!("{} disabled after {n} failures; the last: {last}", T::ID);
+            let msg = format!("{} disabled after {n} failures; the last: {last}", k.id);
             eprintln!("[aio] {msg}");
-            crate::health::degrade(&format!("cell {}", T::ID), &msg);
+            crate::health::degrade(&format!("cell {}", k.id), &msg);
             self.problem("tripped", &msg);
             self.switch(false);
         }
@@ -638,8 +885,7 @@ impl<T: Cell> Handle<T> {
         crate::report::problem_in(kind, msg, &*self.state());
     }
 
-    /// Is the cell enabled (taking calls, firing schedules)?
-    pub fn enabled(&self) -> bool {
+    pub(crate) fn enabled(&self) -> bool {
         !self.inner.off.load(Ordering::SeqCst)
     }
 
@@ -647,6 +893,7 @@ impl<T: Cell> Handle<T> {
     /// owned resources dropped; the state stays. Enable: the failures count
     /// from zero, and schedules missed meanwhile fire once.
     pub(crate) fn switch(&self, on: bool) {
+        let k = self.inner.kind;
         if !on {
             _ = self.live(false);
         }
@@ -654,7 +901,7 @@ impl<T: Cell> Handle<T> {
         if on {
             _ = self.live(true);
             lock(&self.inner.tally).clear();
-            crate::health::ok(&format!("cell {}", T::ID));
+            crate::health::ok(&format!("cell {}", k.id));
             self.inner.wake.notify_one();
         } else {
             lock(&self.inner.running).values().flatten().for_each(|(_, a)| a.abort());
@@ -667,22 +914,23 @@ impl<T: Cell> Handle<T> {
     /// way. A refusal (or a panic) is said in the log and a report, never
     /// stops the boot or the shutdown.
     pub(crate) fn live(&self, on: bool) -> Result {
+        let k = self.inner.kind;
         if self.inner.live.swap(on, Ordering::SeqCst) == on {
             return Ok(());
         }
-        if on && !T::SCHEDULES.is_empty() {
+        if on && !k.schedules.is_empty() {
             let _hold = self.inner.file.call();
-            if let Err(e) = lock(&self.inner.store).core.declare() {
+            if let Err(e) = lock(&self.inner.store).declare() {
                 eprintln!("[aio] {e}");
                 crate::report::problem("schedule", &e.0);
             }
             self.inner.wake.notify_one();
         }
-        let (Some(m), hook) = (if on { (T::ON_START, "on_start") } else { (T::ON_STOP, "on_stop") }) else {
+        let (Some(m), hook) = (if on { (k.on_start, "on_start") } else { (k.on_stop, "on_stop") }) else {
             return Ok(());
         };
-        Door::call(self, m, Value::Null).map(drop).map_err(|e| {
-            let msg = format!("{}: #[{hook}] {m} refused: {e}", T::ID);
+        self.call(m, Value::Null).map(drop).map_err(|e| {
+            let msg = format!("{}: #[{hook}] {m} refused: {e}", k.id);
             eprintln!("[aio] {msg}");
             let (kind, code) = if on { ("hook", crate::Code::InitError) } else { ("hook:stop", crate::Code::DestroyError) };
             self.problem(kind, &msg);
@@ -703,12 +951,13 @@ impl<T: Cell> Handle<T> {
     /// The last committed call's method and time (ms since the epoch).
     pub(crate) fn last_call(&self) -> Option<(String, i64)> {
         let _hold = self.inner.file.call();
-        lock(&self.inner.store).core.last_call()
+        lock(&self.inner.store).last_call()
     }
 
-    fn spawn(&self, e: Effect<T>) {
+    fn spawn(&self, e: Erased) {
+        let k = self.inner.kind;
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
-            eprintln!("[aio] {}: effect `{}` needs a tokio runtime; dropped", T::ID, e.key);
+            eprintln!("[aio] {}: effect `{}` needs a tokio runtime; dropped", k.id, e.key);
             return;
         };
         let mut running = lock(&self.inner.running);
@@ -718,7 +967,7 @@ impl<T: Cell> Handle<T> {
             Mode::Newest if busy => running[&e.key].iter().for_each(|(_, a)| a.abort()),
             _ => {}
         }
-        crate::effect_started(T::ID, &e.key);
+        crate::effect_started(k.id, &e.key);
         // Queued in call order: each waits for the one asked before it, not
         // for whichever task the runtime happens to poll first.
         let (next, after) = match e.mode {
@@ -729,13 +978,13 @@ impl<T: Cell> Handle<T> {
             _ => (None, None),
         };
         let id = self.inner.ran.fetch_add(1, Ordering::Relaxed);
-        let counted = crate::effect::Running::new(format!("effect {}.{}", T::ID, e.key));
+        let counted = crate::effect::Running::new(format!("effect {}.{}", k.id, e.key));
         let end = Ended { inner: self.inner.clone(), key: e.key.clone(), id, _next: next, _running: counted };
         let (h, timeout) = (self.by(By::Effect(e.key.clone())), e.timeout);
         let me = self.clone();
         let (mut run, key) = ((e.run)(h), e.key.clone());
         // Each step timed against the effect budget (`perf`).
-        let fut = std::future::poll_fn(move |cx| crate::perf::step(T::ID, &key, || run.as_mut().poll(cx)));
+        let fut = std::future::poll_fn(move |cx| crate::perf::step(k.id, &key, || run.as_mut().poll(cx)));
         let waiting = after.is_some().then(crate::vitals::Waiting::new);
         let task = rt.spawn(async move {
             let end = end;
@@ -747,7 +996,7 @@ impl<T: Cell> Handle<T> {
             let Some(d) = timeout else { return fut.await };
             let mut run = Box::pin(tokio::time::timeout(d, fut));
             if run.as_mut().await.is_err() {
-                let msg = format!("{}: effect `{}` timed out after {d:?}", T::ID, end.key);
+                let msg = format!("{}: effect `{}` timed out after {d:?}", k.id, end.key);
                 eprintln!("[aio] {msg}");
                 me.problem("effect:timeout", &msg);
                 // Its call, if it waits, hears why (aio's EFFECT_TIMEOUT).
@@ -765,7 +1014,7 @@ impl<T: Cell> Handle<T> {
             r.send(Ok(a.value.clone()));
         }
         let Some((key, ms)) = a.ttl else { return };
-        let now = lock(&self.inner.store).core.now();
+        let now = lock(&self.inner.store).now();
         lock(&self.inner.answered).keep(key, now, ms, a.value);
     }
 
@@ -774,7 +1023,7 @@ impl<T: Cell> Handle<T> {
         if lock(&self.inner.answered).is_empty() {
             return None;
         }
-        let now = lock(&self.inner.store).core.now();
+        let now = lock(&self.inner.store).now();
         lock(&self.inner.answered).get(method, args, who, now)
     }
 
@@ -792,24 +1041,25 @@ impl<T: Cell> Handle<T> {
         op: Option<&str>,
         parts: Option<crate::answer::Parts>,
     ) -> Result<(Option<Value>, crate::Answer)> {
+        let k = self.inner.kind;
         self.open_for_calls()?;
         // Refused, it touches nothing: no kept answer, no running call to
         // join or supersede. Asked again below, on the state it runs on.
         if let Some(w) = who {
-            lock(&self.inner.store).core.state().allow(w, method, &args)?;
+            lock(&self.inner.store).state().allow(w, method, &args)?;
         }
         if op.is_none()
             && let Some(v) = self.answers(method, &args, who)
         {
             return Ok((Some(v.clone()), crate::Answer::ready(Ok(v))));
         }
-        let mode = T::async_mode(method);
+        let mode = (k.async_mode)(method);
         let (reply, answer) = match mode {
             Some(_) => {
                 let (r, a) = crate::answer::Reply::new(method);
                 parts.into_iter().for_each(|p| r.stream_to(p));
-                if let Some(gone) = Gone::<T>::ON {
-                    gone(self, &r);
+                if k.transaction.is_some() {
+                    self.on_gone(&r);
                 }
                 (Some(r), Some(a))
             }
@@ -823,13 +1073,13 @@ impl<T: Cell> Handle<T> {
             return Ok((Some(Value::Null), running));
         }
         if let (Some(mode), Some(r)) = (mode, &reply)
-            && let Some(shared) = self.inner.inflight.enter(mode, crate::answer::key_of::<T>(method, &args, who), r)
+            && let Some(shared) = self.inner.inflight.enter(mode, crate::answer::key_of(k.ttl, Some(mode), method, &args, who), r)
         {
             return Ok((Some(Value::Null), shared));
         }
         let turn = self.turn();
         let out = {
-            let s = &mut lock(&self.inner.store).core;
+            let mut s = lock(&self.inner.store);
             match who.map_or(Ok(()), |w| s.state().allow(w, method, &args)) {
                 Ok(()) => s.call_as(&self.by, who, from, method, args, op, reply.clone()),
                 Err(e) => Err(e),
@@ -856,19 +1106,20 @@ impl<T: Cell> Handle<T> {
     /// cell's own commit. Off a runtime (an effect a test held, dropped by
     /// an abort), the commit that dropped it does that ([`Self::after_commit`]).
     fn on_gone(&self, r: &crate::answer::Reply) {
+        let k = self.inner.kind;
         let me = Arc::downgrade(&self.inner);
         r.on_drop(move || {
             let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
             drop(rt.spawn_blocking(move || {
                 let Some(inner) = me.upgrade() else { return };
-                let h = Handle { inner, by: By::System };
-                if T::TRANSACTION.is_none() {
+                let h = Raw { inner, by: By::System };
+                if k.transaction.is_none() {
                     return;
                 }
                 let turn = h.turn();
-                let swept = lock(&h.inner.store).core.tx_sweep();
+                let swept = lock(&h.inner.store).tx_sweep();
                 if let Err(e) = h.end(turn, if swept { Then::Told { wake: true } } else { Then::Nothing }) {
-                    eprintln!("[aio] {}: {e}", T::ID);
+                    eprintln!("[aio] {}: {e}", k.id);
                 }
             }));
         });
@@ -878,39 +1129,38 @@ impl<T: Cell> Handle<T> {
     /// call whose end goes to `reply`: refused once a newer call of a
     /// `#[mode(newest)]` method came.
     pub(crate) fn resume(&self, method: &str, args: Value, reply: Option<crate::answer::Reply>) -> Result<Value> {
+        let k = self.inner.kind;
         self.open_for_calls()?;
         let base = method.split_once('.').map_or(method, |(m, _)| m);
-        if let (Some(crate::Mode::Newest), Some(r), By::Effect(key)) = (T::async_mode(base), &reply, &self.by)
+        if let (Some(crate::Mode::Newest), Some(r), By::Effect(key)) = ((k.async_mode)(base), &reply, &self.by)
             && !self.inner.inflight.current(key, r)
         {
-            let why = format!("{}.{base}: superseded by a newer call (#[mode(newest)])", T::ID);
+            let why = format!("{}.{base}: superseded by a newer call (#[mode(newest)])", k.id);
             return Err(crate::Rejected::coded(crate::Code::DispatchAborted, why));
         }
         let turn = self.turn();
-        let out = lock(&self.inner.store).core.call_as(&self.by, None, None, method, args, None, reply);
+        let out = lock(&self.inner.store).call_as(&self.by, None, None, method, args, None, reply);
         self.settle(turn, out).map(Option::unwrap_or_default)
     }
 
     /// An async method's await refused (`io.await?`): a failure of the cell, as a refused step is.
     pub(crate) fn failed(&self, why: &str) {
-        lock(&self.inner.store).core.failed(&self.by, why);
+        lock(&self.inner.store).failed(&self.by, why);
         self.count_failures();
     }
 
     /// Stop the running and queued effects with this key, and drop the
     /// held ones (`TestCells`) unstarted.
     fn abort(&self, key: &str) {
+        let k = self.inner.kind;
         if let Some(held) = lock(&self.inner.held).as_mut() {
-            held.retain(|e| !crate::answer::aborts::<T>(key, &e.key));
+            held.retain(|e| !crate::answer::aborts((k.async_mode)(key).is_some(), key, &e.key));
         }
         let running = lock(&self.inner.running);
-        running.iter().filter(|(k, _)| crate::answer::aborts::<T>(key, k)).flat_map(|(_, rs)| rs).for_each(|(_, a)| a.abort());
+        running.iter().filter(|(r, _)| crate::answer::aborts((k.async_mode)(key).is_some(), key, r)).flat_map(|(_, rs)| rs).for_each(|(_, a)| a.abort());
     }
 
-    /// Wait until no effect with this key runs or waits. A caller whose
-    /// `Mode::First` effect was skipped waits here for the running one, and
-    /// then reads the state it left: the first's result, shared.
-    pub async fn done(&self, key: &str) {
+    pub(crate) async fn done(&self, key: &str) {
         loop {
             let mut ended = std::pin::pin!(self.inner.ended.notified());
             ended.as_mut().enable();
@@ -980,45 +1230,38 @@ impl<T: Cell> Handle<T> {
         r
     }
 
-    /// Shutting down: only the running effects' own calls still commit.
-    pub fn closing(&self) -> bool {
+    pub(crate) fn closing(&self) -> bool {
         self.inner.closing.load(Ordering::SeqCst)
     }
 
     fn open_for_calls(&self) -> Result {
+        let k = self.inner.kind;
         let closed = |why: String| Err(crate::Rejected::coded(crate::Code::DispatchClosed, why));
         if self.closing() && !matches!(self.by, By::Effect(_)) {
-            return closed(format!("{}: the app is closing; retry after {RETRY_AFTER_MS} ms", T::ID));
+            return closed(format!("{}: the app is closing; retry after {RETRY_AFTER_MS} ms", k.id));
         }
         if !self.enabled() {
-            return closed(format!("{} is disabled", T::ID));
+            return closed(format!("{} is disabled", k.id));
         }
         if self.paused() && !matches!(self.by, By::Effect(_)) {
-            return closed(format!("{}: paused by time travel (`ax timetravel resume` lets calls in again)", T::ID));
+            return closed(format!("{}: paused by time travel (`ax timetravel resume` lets calls in again)", k.id));
         }
         Ok(())
     }
 
-    /// Pause (`true`) or resume time travel: while paused every call is
-    /// refused, never dropped as if it ran, and schedules are held
-    /// (those missed fire once on resume); running effects still commit,
-    /// and rewinds still move the state.
-    pub fn pause(&self, on: bool) {
+    pub(crate) fn pause(&self, on: bool) {
         self.inner.paused.store(on, Ordering::SeqCst);
         if !on {
             self.inner.wake.notify_one();
         }
     }
 
-    /// Is time travel paused?
-    pub fn paused(&self) -> bool {
+    pub(crate) fn paused(&self) -> bool {
         self.inner.paused.load(Ordering::SeqCst)
     }
 
-    /// Time travel (aio's `tt-cmd`, `useTimeTravel`): `ask` it a step (`None`:
-    /// only where the cell is), then the [`Timeline`]. A step pauses the
-    /// cell, as [`Self::pause`] does, so it stays where travel put it.
-    pub fn travel(&self, ask: Option<TimeAsk>) -> Result<Timeline> {
+    pub(crate) fn travel(&self, ask: Option<TimeAsk>) -> Result<Timeline> {
+        let k = self.inner.kind;
         use crate::store::Travel;
         let step = match ask {
             Some(TimeAsk::Undo) => Some(Travel::Undo),
@@ -1039,9 +1282,9 @@ impl<T: Cell> Handle<T> {
         // unseen: its state is the one already shown (its reactions run).
         let turn = self.turn();
         let read = {
-            let s = &mut lock(&self.inner.store).core;
+            let mut s = lock(&self.inner.store);
             if let Err(e) = s.flush() {
-                eprintln!("[aio] {}: a held run could not be saved: {e}", T::ID);
+                eprintln!("[aio] {}: a held run could not be saved: {e}", k.id);
             }
             let bad = |e: Error| crate::Rejected::new(e.0);
             (s.position().map_err(bad)).and_then(|p| {
@@ -1057,26 +1300,21 @@ impl<T: Cell> Handle<T> {
         read.and_then(|t| committed.map(|()| t))
     }
 
-    /// Shut down within `budget`: refuse new calls (`retry after`),
-    /// stop the schedules, let running effects finish and commit; those
-    /// still running at the deadline are aborted and named.
-    pub async fn shutdown(&self, budget: Duration) -> Drained {
+    pub(crate) async fn shutdown(&self, budget: Duration) -> Drained {
         let drained = self.drain(budget).await;
         // Last, its state snapshotted: the next start reads what the calls
         // left, never replaying them with code changed meanwhile.
-        lock(&self.inner.store).core.close();
+        lock(&self.inner.store).close();
         drained
     }
 
-    /// The held run into the log and the state snapshotted now (`ax dev`
-    /// does it before each hot-patch): a later start replays only calls
-    /// the new code made.
-    pub fn checkpoint(&self) -> crate::Result {
+    pub(crate) fn checkpoint(&self) -> crate::Result {
         self.store(|s| s.checkpoint())
     }
 
     /// [`Self::shutdown`] up to its snapshot.
     async fn drain(&self, budget: Duration) -> Drained {
+        let k = self.inner.kind;
         _ = self.live(false);
         self.inner.closing.store(true, Ordering::SeqCst);
         // A held `#[coalesce]` run is saved before anything else stops.
@@ -1092,9 +1330,9 @@ impl<T: Cell> Handle<T> {
             }
             if tokio::time::Instant::now() >= deadline {
                 busy.sort();
-                for k in &busy {
-                    self.abort(k);
-                    eprintln!("[aio] {}: effect `{k}` still ran at shutdown; aborted", T::ID);
+                for key in &busy {
+                    self.abort(key);
+                    eprintln!("[aio] {}: effect `{key}` still ran at shutdown; aborted", k.id);
                 }
                 return Drained { aborted: busy };
             }
@@ -1106,7 +1344,7 @@ impl<T: Cell> Handle<T> {
     #[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]
     pub(crate) fn op_seq(&self, op: &str) -> Option<u64> {
         let _hold = self.inner.file.call();
-        lock(&self.inner.store).core.op_seq(op)
+        lock(&self.inner.store).op_seq(op)
     }
 
     #[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]
@@ -1114,8 +1352,7 @@ impl<T: Cell> Handle<T> {
         &self.inner.aio_sync
     }
 
-    /// A synced client's call (see `Store::call_from`); `Ok(None)`: a re-send, not applied again.
-    pub fn call_from(&self, method: &str, args: Value, op: &str) -> Result<Option<Value>> {
+    pub(crate) fn call_from(&self, method: &str, args: Value, op: &str) -> Result<Option<Value>> {
         self.enter(None, None, method, args, Some(op), None).map(|(v, _)| v)
     }
 
@@ -1148,80 +1385,38 @@ impl<T: Cell> Handle<T> {
         self.enter(who, from, method, args, op, parts)
     }
 
-    /// Committed events from now on, each with the event before it. A
-    /// subscriber that falls behind gets `Lagged` and must take a full state.
-    pub fn events(&self) -> tokio::sync::broadcast::Receiver<(u64, crate::Event)> {
+    pub(crate) fn events(&self) -> tokio::sync::broadcast::Receiver<(u64, crate::Event)> {
         self.inner.events.subscribe()
     }
 
-    /// What its calls tell the people using the app (`cx.tell`), from now on.
-    pub fn tells(&self) -> tokio::sync::broadcast::Receiver<crate::tell::Tell> {
+    pub(crate) fn tells(&self) -> tokio::sync::broadcast::Receiver<crate::tell::Tell> {
         self.inner.tells.subscribe()
     }
 
     /// Show `t` in this process and send it to the synced clients; with
     /// neither, it is said in the log, not lost silently.
     fn say(&self, t: crate::tell::Tell) {
+        let k = self.inner.kind;
         let shown = crate::tell::show(&t);
         if self.inner.tells.send(t.clone()).is_err() && !shown {
             eprintln!(
                 "[aio] {}: nobody to tell (no window, no client): {}",
-                T::ID,
+                k.id,
                 crate::json(&t).unwrap_or_default()
             );
         }
     }
 
-    /// The state and the last event in it, read together.
-    pub fn snapshot(&self) -> (u64, Arc<T>) {
-        lock(&self.inner.shown).clone()
-    }
 
-    /// The whole state as aio's `app.snapshot()` has it: an object of cells,
-    /// each its whole state (`#[server]` fields too), a `#[aio_cell]` field
-    /// under its aio cell's name. What [`Self::load_snapshot`] takes back.
-    pub fn export_snapshot(&self) -> Result<Value> {
-        Ok(snapshot_cells::<T>(crate::json(&*self.state())?))
-    }
 
-    /// Replace the state with `snap`, as [`Self::export_snapshot`] made it (aio's
-    /// `loadSnapshot`): a new event, saved before it returns, sent to every
-    /// client. Refused when it isn't an object of objects, or when its cells
-    /// aren't this app's (a file from another app would wipe the cells it
-    /// lacks); `force` loads it anyway: a missing cell starts from its
-    /// defaults, an unknown one is dropped (said).
-    pub fn load_snapshot(&self, snap: &Value, force: bool) -> Result {
-        let st = snapshot_state::<T>(snap, force)?;
-        self.store(|s| s.load(&By::System, st))
-    }
 
-    /// How many calls of async method `method` are in flight (its effects
-    /// running or queued, under any `#[ttl]` key); `None`: every effect of
-    /// the cell. A count, never a flag: two overlapping calls are two.
-    /// `on_pending` tells when it changes, so a view re-renders on it.
-    pub fn pending(&self, method: Option<&str>) -> usize {
+    pub(crate) fn pending(&self, method: Option<&str>) -> usize {
         let of = |k: &str| method.is_none_or(|m| k.strip_prefix(m).is_some_and(|r| r.is_empty() || r.starts_with(':')));
         lock(&self.inner.running).iter().filter(|(k, _)| of(k)).map(|(_, rs)| rs.len()).sum()
     }
 
-    /// Wait until `f` holds on the state (aio's `until`), checked now and after
-    /// each commit; refused if it doesn't within `timeout`.
-    pub async fn until(&self, timeout: Duration, f: impl Fn(&T) -> bool) -> Result {
-        let mut ev = self.events();
-        let wait = async {
-            // A lagged receiver only skipped events: the state is checked anew.
-            while !f(&self.state()) {
-                _ = ev.recv().await;
-            }
-        };
-        match tokio::time::timeout(timeout, wait).await {
-            Ok(()) => Ok(()),
-            Err(_) => crate::reject!("{}: the condition did not hold within {timeout:?}", T::ID),
-        }
-    }
 
-    /// Is an effect with this key still running?
-    pub fn busy(&self, key: &str) -> bool {
+    pub(crate) fn busy(&self, key: &str) -> bool {
         lock(&self.inner.running).contains_key(key)
     }
 
@@ -1229,10 +1424,11 @@ impl<T: Cell> Handle<T> {
     /// `#[skip_if_running]` method, whoever set it) whose last call still
     /// runs? Ten skipped in a row are said once, as aio does.
     pub(crate) fn skips(&self, d: &crate::Due) -> bool {
+        let k = self.inner.kind;
         let m = d.method.as_str();
-        let declared = d.key.strip_prefix('@') == Some(m) && T::SCHEDULES.iter().any(|s| s.skip_if_running && s.method == m);
-        let runs = || lock(&self.inner.running).keys().any(|k| crate::answer::aborts::<T>(m, k));
-        let skip = (declared || T::SKIP_IF_RUNNING.contains(&m)) && runs();
+        let declared = d.key.strip_prefix('@') == Some(m) && k.schedules.iter().any(|s| s.skip_if_running && s.method == m);
+        let runs = || lock(&self.inner.running).keys().any(|key| crate::answer::aborts((k.async_mode)(m).is_some(), m, key));
+        let skip = (declared || k.skip_if_running.contains(&m)) && runs();
         let mut skipped = lock(&self.inner.skipped);
         match skip {
             false => _ = skipped.remove(&d.key),
@@ -1242,7 +1438,7 @@ impl<T: Cell> Handle<T> {
                 if *n == 10 {
                     let msg = format!(
                         "{}: schedule `{}` skipped 10 ticks in a row: {m} runs longer than its interval; space the ticks out or make it faster",
-                        T::ID,
+                        k.id,
                         d.key
                     );
                     eprintln!("[aio] WARN {msg}");
@@ -1256,19 +1452,20 @@ impl<T: Cell> Handle<T> {
     /// Fire the schedules due now (none while disabled or paused): when the
     /// next one is due, and now.
     pub(crate) fn fire(&self) -> (Option<i64>, i64) {
+        let k = self.inner.kind;
         if !self.enabled() || self.paused() {
-            return (None, lock(&self.inner.store).core.now());
+            return (None, lock(&self.inner.store).now());
         }
         // A held run due is weighed first, off the store's lock: the views'
         // calls (a held key's steps) never wait for that.
-        let due = lock(&self.inner.store).core.due();
+        let due = lock(&self.inner.store).due();
         let weighed = due.map(crate::store::Run::weigh);
         let turn = self.turn();
         let (next, now) = {
-            let s = &mut lock(&self.inner.store).core;
+            let mut s = lock(&self.inner.store);
             let now = s.now();
             if let Err(e) = s.fire_due_but(now, |d| self.skips(d)) {
-                eprintln!("[aio] {}: schedules: {e}", T::ID);
+                eprintln!("[aio] {}: schedules: {e}", k.id);
             }
             // A held run's idle time is a wake-up too.
             let idle = s.flush_idle(weighed).map(|d| now + d.as_millis() as i64 + 1);
@@ -1277,7 +1474,7 @@ impl<T: Cell> Handle<T> {
         };
         // Its own fires must not wake it again.
         if let Err(e) = self.end(turn, Then::Fired) {
-            eprintln!("[aio] {}: schedules: {e}", T::ID);
+            eprintln!("[aio] {}: schedules: {e}", k.id);
         }
         (next, now)
     }
@@ -1285,12 +1482,13 @@ impl<T: Cell> Handle<T> {
     /// Join the app's cells in `dir`: reached there by the schedules other
     /// cells set on it, and reaching them with its own.
     pub(crate) fn join(&self, dir: &Dir) {
+        let k = self.inner.kind;
         let me = Arc::downgrade(&self.inner);
         let reach: Reach = Arc::new(move |by, method, args| {
-            let inner = me.upgrade().ok_or_else(|| crate::Rejected::new(format!("{} is gone", T::ID)))?;
-            Handle { inner, by: by.clone() }.call(method, args)
+            let inner = me.upgrade().ok_or_else(|| crate::Rejected::new(format!("{} is gone", k.id)))?;
+            Raw { inner, by: by.clone() }.call(method, args)
         });
-        lock(&dir.0).insert(T::ID, reach);
+        lock(&dir.0).insert(k.id, reach);
         *lock(&self.inner.dir) = Some(dir.clone());
     }
 
@@ -1298,15 +1496,16 @@ impl<T: Cell> Handle<T> {
     /// by its schedule: refused, it is that cell's failure, as its own
     /// schedule's would be; on a cell the app doesn't hold, this cell's.
     pub(crate) fn fire_foreign(&self) {
-        let due = lock(&self.inner.store).core.take_foreign();
+        let k = self.inner.kind;
+        let due = lock(&self.inner.store).take_foreign();
         if due.is_empty() {
             return;
         }
         let dir = lock(&self.inner.dir).clone();
-        let failed = fire_on(T::ID, dir.as_ref(), due);
+        let failed = fire_on(k.id, dir.as_ref(), due);
         if !failed.is_empty() {
             let mut s = lock(&self.inner.store);
-            failed.iter().for_each(|(by, why)| s.core.failed(by, why));
+            failed.iter().for_each(|(by, why)| s.failed(by, why));
             drop(s);
             self.count_failures();
         }
@@ -1326,9 +1525,7 @@ impl<T: Cell> Handle<T> {
         }
     }
 
-    /// Fire saved schedules on time, until the task is dropped or aborted.
-    /// Schedules missed while the app was off fire once, right away.
-    pub fn start(&self) -> tokio::task::JoinHandle<()> {
+    pub(crate) fn start(&self) -> tokio::task::JoinHandle<()> {
         _ = self.live(true);
         schedule(Arc::new(self.clone()))
     }
@@ -1342,15 +1539,15 @@ trait Fires: Send + Sync + 'static {
     fn fire(&self) -> (Option<i64>, i64);
 }
 
-impl<T: Cell> Fires for Handle<T> {
+impl Fires for Raw {
     fn woken(&self) -> &Notify {
         &self.inner.wake
     }
     fn closing(&self) -> bool {
-        Handle::closing(self)
+        Raw::closing(self)
     }
     fn fire(&self) -> (Option<i64>, i64) {
-        Handle::fire(self)
+        Raw::fire(self)
     }
 }
 
@@ -1400,21 +1597,11 @@ fn fire_on(cell: &str, dir: Option<&Dir>, due: Vec<crate::Due>) -> Vec<(By, Stri
     failed
 }
 
-/// [`Handle::on_gone`], made only for a `#[cell(transaction)]` cell.
-struct Gone<T>(std::marker::PhantomData<T>);
-
-impl<T: Cell> Gone<T> {
-    const ON: Option<fn(&Handle<T>, &crate::answer::Reply)> = match T::TRANSACTION {
-        Some(_) => Some(Handle::<T>::on_gone),
-        None => None,
-    };
-}
-
 /// Held by an effect's task and dropped when it ends, however it ends (a
 /// panic or an abort drops it too): takes it off `running`, lets the next
 /// queued one start, and tells `done` and `shutdown`.
-struct Ended<T: Cell> {
-    inner: Arc<Inner<T>>,
+struct Ended {
+    inner: Arc<Inner>,
     key: String,
     id: u64,
     _next: Option<oneshot::Sender<()>>,
@@ -1422,7 +1609,7 @@ struct Ended<T: Cell> {
     _running: crate::effect::Running,
 }
 
-impl<T: Cell> Drop for Ended<T> {
+impl Drop for Ended {
     fn drop(&mut self) {
         let mut running = lock(&self.inner.running);
         if let Some(rs) = running.get_mut(&self.key) {
@@ -1438,7 +1625,7 @@ impl<T: Cell> Drop for Ended<T> {
 }
 
 /// Tell the `on_pending` watchers.
-fn tell<T: Cell>(inner: &Inner<T>) {
+fn tell(inner: &Inner) {
     let ws = lock(&inner.watchers).clone();
     ws.iter().for_each(|f| f());
 }
@@ -1452,11 +1639,11 @@ fn wait_ms(next: Option<i64>, now: i64) -> u64 {
 
 impl<T: Cell> Door<T> for Handle<T> {
     fn call(&self, method: &str, args: Value) -> Result<Value> {
-        self.enter(None, None, method, args, None, None).map(|(v, _)| v.unwrap_or_default())
+        self.raw.call(method, args)
     }
 
     fn ask(&self, method: &str, args: Value) -> Result<crate::Answer> {
-        self.enter(None, None, method, args, None, None).map(|(_, a)| a)
+        self.raw.ask(method, args)
     }
 
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {
@@ -1464,34 +1651,34 @@ impl<T: Cell> Door<T> for Handle<T> {
     }
 
     fn own(&self, key: &str, res: Option<Box<dyn Any + Send>>) {
-        self.keep(key, res)
+        self.raw.keep(key, res)
     }
 }
 
-/// The cells of `T` a snapshot names: its own, then its `#[aio_cell]` slices'.
-fn snapshot_names<T: Cell>() -> Vec<&'static str> {
-    std::iter::once(T::ID).chain(T::AIO_CELLS.iter().map(|s| s.cell)).collect()
+/// The cells of `k` a snapshot names: its own, then its `#[aio_cell]` slices'.
+fn snapshot_names(k: &Kind) -> Vec<&'static str> {
+    std::iter::once(k.id).chain(k.aio_cells.iter().map(|s| s.cell)).collect()
 }
 
-/// `T`'s state (`json`) as a snapshot of cells (pure).
-fn snapshot_cells<T: Cell>(json: Value) -> Value {
+/// Cell `k`'s state (`json`) as a snapshot of cells (pure).
+fn snapshot_cells(k: &Kind, json: Value) -> Value {
     let mut own = match json {
         Value::Object(m) => m,
-        v => return serde_json::json!({ T::ID: v }),
+        v => return serde_json::json!({ k.id: v }),
     };
     let mut out = serde_json::Map::new();
-    for s in T::AIO_CELLS {
+    for s in k.aio_cells {
         if let Some(v) = own.remove(s.field) {
             out.insert(s.cell.into(), v);
         }
     }
-    out.insert(T::ID.into(), own.into());
+    out.insert(k.id.into(), own.into());
     out.into()
 }
 
-/// A snapshot of cells back as `T`'s state, checked as aio checks one
+/// A snapshot of cells back as cell `k`'s state, checked as aio checks one
 /// (`snapshotShapeError`, `snapshotCellsError`): pure but for the warnings.
-pub(crate) fn snapshot_state<T: Cell>(snap: &Value, force: bool) -> Result<Value> {
+fn snapshot_state(k: &Kind, snap: &Value, force: bool) -> Result<Value> {
     let Some(cells) = snap.as_object() else {
         crate::reject!("snapshot must be a JSON object: pass the exact snapshot export gave");
     };
@@ -1507,7 +1694,7 @@ pub(crate) fn snapshot_state<T: Cell>(snap: &Value, force: bool) -> Result<Value
             crate::reject!("snapshot value for cell \"{c}\" must be an object (a cell's state is always an object), got {got}");
         }
     }
-    let names = snapshot_names::<T>();
+    let names = snapshot_names(k);
     let missing: Vec<&str> = names.iter().copied().filter(|c| !cells.contains_key(*c)).collect();
     let unknown: Vec<&str> = cells.keys().map(String::as_str).filter(|c| !names.contains(c)).collect();
     let quoted = |cs: &[&str]| cs.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
@@ -1531,11 +1718,11 @@ pub(crate) fn snapshot_state<T: Cell>(snap: &Value, force: bool) -> Result<Value
     if !missing.is_empty() {
         eprintln!("[aio] snapshot: {} start from their defaults", quoted(&missing));
     }
-    let mut own = match cells.get(T::ID) {
+    let mut own = match cells.get(k.id) {
         Some(Value::Object(m)) => m.clone(),
         _ => serde_json::Map::new(),
     };
-    for s in T::AIO_CELLS {
+    for s in k.aio_cells {
         own.insert(s.field.into(), cells.get(s.cell).cloned().unwrap_or_else(|| serde_json::json!({})));
     }
     Ok(own.into())
@@ -1569,9 +1756,9 @@ mod tests {
             }
         });
         // Another thread mid-commit holds what the cell shows, briefly.
-        let shown = super::lock(&h.inner.shown);
+        let shown = super::lock(&h.raw.inner.shown);
         let h2 = h.clone();
-        let told = std::thread::spawn(move || h2.problem("reaction", "probe: shown while busy"));
+        let told = std::thread::spawn(move || h2.raw.problem("reaction", "probe: shown while busy"));
         std::thread::sleep(std::time::Duration::from_millis(50));
         drop(shown);
         told.join().unwrap();
