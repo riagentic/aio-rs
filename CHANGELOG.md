@@ -342,6 +342,13 @@ version may break things.
 
 ### Fixed
 
+- A saved copy that couldn't be read for a moment (Windows' sharing
+  violation while another program held it, a refused permission, a disk
+  error) was taken as damaged: moved aside as `copy.unreadable-<ms>` and
+  the copy started over, the calls made offline in it no longer shown or
+  sent. Only damaged content is moved aside now; a file that can't be
+  read is tried again for 315 ms, then the open fails naming it, and the
+  file stays as it was.
 - A scheme an update added to `[app] schemes` was never registered on
   Linux and Windows (only an install registers, and an update swaps the
   program in place): its links didn't open the app. An installed app now
