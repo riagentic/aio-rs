@@ -148,7 +148,7 @@ mode = "standalone"     # standalone | client-server | client | server | cli
 version = "0.1"         # major.minor: ax numbers builds from git (0.1.<commit count>)
 lang = "en"             # the page's language, <html lang>
 dir = "ltr"             # ltr | rtl | auto
-maintainer = "Example Team <team@example.org>"   # the .deb's maintainer
+# maintainer = "Name <email>" # the Debian package's: ax build --deb asks for it
 
 [history]
 keep = "90d"            # how long the event log keeps every step

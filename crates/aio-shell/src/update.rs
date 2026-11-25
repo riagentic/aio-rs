@@ -962,7 +962,8 @@ fn manifest(url: &str, d: &Path) -> io::Result<Vec<u8>> {
 }
 
 /// Bytes free on the disk holding `dir`, if the OS says.
-fn free_bytes(dir: &Path) -> Option<u64> {
+#[doc(hidden)]
+pub fn free_bytes(dir: &Path) -> Option<u64> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;

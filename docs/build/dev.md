@@ -457,6 +457,16 @@ git (or a checkout, `--aio`): [setup](../basics/setup.md#where-an-app-gets-aio-r
   `#[cfg(not(target_arch = "wasm32"))]` or in a server function.
 - Driving `ax dev` from a script or agent with `--display current`: the
   window lands on the person's screen. Leave `auto`.
+- A CPU-heavy crate of the app's own (a parser, a simulator, a codec)
+  10-30x slower under `ax dev`: debug builds leave it unoptimized.
+  Optimize it alone, in the app's `Cargo.toml` (the template has it
+  commented out); `dev` covers every debug build ax makes (`desktop-dev`,
+  the web's, tests inherit it):
+
+  ```toml
+  [profile.dev.package.my-crate]
+  opt-level = 3
+  ```
 
 ## Limits
 

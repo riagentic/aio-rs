@@ -1913,6 +1913,23 @@ mod tests {
         let own = aio::vitals::Vitals { hints: false, render: t, ..v };
         let said = run(&own, "frame(25);").unwrap();
         assert_eq!(said[0], "W [vitals] render warning: an update took 25 ms to paint");
+        // Software GL (a nested display's SwiftShader): said once at info, never graded.
+        let gl = "document.createElement = () => ({ getContext: () => ({
+                      RENDERER: 1, getExtension: () => null,
+                      getParameter: () => 'ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)' }) });";
+        let said = run(&v, &format!("{gl} frame(1100); frame(2500); frame(16);")).unwrap();
+        assert_eq!(
+            said[0],
+            "I [vitals] render under software rendering (no GPU): an update took 1100 ms to paint; not counted"
+        );
+        assert!(!said.iter().any(|l| l.starts_with("W ") && l.contains("1100") || l.contains("2500")), "{said:?}");
+        assert_eq!(aio::vitals::render_step(&format!("INFO  [page] {}", &said[0][2..])), None, "not a step");
+        let gpu = gl.replace("SwiftShader", "NVIDIA GeForce");
+        let said = run(&v, &format!("{gpu} frame(1100);")).unwrap();
+        assert!(
+            said[0].starts_with("W [vitals] render warning: an update took 1100 ms"),
+            "a GPU's slow paint is the app's"
+        );
         // The runtime keeps the probe's lines, at their level.
         let js = include_str!("main.js");
         assert!(js.contains("const word = { error: 'ERROR', warning: 'WARN ', debug: 'DEBUG' }[e.level] || 'INFO '"));

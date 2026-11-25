@@ -7,6 +7,7 @@ mod android;
 mod auth;
 mod boxlab;
 mod build;
+mod builds;
 mod bundle;
 mod cdp;
 mod check;
@@ -1104,6 +1105,11 @@ fn run(args: &[String]) -> Result<String, Fail> {
     if let Some(d) = value("--out") {
         build::ask_out(d).map_err(usage)?;
     }
+    // A build into a full disk dies deep in cargo: the cap applied, the room checked first.
+    if matches!(args[0].as_str(), "dev" | "start" | "restart" | "build" | "run") && !has("--list") {
+        let now = std::time::SystemTime::now();
+        builds::before(&|days| prune::freed(&aio_shell::runtime::root(), days, now))?;
+    }
     let out: Out = match (args[0].as_str(), p.as_slice()) {
         ("dev", [name, "--android", rest @ ..]) => {
             let (mut device, mut native, mut it) = (None, false, rest.iter());
@@ -1143,11 +1149,9 @@ fn run(args: &[String]) -> Result<String, Fail> {
                 Some("tailwind") => true,
                 Some(c) => return Err(usage(format!("--css {c}: tailwind (any other tool: [build] css in aio.toml)"))),
             };
-            let maintainer = create::git_maintainer(&here);
             let new = create::New {
                 template: value("--template").unwrap_or("app"),
                 id: value("--id").unwrap_or(name),
-                maintainer: maintainer.as_deref().unwrap_or(create::NO_MAINTAINER),
                 aio,
                 targets: value("--target").map_or(vec![], |t| t.split(',').map(str::trim).collect()),
                 tailwind: css,
@@ -1168,7 +1172,7 @@ fn run(args: &[String]) -> Result<String, Fail> {
                 ));
             }
             made.notes.extend(create::lock(&made.at));
-            made.notes.push(create::git_init(&made.at, maintainer.is_some()));
+            made.notes.push(create::git_init(&made.at, create::git_identity(&here)));
             // The first `ax dev` is a launch, not a 20 s build: built now, in the background.
             let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr()) && !json;
             if dev::warms_after_create(terminal, has("--no-warm"), std::env::var("AIORT_NO_WARM").ok().as_deref()) {
@@ -2102,7 +2106,9 @@ fn run(args: &[String]) -> Result<String, Fail> {
         ("prune", []) => {
             let f: Vec<&str> = flags.iter().map(String::as_str).collect();
             aio_shell::runtime::migrate();
-            let said = prune::run(&aio_shell::runtime::root(), &f, std::time::SystemTime::now())?;
+            let now = std::time::SystemTime::now();
+            let said = prune::run(&aio_shell::runtime::root(), &f, now)?;
+            let said = format!("{said}\n\n{}", builds::run(&builds::store(), &f, builds::cap(), now)?);
             let yes = has("--yes") || has("-y");
             match prune::legacy(&upgrade::legacy_target(&aio::paths::tool_home()), yes)? {
                 Some(old) => Ok(format!("{said}\n{old}")),
@@ -2110,6 +2116,7 @@ fn run(args: &[String]) -> Result<String, Fail> {
             }
         }
         ("runtime", []) => runtime(has("--fetch")),
+        ("setup", []) if value("--build-cap").is_some() => builds::set_cap(value("--build-cap").unwrap_or_default()),
         ("setup", []) if has("--warm") => {
             let said = setup::run(has("--check"))?;
             Ok(format!("{said}\n{}", setup_warm(value("--aio").map(Path::new))?))
