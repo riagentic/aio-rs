@@ -76,6 +76,9 @@ net = ["tls", "oidc"]
 kit = ["dep:air"]
 # The same as `kit`: the name of air's lane before 0.2.0.
 air = ["kit"]
+# The kit's drawing (`Chart`, `Heatmap`, `Canvas`): an app that draws none
+# builds none of it (~21 MB of a debug build's disk).
+draw = ["kit"]
 # The app's views mounted in its own page (`aio::web::launch`, `ax build --web`).
 web = []
 # Working with aio, the Deno-based framework (`aio::compat`): aio pages and
@@ -312,3 +315,7 @@ workspace = true
 [[test]]
 name = "usb"
 required-features = ["usb"]
+
+[[test]]
+name = "draw"
+required-features = ["draw"]

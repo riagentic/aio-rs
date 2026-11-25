@@ -242,7 +242,7 @@ pub fn save(kv: &impl Kv, key: &str, mut doc: Doc, done: &HashSet<String>, say: 
     // What either tab saw answered is never kept again: theirs first, then
     // this tab's, the newest [`DONE_KEPT`] said on.
     let mut mine: Vec<&String> = done.iter().filter(|op| !known.contains(op)).collect();
-    mine.sort();
+    crate::sort_by(&mut mine, |a, b| a.cmp(b));
     let all: Vec<String> = known.iter().chain(mine).cloned().collect();
     doc.done = all[all.len().saturating_sub(DONE_KEPT)..].to_vec();
     let gone: HashSet<String> = known.into_iter().chain(done.iter().cloned()).collect();

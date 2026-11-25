@@ -186,6 +186,7 @@ of aio-rs.
 | none | the core: cells, the log, replay, persistence, the local door, `aio::cli` |
 | `testing` | `aio::testing`, the test kit (`TestCells`; `TestServer` with `server`, `TestUi` with `kit`): a dev-dependency only, so the app's builds leave it out |
 | `kit` | the UI kit, `client!`, `router!` |
+| `draw` | `kit` + the kit's `Chart`, `Heatmap` and `Canvas` ([drawing](../ui/drawing.md)) |
 | `net` | `tls` + `oidc`: everything networked |
 | `server` | sync and its server, HTTP routes, server functions, accounts' doors |
 | `tls` | the server over TLS, pairing, LAN discovery |

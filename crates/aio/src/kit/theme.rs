@@ -139,8 +139,13 @@ pub fn tokens_css(hue: u16, soft: bool) -> String {
 }
 
 /// The hue-free tail of the tokens: the danger ink solved from its fill, and
-/// the high-contrast token values.
-const DANGER_INK: &str = r#"/* The ink ON a danger fill, solved from the fill itself: white where the
+/// the high-contrast token values; in the browser without its comments and
+/// needless spaces, as the kit's part ([`super::theme_css`]).
+#[cfg(not(target_arch = "wasm32"))]
+const DANGER_INK: &str = DANGER_INK_CSS;
+#[cfg(target_arch = "wasm32")]
+const DANGER_INK: &str = crate::shrunk!(css, DANGER_INK_CSS);
+const DANGER_INK_CSS: &str = r#"/* The ink ON a danger fill, solved from the fill itself: white where the
    fill is darker than the WCAG white/black crossover (relative luminance
    1791 in ten-thousandths), black where it is lighter — the better of the two, never under
    4.58:1. A fixed dark ink for the lightened dark-mode fill broke every app
@@ -203,6 +208,16 @@ pub fn sheet(ui: &crate::config::Ui, id: &str, ships_css: bool) -> String {
 mod tests {
     use super::*;
     use crate::config::{Look, Ui};
+
+    /// The browser's tokens tail: the same rules, no comments.
+    #[test]
+    fn the_danger_ink_shrinks_to_the_same_rules() {
+        let min = crate::shrunk!(css, DANGER_INK_CSS);
+        assert!(!min.contains("/*") && !min.contains('\n') && min.len() * 2 < DANGER_INK_CSS.len(), "{min}");
+        assert!(min.contains("@supports (color:color(from red srgb-linear calc(r * 0.5) g b)){:root{--aio-on-danger:"));
+        assert!(min.contains("calc(clamp(0,(1791 - (2126 * r + 7152 * g + 722 * b)) * 10,1))"), "{min}");
+        assert!(min.ends_with("@media (prefers-contrast:more){:root{--aio-border:var(--aio-text);--aio-muted:var(--aio-text);--aio-shadow-1:none;--aio-shadow-2:none}}"), "{min}");
+    }
 
     #[test]
     fn a_percentage_prints_as_js_does_without_float_formatting() {
