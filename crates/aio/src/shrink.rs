@@ -6,9 +6,12 @@
 /// `src` as CSS without comments or needless whitespace into `out`, as
 /// much as fits; returns the whole length (an empty `out` counts it).
 /// Quoted strings are kept as written; a space is kept where it may
-/// matter (between words, before `(` and `:`, around `+` and `-`).
+/// matter (between words, before `(` and `:`, around `+` and `-`); a
+/// declaration's `;` before its block's `}` goes (an at-rule's stays).
 pub const fn css(src: &[u8], out: &mut [u8]) -> usize {
     let (mut i, mut n, mut space, mut quote, mut last) = (0, 0, false, 0u8, 0u8);
+    // A `;` not yet written (`semi`), and whether it ends an at-rule (`at`).
+    let (mut semi, mut at, mut at_semi) = (false, false, false);
     while i < src.len() {
         let c = src[i];
         i += 1;
@@ -34,6 +37,10 @@ pub const fn css(src: &[u8], out: &mut [u8]) -> usize {
             space = true;
             continue;
         }
+        if semi && !(c == b'}' && !at_semi) {
+            n = put(out, n, b';');
+        }
+        semi = false;
         let cut_after = matches!(last, 0 | b'{' | b'}' | b';' | b',' | b'>' | b'(' | b':');
         let cut_before = matches!(c, b'{' | b'}' | b';' | b',' | b'>' | b')' | b'!');
         if space && !cut_after && !cut_before {
@@ -42,7 +49,19 @@ pub const fn css(src: &[u8], out: &mut [u8]) -> usize {
         if c == b'"' || c == b'\'' {
             quote = c;
         }
+        match c {
+            b'@' if matches!(last, 0 | b'{' | b'}' | b';') => at = true,
+            b'{' | b'}' => at = false,
+            _ => {}
+        }
+        if c == b';' {
+            (semi, at_semi, at, space, last) = (true, at, false, false, c);
+            continue;
+        }
         (n, space, last) = (put(out, n, c), false, c);
+    }
+    if semi {
+        n = put(out, n, b';');
     }
     n
 }
@@ -144,11 +163,15 @@ mod tests {
                    @media (max-width: 9px) and (hover: none) { .d { margin: calc(1px + 2px) !important } }\n";
         assert_eq!(
             css_of(src),
-            ".a>.b,.c :hover{color :red;content:\"x  /* y */ }\";}@media (max-width:9px) and (hover:none){.d{margin:calc(1px + 2px)!important}}"
+            ".a>.b,.c :hover{color :red;content:\"x  /* y */ }\"}@media (max-width:9px) and (hover:none){.d{margin:calc(1px + 2px)!important}}"
         );
         // The count without an `out` is the length written with one.
         assert_eq!(css(src.as_bytes(), &mut []), css_of(src).len());
         assert_eq!(css_of("  /* only */  "), "");
+        // A declaration's last `;` goes; an at-rule's, or one before more, stays.
+        assert_eq!(css_of(".a { b: c; /* x */ }\n.d{e:f;;}"), ".a{b:c}.d{e:f;}");
+        assert_eq!(css_of("@layer a { @layer b; }\n@import \"x;y\";"), "@layer a{@layer b;}@import \"x;y\";");
+        assert_eq!(css_of(".a { b: url(\"c;\"); }"), ".a{b:url(\"c;\")}");
     }
 
     #[cfg(feature = "kit")]
