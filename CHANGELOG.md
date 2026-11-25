@@ -75,6 +75,11 @@ version may break things.
 
 ### Added
 
+- `aio::kit::NavList` and `NavItem`: a sidebar's rail of pages, the
+  current one `aria-current="page"` (marked by a bar and weight, not
+  colour alone), one tab stop with ↑/↓, Home and End moving focus and
+  Enter opening; Tab comes back to the item last left. 44 px tall under a
+  coarse pointer ([kit](docs/ui/kit.md#tabs-menus-and-navigation)).
 - `.aio-plain`: a button with no look (a sidebar entry, a list row), in
   the kit's sheet: with `theme = "full"` the look's button (centred,
   padded, shadowed, 44 px on a phone) no longer has to be undone property

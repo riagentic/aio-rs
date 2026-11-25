@@ -323,6 +323,77 @@ fn label_start(ui: &mut TestUi, t: &str) -> f64 {
     ui.eval(&js).as_f64().unwrap()
 }
 
+fn rail() -> View {
+    let page = signal(|| "home".to_string());
+    styled(rsx! {
+        button { "data-t": "before", "before" }
+        NavList { "data-t": "rail", label: "Pages", value: page.get(), onchange: move |id: String| { log(id.clone()); page.set(id) },
+            items: vec![
+                NavItem::new("home", "Home"),
+                NavItem::new("jobs", rsx! { span { "aria-hidden": "true", "▶" } "Jobs" }),
+                NavItem::new("logs", "Logs").disabled(),
+                NavItem::new("settings", "Settings"),
+            ],
+        }
+        NavList { "data-t": "own", items: vec![NavItem::new("x", "X").disabled(), NavItem::new("y", "Y")] }
+        button { "data-t": "after", "after" }
+    })
+}
+
+#[test]
+fn a_nav_list_marks_the_current_page_and_is_one_tab_stop() {
+    let mut ui = TestUi::new(rail);
+    assert_eq!(ui.count("nav[aria-label=Pages][data-t=rail] > ul > li > button"), 4);
+    assert_eq!(ui.count("[data-t=rail] [aria-current]"), 1);
+    assert_eq!(ui.attr("home", "aria-current").as_deref(), Some("page"));
+    assert_eq!(ui.count("[data-t=rail] [tabindex='0']"), 1);
+    assert_eq!(ui.attr("home", "tabindex").as_deref(), Some("0"));
+    assert_eq!(ui.attr("y", "aria-current").as_deref(), Some("page"), "uncontrolled: the first enabled item");
+    let (item, rail) = (ui.rect("home"), ui.rect("rail"));
+    assert_eq!(item.width, rail.width, "an item fills the rail");
+    let start = label_start(&mut ui, "home");
+    assert!(start < 20.0, "its label starts at the start: {start}");
+}
+
+#[test]
+fn arrows_move_focus_through_a_nav_list_and_enter_opens_the_page() {
+    let mut ui = TestUi::new(rail);
+    press(&mut ui, "home", Key::ArrowDown);
+    assert_eq!(ui.focused().as_deref(), Some("jobs"));
+    assert_eq!(said(), Vec::<String>::new(), "focus moves, the page doesn't");
+    ui.press_key(Key::ArrowDown, Modifiers::empty());
+    assert_eq!(ui.focused().as_deref(), Some("settings"), "the disabled item is skipped");
+    ui.press_key(Key::ArrowDown, Modifiers::empty());
+    assert_eq!(ui.focused().as_deref(), Some("home"), "wraps");
+    ui.press_key(Key::End, Modifiers::empty());
+    assert_eq!(ui.focused().as_deref(), Some("settings"));
+    ui.press_key(Key::Home, Modifiers::empty());
+    ui.press_key(Key::ArrowUp, Modifiers::empty());
+    assert_eq!(ui.focused().as_deref(), Some("settings"), "wraps back");
+    ui.press_key(Key::Enter, Modifiers::empty());
+    assert_eq!(said(), ["settings"]);
+    assert_eq!(ui.attr("settings", "aria-current").as_deref(), Some("page"));
+    ui.click("y");
+    assert_eq!(ui.attr("y", "aria-current").as_deref(), Some("page"));
+    ui.click("x");
+    assert_eq!((ui.attr("x", "aria-current"), said()), (None, vec![]), "a disabled item opens nothing");
+}
+
+#[test]
+fn tab_leaves_a_nav_list_and_comes_back_where_it_left() {
+    let mut ui = TestUi::new(rail);
+    press(&mut ui, "home", Key::ArrowDown);
+    ui.press_key(Key::Tab, Modifiers::empty());
+    assert_eq!(ui.focused().as_deref(), Some("y"), "one stop per list");
+    ui.press_key(Key::Tab, Modifiers::SHIFT);
+    assert_eq!(ui.focused().as_deref(), Some("jobs"), "back on the item last left");
+    ui.press_key(Key::Tab, Modifiers::SHIFT);
+    assert_eq!(ui.focused().as_deref(), Some("before"));
+    ui.click("settings");
+    tab_to(&mut ui, "settings");
+    assert_eq!(ui.count("[data-t=rail] [tabindex='0']"), 1, "the new page is the stop");
+}
+
 fn plain() -> View {
     styled(rsx! {
         aside { style: "width: 240px",

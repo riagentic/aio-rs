@@ -17,15 +17,15 @@ tokens: put the theme on the page first
 |---|---|
 | Form | `Button`, `Field`, `Input`, `Textarea`, `Select`, `Checkbox`, `RadioGroup`, `Switch`, `use_form`, `use_async_rule`, `move_item` |
 | Overlay | `Modal`, `Confirm`, `ConfirmButton`, `ToastHost` + `toast(..)`, `Tooltip`, `Menu`, `Portal` / `PortalHost` |
-| Layout | `Card`, `Stack`, `Row`, `Tabs`, `Table`, `Pagination`, `Breadcrumb`, `Direction` |
+| Layout | `Card`, `Stack`, `Row`, `Tabs`, `NavList`, `Table`, `Pagination`, `Breadcrumb`, `Direction` |
 | Status | `Spinner`, `Progress`, `Skeleton`, `Alert`, `EmptyState`, `ConnectionStatus`, `Avatar` |
 | Lists | `VirtualList`, `window(..)`, `Transition`, `TransitionGroup` |
 | Keys | `GlobalKeys`, `use_global_key`, `use_global_keys`, `use_key_claim`, `Chord` |
 | Other | `Markdown`, `ZoomPan`, `QrScanner` (QR codes from the camera), `Browser` (a guest web page), `Island` / `WebIsland` (plain JS inside a view), `SignIn`, `ConnectPage`, `TimeTravelPanel`, `Defer`, `use_held`, `use_spring`, `use_frame`, `use_interval`, `use_window_event`, `use_window_listener`, `use_back_button` |
 
 The parts a person uses inside a control carry handles of their own for
-tests and agents: a tab's or menu item's id, `menuTrigger`, `menuScrim`,
-`modalBackdrop`, `confirmOk`, `confirmCancel`, `toastDismiss`,
+tests and agents: a tab's, nav item's or menu item's id, `menuTrigger`,
+`menuScrim`, `modalBackdrop`, `confirmOk`, `confirmCancel`, `toastDismiss`,
 `alertDismiss`, `pagePrev`, `pageNext`, `page{n}`, `zoomIn`, `zoomOut`,
 `zoomFit`, `zoomStage`, and the sign-in form's `signin…` parts.
 
@@ -126,7 +126,7 @@ assert_eq!(ui.text("out"), "1 de M true false");
 ## Tabs, menus and navigation
 
 ```rust
-use aio::kit::{Breadcrumb, Crumb, Menu, MenuItem, Pagination, Tab, Tabs};
+use aio::kit::{Breadcrumb, Crumb, Menu, MenuItem, NavItem, NavList, Pagination, Tab, Tabs};
 use aio::ui::prelude::*;
 
 #[component]
@@ -134,7 +134,11 @@ fn Settings() -> View {
     let tab = signal(|| "general".to_string());
     let picked = signal(String::new);
     let page = signal(|| 1u32);
+    let section = signal(|| "home".to_string());
     rsx! {
+        NavList { label: "Sections", value: section.get(), onchange: move |id| section.set(id),
+            items: vec![NavItem::new("home", "Home"), NavItem::new("jobs", "Jobs"), NavItem::new("logs", "Logs").disabled()],
+        }
         Breadcrumb { items: vec![Crumb::new("Home").href("/"), Crumb::new("Settings")] }
         Tabs { label: "Settings", value: tab.get(), onchange: move |id| tab.set(id),
             tabs: vec![
@@ -167,6 +171,9 @@ ui.click("export");
 ui.click("pageNext");
 ui.click("page4");
 assert_eq!(ui.text("state"), "export 4");
+ui.press("home", "ArrowDown"); // moves focus only
+ui.press("jobs", "Enter");
+assert_eq!(ui.attr("jobs", "aria-current").as_deref(), Some("page"));
 # }
 ```
 
@@ -174,6 +181,8 @@ assert_eq!(ui.text("state"), "export 4");
 |---|---|
 | `Tabs` | `tabs: Vec<Tab>`, `value` (unset: it keeps its own, from the first enabled tab), `label`, `rtl`, `scroll`, `onchange(id)`. Tabs that don't fit wrap to another row; `scroll: true` keeps one row that scrolls sideways. Arrows move (wrapping, skipping disabled tabs, mirrored right to left), Home and End jump; only the active tab is in the tab order, so Tab goes on into its panel. The panel renders only while active. |
 | `Tab::new(id, label, panel)` | `.disabled()`; its id is its handle |
+| `NavList` | a sidebar's rail of pages: `items: Vec<NavItem>`, `value` (unset: it keeps its own, from the first enabled item), `label` (the `nav` landmark's name), `onchange(id)`. The current item is `aria-current="page"`. One tab stop: ↑ and ↓ move focus (wrapping, skipping disabled items), Home and End jump, Enter or Space opens; Tab leaves, and coming back lands on the item last left (the current one once the page changed). |
+| `NavItem::new(id, label)` | `.disabled()`; the label is text or any view (an icon and a name); its id is its handle |
 | `Menu` | `trigger: View`, `items: Vec<MenuItem>`, `label` (the trigger's name when it isn't text), `onselect(id)`. Enter, Space or ↓ open it on the first item (↑ on the last), arrows and Home/End move, Escape closes it and puts focus back on the trigger, Tab or a click outside closes it. Handles: `menuTrigger`, `menuScrim`, each item's id. |
 | `MenuItem::new(id, label)` | `.disabled()`, `.danger()` |
 | `Breadcrumb` | `items: Vec<Crumb>`, `separator` (text or any view; `/` unset), `label` (`"Breadcrumb"`); the last crumb is the page you are on (`aria-current="page"`), never a link |
