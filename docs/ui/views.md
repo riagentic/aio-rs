@@ -283,6 +283,7 @@ compile error naming it.
 | Want | Write |
 |---|---|
 | text with values | `"{name} ({count})"` (format args; `{x:?}` too): a hole, following what it reads |
+| text with `format!`'s arguments | `"By threads ({} per SM)", g.threads_sm` (as many as its `{}`s take, then `w = 2` named ones; `{x}` beside them still reads `x`) |
 | a value that follows state | any expression in a text, attribute or `{child}`: `{n.get() * 2}`, `disabled: !ok.get()` |
 | an attribute | `class: "row"`, `"data-t": "x"`, `"aria-label": "Close"`; any string (`String`, `&str`, `Cow`), number or `bool`: `title: t(&name.get())` |
 | a value that may be absent | `title: tip` where `tip: Option<String>`: `None` leaves it out |

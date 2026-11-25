@@ -193,6 +193,12 @@ version may break things.
   ([relay](docs/examples/relay.md)).
 - `Source::for_server_with(cfg, dirs, http)`: `for_server` serving the
   app's own routes too, without the sync client `for_app_with` holds.
+- A text in `rsx!` takes `format!`'s arguments after it:
+  `span { "By threads ({} per SM)", g.threads_sm }`, as many as its
+  `{}`s take (`{0}`, `{:.*}`, `{:1$}` counted as `format!` does), then
+  named ones (`w = 2`); a `{x}` beside them still reads `x`. A value
+  after a text with no `{}` says to put it in the string
+  (`"{g.threads_sm}"`), where it said `expected a { … } block`.
 - `air::Root::faults()`: what views did wrong that drawing went past (a
   list's repeated key), taken; `TestPage` and `TestUi` fail on them.
 

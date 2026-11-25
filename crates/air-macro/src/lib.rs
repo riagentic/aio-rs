@@ -800,7 +800,24 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
         && let Some(s) = lit_str(l)
     {
         *i += 1;
-        return Ok(text(&s, l.span()));
+        // `"{} per SM", n, w = 2`: format!'s arguments, as many as its `{}`s take, then named ones.
+        let mut given = vec![];
+        for _ in 0..positional(&s) {
+            if !is_punct(toks.get(*i), ',') || *i + 1 == toks.len() {
+                break;
+            }
+            *i += 1;
+            given.push((None, take_expr(toks, i)));
+        }
+        while is_punct(toks.get(*i), ',')
+            && let Some(TokenTree::Ident(name)) = toks.get(*i + 1)
+            && matches!(toks.get(*i + 2), Some(TokenTree::Punct(p)) if p.as_char() == '=' && p.spacing() == Spacing::Alone)
+        {
+            let name = name.clone();
+            *i += 3;
+            given.push((Some(name), take_expr(toks, i)));
+        }
+        return Ok(fmt_text(&s, l.span(), &given));
     }
     if let TokenTree::Group(g) = t
         && g.delimiter() == Delimiter::Brace
@@ -851,6 +868,18 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
     }
     if let TokenTree::Ident(_) = t {
         let start = *i;
+        // No `{ … }` before the next `,` (a turbofish's own kept): a value, not a node.
+        let end = start + split_top(&toks[start..]).first().map_or(0, Vec::len);
+        if !toks[start..end].iter().any(|t| matches!(t, TokenTree::Group(g) if g.delimiter() == Delimiter::Brace)) {
+            let v = toks[start..end].iter().cloned().collect::<TokenStream>().to_string().replace(" . ", ".");
+            return Err((
+                t.span(),
+                format!(
+                    "air: `{v}` is not a node: an element or a component takes braces (`div {{ … }}`); a value in \
+                     text goes in its string (`\"{{{v}}}\"`) or after a `{{}}` in it (`\"{{}} …\", {v}`)"
+                ),
+            ));
+        }
         let (path, inner) = until_block(toks, i)?;
         let path: Vec<TokenTree> = path.into_iter().collect();
         if is_punct(path.get(1), '!') {
@@ -1583,8 +1612,41 @@ fn unbrace(s: &str) -> String {
     s.replace("{{", "{").replace("}}", "}")
 }
 
+/// How many positional arguments `s`'s placeholders take, as `format!`
+/// counts them (`{}`, `{0}`, `{:.*}`, `{:1$}`) (pure).
+fn positional(s: &str) -> usize {
+    let (mut next, mut most, mut it) = (0, 0, s.chars().peekable());
+    while let Some(c) = it.next() {
+        if c != '{' || it.next_if_eq(&'{').is_some() {
+            continue;
+        }
+        let inner: String = it.by_ref().take_while(|c| *c != '}').collect();
+        let (arg, spec) = inner.split_once(':').unwrap_or((&inner, ""));
+        match arg.trim() {
+            "" => next += 1,
+            a => most = most.max(a.parse::<usize>().map_or(0, |n| n + 1)),
+        }
+        next += spec.contains(".*") as usize;
+        // `1$`: a width or precision from argument 1.
+        let refs = spec.split('$').rev().skip(1);
+        for w in refs.filter_map(|w| w.rsplit(|c: char| !c.is_ascii_digit()).next()?.parse::<usize>().ok()) {
+            most = most.max(w + 1);
+        }
+    }
+    next.max(most)
+}
+
 /// A text: static, or `format!`'s literal and arguments with the names they read.
 fn text(s: &str, span: Span) -> Node {
+    fmt_text(s, span, &[])
+}
+
+/// [`text`] with arguments given after it (`"{} per SM", n`, `w = 2`): a
+/// `{}`, `{0}` or a named one's `{w}` is theirs, as in `format!`; any other
+/// `{expr}` reads `expr`, as without them.
+fn fmt_text(s: &str, span: Span, given: &[(Option<Ident>, TokenStream)]) -> Node {
+    let named: Vec<String> = given.iter().filter_map(|(n, _)| n.as_ref().map(Ident::to_string)).collect();
+    let first = given.iter().filter(|(n, _)| n.is_none()).count();
     let (mut fmt, mut args, mut roots, mut it) = (String::new(), vec![], vec![], s.char_indices().peekable());
     while let Some((_, c)) = it.next() {
         match c {
@@ -1606,22 +1668,39 @@ fn text(s: &str, span: Span) -> Node {
                     Some((k, _)) => (&inner[..k], &inner[k..]),
                     None => (inner.as_str(), ""),
                 };
+                let e = expr.trim();
+                if !given.is_empty() && (e.is_empty() || e.parse::<usize>().is_ok() || named.iter().any(|n| n == e)) {
+                    fmt.push_str(&format!("{{{inner}}}"));
+                    continue;
+                }
                 let ts: TokenStream = expr.parse().unwrap_or_default();
                 let ts: TokenStream = ts.into_iter().map(|mut t| (t.set_span(span), t).1).collect();
                 captures(&ts, &mut roots);
+                // After the given positional ones, by place: `{}`s count only their own.
+                match given.is_empty() {
+                    true => fmt.push('{'),
+                    false => fmt.push_str(&format!("{{{}", first + args.len())),
+                }
                 args.push(ts);
-                fmt.push('{');
                 fmt.push_str(spec);
                 fmt.push('}');
             }
             c => fmt.push(c),
         }
     }
-    if args.is_empty() {
+    if args.is_empty() && given.is_empty() {
         return Node::Text(unbrace(s));
     }
+    let mut all: Vec<TokenStream> = given.iter().filter(|(n, _)| n.is_none()).map(|(_, e)| e.clone()).collect();
+    all.append(&mut args);
+    for (n, e) in given {
+        captures(e, &mut roots);
+        if let Some(n) = n {
+            all.push(quote!(#n = #e));
+        }
+    }
     let lit = Literal::string(&fmt);
-    Node::Fmt(quote!(#lit, #(#args),*), roots)
+    Node::Fmt(quote!(#lit #(, #all)*), roots)
 }
 
 const KEYWORDS: &[&str] = &[
@@ -2506,6 +2585,36 @@ mod tests {
         assert_eq!(made_at("div {\n  {a.b().map(f)}\n}", "into_child"), Some((2, 2)), "a child hole: its braces");
         assert_eq!(made_at("p {\n  title: t.get().x,\n}", "Box"), Some((2, 9)), "an attribute's value");
         assert_eq!(made_at("button {\n  onclick: move |_| f(&x),\n}", "handler_fn"), Some((2, 11)), "a handler");
+    }
+
+    #[test]
+    fn a_text_takes_format_arguments_as_its_placeholders_count_them() {
+        assert_eq!(positional("By threads ({} per SM)"), 1);
+        assert_eq!(positional("{} {x} {{}} {0} {}"), 2, "a name and an escape take none");
+        assert_eq!(positional("{2} {:>5} {a:1$} {:.*}"), 3, "an index, a width's, a precision's");
+        assert_eq!(positional("{x:5}"), 0, "a width given in place");
+        let made = |src: &str| match parse_nodes(&src.parse::<TokenStream>().unwrap().into_iter().collect::<Vec<_>>()) {
+            Ok(n) => match &n[..] {
+                [Node::El { children, .. }] => match &children[..] {
+                    [Node::Fmt(f, r)] => (f.to_string(), r.clone()),
+                    _ => panic!("{src}: one text"),
+                },
+                _ => panic!("{src}: one element"),
+            },
+            Err((_, e)) => panic!("{src}: {e}"),
+        };
+        assert_eq!(
+            made("span { \"({} per SM)\", g.threads_sm }"),
+            ("\"({} per SM)\" , g . threads_sm".into(), vec!["g".into()])
+        );
+        assert_eq!(
+            made("span { \"{} of {n.max} {w}\", a, w = b }").0,
+            "\"{} of {1} {w}\" , a , n . max , w = b",
+            "a read in place goes after the given ones, by place"
+        );
+        assert_eq!(error_at("span {\n  \"By threads\", g.threads_sm\n}"), Some((2, 16)), "a value with no `{{}}`");
+        assert_eq!(error_at("span { \"{} {}\", a, b } p { \"x\" }"), None);
+        assert_eq!(error_at("div { \"a\", WebIsland::<Shown, ()> { src: s } }"), None, "a turbofish's comma");
     }
 
     #[test]

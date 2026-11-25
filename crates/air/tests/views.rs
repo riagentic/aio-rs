@@ -550,3 +550,25 @@ fn a_key_outside_a_list_remounts_what_it_is_on_when_it_changes() {
     p.click("next");
     assert_eq!((p.text("bump"), p.attr("f", "value").as_deref()), ("10".into(), Some("")), "a new key: made anew");
 }
+
+/// A text takes `format!`'s arguments after it, as many as its `{}`s, and
+/// follows what they read.
+#[test]
+fn a_text_takes_format_arguments() {
+    #[derive(Clone, PartialEq)]
+    struct Gpu {
+        threads_sm: u32,
+        name: &'static str,
+    }
+    fn app() -> View {
+        let g = signal(|| Gpu { threads_sm: 2048, name: "sm_80" });
+        rsx! {
+            span { "data-t": "t", "By threads ({} per SM, {:>6}) {g.get().name} {w:03}", g.get().threads_sm, "x", w = 7 }
+            button { "data-t": "up", onclick: move |_| g.update(|g| g.threads_sm = 1024), "up" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    assert_eq!(p.text("t"), "By threads (2048 per SM,      x) sm_80 007");
+    p.click("up");
+    assert_eq!(p.text("t"), "By threads (1024 per SM,      x) sm_80 007");
+}
