@@ -367,7 +367,9 @@ fn run(h: Raw) -> Raw {
     let l = latest.clone();
     h.listen(Arc::new(move |s: &crate::kind::St| *l.lock().unwrap_or_else(|e| e.into_inner()) = s.clone()));
     let k = h.kind();
-    crate::report::watch(k.id, k.redact || !k.redacted.is_empty(), move || crate::store::reported(&**latest.try_lock().ok()?));
+    crate::report::watch(k.id, k.redact || !k.redacted.is_empty(), move || {
+        crate::store::reported(&**latest.try_lock().ok()?)
+    });
     let _in = crate::rt().enter();
     drop(h.start());
     crate::on_shutdown(h.clone());
@@ -393,7 +395,13 @@ fn serve(h: Raw, serve: Serve, listen: &str, opts: crate::sync::Options) -> std:
 /// A local cell's boot ([`Source::for_app`] but client mode): its store
 /// opened as `aio.toml` says, served to its window, its clients and its
 /// door. Its type erased: made once, not once per cell.
-fn boot(op: &Opener, cfg: &crate::config::Config, dirs: &crate::paths::AppDirs, http: Http, mode: crate::config::Mode) -> std::io::Result<Raw> {
+fn boot(
+    op: &Opener,
+    cfg: &crate::config::Config,
+    dirs: &crate::paths::AppDirs,
+    http: Http,
+    mode: crate::config::Mode,
+) -> std::io::Result<Raw> {
     use crate::config::Mode;
     crate::store::ONLY_PERSIST.store(cfg.data.only_persist, std::sync::atomic::Ordering::Relaxed);
     crate::store::TRAVEL.store(cfg.history.travel, std::sync::atomic::Ordering::Relaxed);

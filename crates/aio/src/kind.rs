@@ -71,7 +71,8 @@ pub(crate) struct Kind {
     pub tables: &'static [Bound],
     pub aio_cells: &'static [Slice],
     pub retired: &'static [&'static str],
-    pub transaction: Option<Transaction>,
+    pub tx: Option<Tx>,
+    pub bound_code: Option<BoundCode>,
     pub fields: &'static [Field],
     pub methods: &'static [&'static str],
     pub signatures: &'static [&'static str],
@@ -98,6 +99,38 @@ pub(crate) struct Kind {
     pub name: fn() -> &'static str,
 }
 
+/// A `#[cell(transaction)]` cell's settings and its transactions' code
+/// (`store/tx.rs`), reached only through here: an app without such a cell
+/// links none of it.
+#[derive(Clone, Copy)]
+pub(crate) struct Tx {
+    pub cfg: Transaction,
+    pub call: crate::store::TxCall,
+    pub sweep: fn(&mut crate::store::Core) -> bool,
+}
+
+/// The code of a cell's `db:` tables, its own or its `#[aio_cell]`s'
+/// (declared, read back), reached only through here: an app whose cells
+/// bind none links none of it.
+#[derive(Clone, Copy)]
+#[allow(clippy::type_complexity)]
+pub(crate) struct BoundCode {
+    pub declare: fn(&rusqlite::Connection, &[(&str, &Bound)]) -> std::result::Result<(), crate::store::Error>,
+    pub bind: fn(&rusqlite::Connection, &str, u32, &[Bound]) -> std::result::Result<Option<(Value, u32)>, crate::store::Error>,
+}
+
+/// Whether a cell binds `db:` tables: its own, or an `#[aio_cell]`'s.
+const fn binds(tables: &[Bound], slices: &[Slice]) -> bool {
+    let mut i = 0;
+    while i < slices.len() {
+        if !slices[i].tables.is_empty() {
+            return true;
+        }
+        i += 1;
+    }
+    !tables.is_empty()
+}
+
 /// [`Kind`] of each cell type, made as it builds.
 pub(crate) trait KindOf {
     const KIND: &'static Kind;
@@ -122,7 +155,14 @@ impl<T: Cell> KindOf for T {
         tables: T::TABLES,
         aio_cells: T::AIO_CELLS,
         retired: T::RETIRED,
-        transaction: T::TRANSACTION,
+        bound_code: match binds(T::TABLES, T::AIO_CELLS) {
+            true => Some(BoundCode { declare: crate::store::declare, bind: crate::store::bind }),
+            false => None,
+        },
+        tx: match T::TRANSACTION {
+            Some(cfg) => Some(Tx { cfg, call: crate::store::Core::tx_call, sweep: crate::store::Core::tx_sweep }),
+            None => None,
+        },
         fields: T::FIELDS,
         methods: T::METHODS,
         signatures: T::SIGNATURES,

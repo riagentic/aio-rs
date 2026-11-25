@@ -120,7 +120,7 @@ impl Core {
     /// A part of a `#[cell(transaction)]` cell's async call (`method`,
     /// `method.N`) whose end goes to `reply` (see the module).
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn tx_call(
+    pub(crate) fn tx_call(
         &mut self,
         cfg: crate::Transaction,
         by: &By,

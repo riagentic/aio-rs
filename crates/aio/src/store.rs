@@ -159,6 +159,10 @@ pub struct Store<T: Cell> {
     cell: std::marker::PhantomData<T>,
 }
 
+/// [`Core::tx_call`] ([`crate::kind::Tx`]).
+pub(crate) type TxCall =
+    fn(&mut Core, crate::Transaction, &By, &str, Value, Cx, crate::answer::Reply, Option<&str>) -> Result<Value>;
+
 /// A store as the runtime keeps it, its cell's type erased ([`crate::kind`]):
 /// [`Store`] is its typed face.
 pub(crate) struct Core {
@@ -726,6 +730,7 @@ fn open(
     version: u32,
     tables: &[crate::compat::data::Bound],
     slices: &[crate::compat::data::Slice],
+    code: Option<crate::kind::BoundCode>,
 ) -> Result<Opened, Error> {
     crate::paths::guard(path).map_err(|e| Error(e.to_string()))?;
     // This build reads this cell's data: part of its contract.
@@ -748,8 +753,10 @@ fn open(
     if aio_kv.is_some() {
         ours(&db, true)?;
         db.execute_batch(crate::compat::data::KV_TABLE)?;
-        let own = tables.iter().map(|t| (id, t));
-        declare(&db, own.chain(slices.iter().flat_map(|s| s.tables.iter().map(|t| (s.cell, t)))))?;
+        if let Some(code) = code {
+            let own = tables.iter().map(|t| (id, t));
+            (code.declare)(&db, &own.chain(slices.iter().flat_map(|s| s.tables.iter().map(|t| (s.cell, t)))).collect::<Vec<_>>())?;
+        }
     }
     // One cell, aio's: its slice; many (`#[aio_cell]` fields): each slice by field,
     // at this version, the first older one naming the backup.
@@ -777,11 +784,8 @@ fn open(
 
 /// Bound tables `(cell, binding)` made or brought to their declared shape
 /// (aio's `initSchema`); never one of aio-rs's own tables.
-fn declare<'a>(
-    db: &Connection,
-    tables: impl Iterator<Item = (&'a str, &'a crate::compat::data::Bound)>,
-) -> Result<(), Error> {
-    for (cell, &(field, table, _, cols)) in tables {
+pub(crate) fn declare(db: &Connection, tables: &[(&str, &crate::compat::data::Bound)]) -> Result<(), Error> {
+    for &(cell, &(field, table, _, cols)) in tables {
         if TABLES.contains(&table) {
             return Err(Error(format!("{cell}.{field}: table {table} is aio-rs's own; bind the field to another")));
         }
@@ -795,13 +799,13 @@ fn declare<'a>(
 
 /// aio-rs's own file, set up: cell `id`'s bound tables declared, and their rows
 /// by field (changed by the app's own SQL, they come in as aio's changes do).
-fn bind(
+pub(crate) fn bind(
     db: &Connection,
     id: &str,
     version: u32,
     tables: &[crate::compat::data::Bound],
 ) -> Result<Option<(Value, u32)>, Error> {
-    declare(db, tables.iter().map(|t| (id, t)))?;
+    declare(db, &tables.iter().map(|t| (id, t)).collect::<Vec<_>>())?;
     let got = crate::compat::data::bound(db, tables).map_err(Error)?;
     Ok((!got.is_empty()).then_some((Value::Object(got), version)))
 }
@@ -1610,7 +1614,7 @@ impl Core {
             return Ok(Self::memory(k));
         }
         let _one = BOOT.lock().unwrap_or_else(|e| e.into_inner());
-        let Opened { db, recovered, aio_kv, seed } = open(path, app, k.id, k.version, k.tables, k.aio_cells)?;
+        let Opened { db, recovered, aio_kv, seed } = open(path, app, k.id, k.version, k.tables, k.aio_cells, k.bound_code)?;
         if let Some(r) = &recovered {
             told_recovered(k.id, r);
         }
@@ -1627,8 +1631,10 @@ impl Core {
         };
         let (base, last) = newest(&c, path, k.id, k.version, aio_kv.is_some())?;
         retire(k, &c, aio_kv.as_ref())?;
-        let seed = match (&aio_kv, k.tables.is_empty()) {
-            (None, false) => bind(&c, k.id, k.version, k.tables)?.map(|(raw, v)| (None, raw, v)),
+        let seed = match (&aio_kv, k.bound_code) {
+            (None, Some(code)) if !k.tables.is_empty() => {
+                (code.bind)(&c, k.id, k.version, k.tables)?.map(|(raw, v)| (None, raw, v))
+            }
             _ => seed,
         };
         let (from, mut st, migrated) = match &base {
@@ -1877,8 +1883,8 @@ impl Core {
         let Some(op) = op else {
             let cx = Cx::live(now, by).with_who(who, from).with_reply(reply);
             let out = self.apply_and_commit(by, method, args, cx, None, None).map(Some);
-            if self.kind.transaction.is_some() {
-                self.tx_sweep();
+            if let Some(tx) = self.kind.tx {
+                (tx.sweep)(self);
             }
             return out;
         };
@@ -1900,8 +1906,8 @@ impl Core {
         }
         let cx = Cx::synced(now, k.id, by, &op).with_who(who, from).with_reply(reply);
         let out = self.apply_and_commit(by, method, args, cx, None, Some(&op.to_string())).map(Some);
-        if self.kind.transaction.is_some() {
-            self.tx_sweep();
+        if let Some(tx) = self.kind.tx {
+            (tx.sweep)(self);
         }
         out
     }
@@ -1995,10 +2001,10 @@ impl Core {
             crate::reject!("{}: stopped after {PANICS_MAX} panics within a minute; restart the app", k.id);
         }
         let base = method.split_once('.').map_or(method, |(m, _)| m);
-        if let (Some(cfg), Some(_)) = (k.transaction, (k.async_mode)(base))
+        if let (Some(tx), Some(_)) = (k.tx, (k.async_mode)(base))
             && let Some(reply) = cx.reply()
         {
-            return self.tx_call(cfg, by, method, args, cx, reply, op);
+            return (tx.call)(self, tx.cfg, by, method, args, cx, reply, op);
         }
         let cx = cx.with_live(self.state.clone());
         let t0 = std::time::Instant::now();

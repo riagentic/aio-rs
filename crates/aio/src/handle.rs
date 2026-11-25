@@ -686,16 +686,6 @@ impl Raw {
         self.enter(None, None, method, args, None, None).map(|(_, a)| a)
     }
 
-
-
-
-
-
-
-
-
-
-
     pub(crate) fn on_pending(&self, f: impl Fn() + Send + Sync + 'static) {
         lock(&self.inner.watchers).push(Arc::new(f));
     }
@@ -823,9 +813,9 @@ impl Raw {
         }
         self.count_failures();
         // A transaction its aborts ended: the next serialized call's turn.
-        if k.transaction.is_some() {
+        if let Some(tx) = k.tx {
             let turn = self.turn();
-            let swept = lock(&self.inner.store).tx_sweep();
+            let swept = (tx.sweep)(&mut lock(&self.inner.store));
             if let Err(e) = self.end(turn, if swept { Then::Told { wake } } else { Then::Nothing }) {
                 eprintln!("[aio] {}: {e}", k.id);
             }
@@ -1064,7 +1054,7 @@ impl Raw {
             Some(_) => {
                 let (r, a) = crate::answer::Reply::new(method);
                 parts.into_iter().for_each(|p| r.stream_to(p));
-                if k.transaction.is_some() {
+                if k.tx.is_some() {
                     self.on_gone(&r);
                 }
                 (Some(r), Some(a))
@@ -1119,11 +1109,9 @@ impl Raw {
             drop(rt.spawn_blocking(move || {
                 let Some(inner) = me.upgrade() else { return };
                 let h = Raw { inner, by: By::System };
-                if k.transaction.is_none() {
-                    return;
-                }
+                let Some(tx) = k.tx else { return };
                 let turn = h.turn();
-                let swept = lock(&h.inner.store).tx_sweep();
+                let swept = (tx.sweep)(&mut lock(&h.inner.store));
                 if let Err(e) = h.end(turn, if swept { Then::Told { wake: true } } else { Then::Nothing }) {
                     eprintln!("[aio] {}: {e}", k.id);
                 }
