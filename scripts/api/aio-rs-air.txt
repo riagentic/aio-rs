@@ -58,7 +58,9 @@ air::GlobalMemo::get_untracked: fn get_untracked(&self) -> T where T: Clone
 air::GlobalMemo::memo: fn memo(&self) -> Memo<T>
 air::GlobalMemo::new: const fn new(f: fn() -> T) -> Self
 air::GlobalMemo::read: fn read(&self) -> ReadGuard<T>
+air::GlobalMemo::read_untracked: fn read_untracked(&self) -> ReadGuard<T>
 air::GlobalMemo::with: fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R
+air::GlobalMemo::with_untracked: fn with_untracked<R>(&self, f: impl FnOnce(&T) -> R) -> R
 air::H::attr: fn attr<V: IntoAttr<'static> + Clone + 'static>(self, name: &'static str, v: V) -> Self
 air::H::attr_with: fn attr_with<V: IntoAttr<'static>>(self, name: &'static str, f: impl Fn() -> V + 'static) -> Self
 air::H::child: fn child<C: IntoChild + Clone + 'static>(self, c: C) -> Self
@@ -107,7 +109,7 @@ air::MountedData::eval: fn eval(&self, js: &str) -> Eval
 air::MountedData::get_client_rect: fn get_client_rect(&self) -> impl std::future::Future<Output = Result<crate::geometry::Rect, String>> + use<>
 air::MountedData::run: fn run(&self, js: &str)
 air::MountedData::scroll: fn scroll(&self, to: crate::geometry::PixelsVector2D, behavior: crate::ScrollBehavior) -> impl std::future::Future<Output = Result<(), String>> + use<>
-air::MountedData::scroll_to: fn scroll_to(&self, smooth: bool) -> impl std::future::Future<Output = Result<(), String>> + use<>
+air::MountedData::scroll_to: fn scroll_to(&self, behavior: crate::ScrollBehavior) -> impl std::future::Future<Output = Result<(), String>> + use<>
 air::MountedData::set_focus: fn set_focus(&self, on: bool) -> impl std::future::Future<Output = Result<(), String>> + use<>
 air::MouseButton::Auxiliary
 air::MouseButton::Fifth

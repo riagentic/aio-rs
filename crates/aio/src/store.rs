@@ -197,7 +197,7 @@ pub struct Store<T: Cell> {
     spare: spare::Spare<T>,
     /// `[history] keep` in ms: events older are folded (`keep_history`).
     keep: Option<i64>,
-    /// How long a run of `#[coalesce]` calls is held (`[data] coalesce_ms`).
+    /// How long a run of `#[coalesce]` calls is held (`[data] coalesce`).
     coalesce: std::time::Duration,
     /// aio's journal watermark the next commit writes (an aio journal's
     /// entry replayed at boot), in the transaction with what it did.
@@ -1968,7 +1968,7 @@ impl<T: Cell> Store<T> {
     }
 
     /// Hold a run of `#[coalesce]` calls `d` before it goes into the log
-    /// (`[data] coalesce_ms`, aio's `persistDebounceMs`); zero: each call at once.
+    /// (`[data] coalesce`, aio's `persistDebounceMs`); zero: each call at once.
     pub fn set_coalesce(&mut self, d: std::time::Duration) -> Result {
         self.coalesce = d;
         if d.is_zero() { self.flush() } else { Ok(()) }

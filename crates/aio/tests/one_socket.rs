@@ -385,16 +385,16 @@ async fn counted(to: String) -> (String, Arc<AtomicUsize>) {
 #[ignore = "a measurement"]
 async fn measure_three_cells_connections_and_patch_latency() {
     for pace in [50, 0] {
-        measure(pace).await;
+        measure(Duration::from_millis(pace)).await;
     }
 }
 
-async fn measure(sync_interval_ms: u64) {
+async fn measure(sync_interval: Duration) {
     let (a, b, c) = (Handle::<Alpha>::memory(), Handle::<Beta>::memory(), Handle::<Gamma>::memory());
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap().to_string();
     let http = aio::http::Http::default().cell(b.clone()).cell(c.clone());
-    let limits = aio::sync::Limits { sync_interval_ms, ..Default::default() };
+    let limits = aio::sync::Limits { sync_interval, ..Default::default() };
     let opts = aio::sync::Options { token: "secret".into(), http, limits, ..Default::default() };
     tokio::spawn(aio::sync::serve_with(a.clone(), l, opts));
     let (relay, conns) = counted(addr).await;
@@ -426,7 +426,7 @@ async fn measure(sync_interval_ms: u64) {
     took.sort();
     let us = |d: Duration| d.as_micros();
     println!(
-        "three cells, sync_interval_ms {sync_interval_ms}: {} connections; patch latency p50 {} us, p99 {} us",
+        "three cells, sync_interval {sync_interval:?}: {} connections; patch latency p50 {} us, p99 {} us",
         conns.load(Ordering::SeqCst),
         us(took[took.len() / 2]),
         us(took[took.len() * 99 / 100])

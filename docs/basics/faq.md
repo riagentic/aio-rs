@@ -197,7 +197,7 @@ bug in this page: `ax feedback` says where to send it.
 | Symptom | Cause | Fix |
 |---|---|---|
 | a test fails at its end on a refusal | `TestCells`/`TestUi` fail on refusals nobody looked at | take the expected ones with `failures()` |
-| a test waits in real time | `sleep` in a cell test | `TestCells::advance(ms)`, `settle()` |
+| a test waits in real time | `sleep` in a cell test | `TestCells::advance(d)`, `settle()` |
 | a test reads a fixture at run time | `CARGO_MANIFEST_DIR` paths break in other builds | `include_str!` / `include_bytes!` |
 | a test passes and the app fails, or the reverse | the harnesses are as strict as the app: a refusal unread fails a test | read `failures()`; a harness laxer than the app is a bug: `ax feedback` |
 | a UI test breaks when a label is reworded | it names the element by its text (`SaveButton`) | pin `"data-t": "save"` |

@@ -72,16 +72,16 @@ fn declared_schedules_are_armed_when_the_cell_goes_live() {
     s.sort_by(|a, b| a.key.cmp(&b.key));
     let keys: Vec<_> = s.iter().map(|d| (d.key.as_str(), d.every, d.cron.as_deref())).collect();
     assert_eq!(keys, [("@morning", None, Some("0 9 * * *")), ("@tick", Some(60_000), None)]);
-    t.advance(60_000);
+    t.advance(Duration::from_secs(60));
     assert_eq!(h.state().ticks, 1);
-    t.advance(180_000);
+    t.advance(Duration::from_secs(180));
     assert_eq!(h.state().ticks, 2, "missed ones fire once");
     // The test clock starts at the wall clock's time: 9:00 UTC may have
     // come in these 4 minutes (it is now 60 s + 180 s past `@tick`'s arming).
     let (morning, now) = (s[0].due, s[1].due + 180_000);
     let fired = u32::from(morning <= now);
     assert_eq!(h.state().mornings, fired);
-    t.advance(86_400_000);
+    t.advance(Duration::from_secs(86_400));
     assert_eq!(h.state().mornings, fired + 1, "once a day");
 }
 
@@ -98,9 +98,9 @@ fn a_retry_waits_longer_each_time() {
     h.fail(2).unwrap();
     let retry = h.store(|s| s.schedules().unwrap()).into_iter().find(|d| d.key == "retry").unwrap();
     assert_eq!((h.state().retry_in.clone(), retry.every), (vec![4000], None));
-    t.advance(3999);
+    t.advance(Duration::from_millis(3999));
     assert_eq!(h.state().ticks, 0);
-    t.advance(1);
+    t.advance(Duration::from_millis(1));
     assert_eq!(h.state().ticks, 1);
 }
 

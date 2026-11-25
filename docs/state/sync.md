@@ -169,7 +169,7 @@ rt.block_on(async {
     let ana = Remote::<Tally>::connect(&addr, "secret", "ana").await.unwrap();
     let refused = Arc::new(Mutex::new(vec![]));
     let r = refused.clone();
-    ana.on_refused(move |method, why| r.lock().unwrap().push((method.to_string(), why.code())));
+    ana.on_refused(move |method, why| r.lock().unwrap().push((method.to_string(), why.code.clone())));
 
     assert_eq!(ana.add(2).unwrap(), 2, "the copy's answer, at once");
     assert!(ana.add(0).is_err(), "refused on the copy: never sent");
@@ -458,7 +458,7 @@ rt.block_on(async {
   `calls_per_sec` (200) and `bytes_per_sec` (8 MB) per link, bursts up to
   twice that. A refused client gets 503 with the reason, a too-big
   message a close naming the limit, a fast sender is read more slowly:
-  nothing is dropped. `sync_interval_ms` (50) paces what a link is sent
+  nothing is dropped. `sync_interval` (`"50ms"`) paces what a link is sent
   (a person's call goes at once) and `full_state_percent` (50) sends the
   whole view for a bigger patch ([patches](../persistence/offline.md#what-travels-patches)).
 

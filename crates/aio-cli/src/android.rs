@@ -278,14 +278,14 @@ pub fn splash_files(
     };
     let [l, d] = colors;
     let json = aio::serde_json::json!({
-        "min": s.min_ms,
-        "max": s.max_ms,
+        "min": u64::try_from(s.min.as_millis()).unwrap_or(u64::MAX),
+        "max": u64::try_from(s.max.as_millis()).unwrap_or(u64::MAX),
         "scale": if s.retina() { 2 } else { 1 },
         "text": s.text.as_deref().map(|t| aio_shell::splash::text(t, title, version)),
         "font": s.font,
         "size": s.font_size.unwrap_or(14),
         "bold": s.bold,
-        "fade": s.fade_ms.unwrap_or(200),
+        "fade": s.fade.map_or(200, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
         "night": match scheme { ColorScheme::System => None, ColorScheme::Light => Some(false), ColorScheme::Dark => Some(true) },
         "light": [six(&l[0]), six(&l[1])],
         "dark": [six(&d[0]), six(&d[1])],
@@ -1336,13 +1336,13 @@ mod tests {
         let s = Splash {
             image: "assets/splash@2x.png".into(),
             text: Some("Starting {title} {version}".into()),
-            min_ms: 700,
-            max_ms: 9000,
+            min: std::time::Duration::from_millis(700),
+            max: std::time::Duration::from_millis(9000),
             background: None,
             font: None,
             font_size: None,
             bold: false,
-            fade_ms: None,
+            fade: None,
             png: &[],
             ..Default::default()
         };
@@ -1720,13 +1720,13 @@ mod tests {
         let s = Splash {
             image: "splash.png".into(),
             text: Some("{title}".into()),
-            min_ms: 400,
-            max_ms: 9000,
+            min: std::time::Duration::from_millis(400),
+            max: std::time::Duration::from_millis(9000),
             background: None,
             font: Some("serif".into()),
             font_size: Some(18),
             bold: true,
-            fade_ms: Some(350),
+            fade: Some(std::time::Duration::from_millis(350)),
             png: &[],
             ..Default::default()
         };
@@ -1740,7 +1740,7 @@ mod tests {
             (Some("serif"), Some(18), Some(true), Some(350))
         );
         let plain = splash_files(
-            &Splash { font: None, font_size: None, bold: false, fade_ms: None, ..s },
+            &Splash { font: None, font_size: None, bold: false, fade: None, ..s },
             b"PNG",
             "N",
             "1.0.0",

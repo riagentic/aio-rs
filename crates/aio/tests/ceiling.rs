@@ -55,10 +55,10 @@ async fn an_await_past_the_ceiling_is_cut_off_and_a_long_one_is_not() {
     assert_eq!(h.state().status, "waiting", "its later steps never ran");
     let e = end.await.unwrap_err();
     assert!(e.why.contains("job: effect `hang` timed out after 30s"), "its caller is told: {e}");
-    assert_eq!(e.code(), Some(aio::Code::EffectTimeout), "aio's code for it");
+    assert_eq!(e.code, Some(aio::Code::EffectTimeout), "aio's code for it");
 
     // `[perf] call_ceiling` sets another.
-    aio::perf::set(aio::perf::Budgets { call_ceiling: Some(1000), ..Default::default() });
+    aio::perf::set(aio::perf::Budgets { call_ceiling: Some(Duration::from_secs(1)), ..Default::default() });
     _ = h.hang().unwrap();
     let t0 = tokio::time::Instant::now();
     h.done("hang").await;

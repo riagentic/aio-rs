@@ -39,20 +39,24 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// How long a new version has to open its window.
+#[doc(hidden)]
 pub const FIRST_BOOT: Duration = Duration::from_secs(120);
 /// Installed versions kept by default (`[updates] keep`; the current one
 /// and the one before it always).
+#[doc(hidden)]
 pub const KEEP: usize = 3;
 /// In a staged version: how its install treats the data (`accept`: over
 /// the gate's blockers; `retire`: on fresh data). Absent: gated.
 const DATA_MARK: &str = "data-override";
 /// Set on a start that must wait for the process it names to be gone (the
 /// app restarting to install an update).
+#[doc(hidden)]
 pub const RELAUNCH: &str = "AIORT_RELAUNCH_AFTER";
 /// `1`: a supervisor (the systemd unit, launchd agent or Windows task that
 /// `ax build` writes for a server) starts this app again whenever it exits.
 /// An update then starts no process of its own: one the supervisor doesn't
 /// know is killed with the service, or fights its restart for the lock.
+#[doc(hidden)]
 pub const SUPERVISED: &str = "AIO_SUPERVISED";
 /// Beside `first-boot`: the supervised new version started once already.
 const TRIED: &str = "first-boot.tried";
@@ -72,6 +76,7 @@ static RETIRED: OnceLock<String> = OnceLock::new();
 /// apart, in `<id>-appimage` (the same app installed from its bundle may be
 /// there too). An install elsewhere (`AIORT_INSTALL_ROOT`) is found by
 /// where this binary runs from.
+#[doc(hidden)]
 pub fn dir(id: &str) -> PathBuf {
     let name = match appimage() {
         Some(_) => format!("{id}-appimage"),
@@ -84,6 +89,7 @@ pub fn dir(id: &str) -> PathBuf {
 /// App `name`'s install folder (pure): the one `exe` runs from
 /// (`<folder>/versions/<v>/`), else `<root>/<name>` (`AIORT_INSTALL_ROOT`),
 /// else `<tool>/install/<name>`.
+#[doc(hidden)]
 pub fn install_dir(exe: Option<&Path>, name: &str, root: Option<PathBuf>, tool: &Path) -> PathBuf {
     let ran = exe.and_then(|e| e.parent()?.parent()?.parent()).filter(|d| {
         d.file_name().is_some_and(|n| n == name) && d.join("versions").is_dir() && d.join("installed.json").is_file()
@@ -98,6 +104,7 @@ pub fn install_dir(exe: Option<&Path>, name: &str, root: Option<PathBuf>, tool: 
 /// The AppImage that `exe` runs from: `appimage` (`$APPIMAGE`) when `exe`
 /// is inside the mount `appdir` (`$APPDIR`) names. A program started from
 /// an AppImage inherits both and is none. Pure.
+#[doc(hidden)]
 pub fn appimage_of(appimage: Option<&str>, appdir: Option<&str>, exe: &Path) -> Option<PathBuf> {
     let (file, mount) = (appimage.filter(|a| !a.is_empty())?, appdir.filter(|a| !a.is_empty())?);
     exe.starts_with(mount).then(|| PathBuf::from(file))
@@ -106,6 +113,7 @@ pub fn appimage_of(appimage: Option<&str>, appdir: Option<&str>, exe: &Path) -> 
 /// Linux: the AppImage this app runs from, if it does. An update replaces
 /// that file ([`crate::swap`], as on macOS and Windows), and a release for
 /// it is `<os>-<arch>.appimage.json` (`ax release --appimage`).
+#[doc(hidden)]
 pub fn appimage() -> Option<PathBuf> {
     if !cfg!(target_os = "linux") {
         return None;
@@ -125,6 +133,7 @@ fn manifest_name() -> String {
 
 /// This process runs from an installed version (not a dev build)?
 #[cfg(target_os = "linux")]
+#[doc(hidden)]
 pub fn installed(id: &str) -> bool {
     if appimage().is_some() {
         return true;
@@ -138,6 +147,7 @@ pub fn installed(id: &str) -> bool {
 /// This process runs from an installed version (not a dev build)? An
 /// Android app always runs from its installed APK.
 #[cfg(not(target_os = "linux"))]
+#[doc(hidden)]
 pub fn installed(id: &str) -> bool {
     cfg!(target_os = "android") || place(id).is_some()
 }
@@ -172,6 +182,7 @@ fn staged_version(d: &Path, v: &str, bin: &str) -> Option<(PathBuf, PathBuf)> {
 }
 
 /// `<os>-<arch>`, as manifests are named.
+#[doc(hidden)]
 pub fn platform() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
@@ -290,6 +301,7 @@ fn swap_unmade(d: &Path, pending: Option<&aio::serde_json::Value>, data: &Path, 
 }
 
 /// What `start` does about updates before the app boots.
+#[doc(hidden)]
 pub enum Next {
     /// Boot as usual.
     Boot,
@@ -299,6 +311,7 @@ pub enum Next {
 
 /// At start (the lock held, the log running): a failed update is undone, a
 /// staged one installed.
+#[doc(hidden)]
 pub fn on_start(cfg: &aio::config::Config, version: &str, dirs: &aio::paths::AppDirs) -> io::Result<Next> {
     let id = &cfg.app.id;
     let d = dir(id);
@@ -458,6 +471,7 @@ fn asked() -> Option<Result<(), String>> {
 /// `version` of app `id` after an update, and the version it replaced is
 /// still there: the runtime's failure question may offer that one
 /// ([`go_back`]).
+#[doc(hidden)]
 pub fn can_go_back(id: &str, version: &str) -> bool {
     let d = dir(id);
     d.join("first-boot").exists()
@@ -467,6 +481,7 @@ pub fn can_go_back(id: &str, version: &str) -> bool {
 
 /// Give this first boot up: the helper waiting on it puts the version
 /// before back and starts it, as for a version that never booted.
+#[doc(hidden)]
 pub fn go_back(id: &str) -> io::Result<()> {
     std::fs::write(dir(id).join(crate::swap::BACK), b"")
 }
@@ -715,6 +730,7 @@ fn flip(dir: &Path, version: &str) -> io::Result<()> {
 /// update as after the helper's rollback. True: exit now, the supervisor
 /// starts that one.
 #[cfg(target_os = "linux")]
+#[doc(hidden)]
 pub fn supervised_start(cfg: &aio::config::Config, version: &str) -> io::Result<bool> {
     if !supervised(cfg) {
         return Ok(false);
@@ -784,6 +800,7 @@ fn relaunch() -> io::Result<()> {
 
 /// The window opened: a new version claims its first boot, then the
 /// install is final: `installed.json` says so, old versions go.
+#[doc(hidden)]
 pub fn confirm(id: &str, version: &str) {
     let d = dir(id);
     let Some(p) = read_json::<aio::serde_json::Value>(&d.join("pending.json")) else { return };
@@ -1268,6 +1285,7 @@ fn build_git(
 }
 
 /// The signer of a release [`from_git`] built: nobody.
+#[doc(hidden)]
 pub const UNSIGNED: &str = "unsigned";
 
 /// `ax update <app> --from-git <ref>`: the developer's own way around the signature check.
@@ -1279,6 +1297,7 @@ pub const UNSIGNED: &str = "unsigned";
 /// can't read it is not staged). The app's next start installs it as any
 /// update (backup, first boot, rollback). `version`: the installed one;
 /// `build`: the clone → its bundle ([`aio_build`]). What was staged, said.
+#[doc(hidden)]
 pub fn from_git(
     cfg: &aio::config::Config,
     (remote, r): (&str, &str),
@@ -1396,6 +1415,7 @@ fn git(args: &[&str], cwd: Option<&Path>) -> io::Result<String> {
 
 /// Build the cloned `src` as `ax build` does (`ax` and cargo on PATH):
 /// the bundle this machine installs.
+#[doc(hidden)]
 pub fn aio_build(id: &str, src: &Path) -> io::Result<PathBuf> {
     let mut cmd = Command::new("ax");
     aio::lifecycle::scrub(&mut cmd, false);
@@ -1437,6 +1457,7 @@ fn pick_bundle<'a>(names: &'a [String], os: &str, appimage: bool) -> Option<&'a 
 
 /// What a build reads: it runs once in a throwaway data dir and says
 /// (`AIORT_DATA_CONTRACT`), touching no data of this machine.
+#[doc(hidden)]
 pub fn contract_of(binary: &Path) -> Result<up::Contract, String> {
     let tmp = std::env::temp_dir().join(format!("aio-contract-{}-{}", std::process::id(), now_ms()));
     _ = std::fs::remove_dir_all(&tmp);
@@ -1594,6 +1615,7 @@ fn patch_base(staged: &Path, bin: &str) -> Option<PathBuf> {
 }
 
 /// What a look found, for the log.
+#[doc(hidden)]
 pub fn said(f: &Found) -> String {
     match f {
         Found::Current { reason } => reason.clone(),
@@ -1607,6 +1629,7 @@ pub fn said(f: &Found) -> String {
 
 /// Look for a release once. With `[updates] auto` an offered one is
 /// downloaded, checked and staged too.
+#[doc(hidden)]
 pub fn check(cfg: &aio::config::Config, version: &str, data: &Path) -> io::Result<Found> {
     let d = dir(&cfg.app.id);
     match look(cfg, version, data, &d)? {
@@ -1623,6 +1646,7 @@ pub fn check(cfg: &aio::config::Config, version: &str, data: &Path) -> io::Resul
 
 /// Install `want` now (the cell's `apply`): staged if it isn't yet, then this
 /// app stops and starts again with the same arguments, and installs it.
+#[doc(hidden)]
 pub fn apply_now(
     cfg: &aio::config::Config,
     version: &str,
@@ -1827,6 +1851,7 @@ fn stage(d: &Path, m: &Manifest, raw: &[u8], bin: &str, fill: impl FnOnce(&Path)
 
 /// An AppImage laid out as it is staged, `<bin>.AppImage` in `into`: what
 /// `ax release` makes an AppImage's patches between.
+#[doc(hidden)]
 pub fn unpack_appimage(bin: &str, bundle: &[u8], into: &Path) -> io::Result<()> {
     std::fs::create_dir_all(into)?;
     put_appimage(bundle, &into.join(format!("{bin}.AppImage")))
@@ -1856,6 +1881,7 @@ fn put_appimage(bytes: &[u8], to: &Path) -> io::Result<()> {
 /// one top dir stripped), macOS's zipped `.app` (`ditto`, which keeps its
 /// links and signature), Windows's zipped `.exe`. `ax release` unpacks
 /// bundles for `os` so to make patches.
+#[doc(hidden)]
 pub fn unpack_for(os: &str, bundle: &[u8], into: &Path) -> io::Result<()> {
     let ok = |st: std::process::ExitStatus| {
         if st.success() { Ok(()) } else { Err(io::Error::other(format!("unpack: {st}"))) }
@@ -1942,6 +1968,7 @@ fn yes(answer: &str) -> bool {
 /// Look for releases in the background, while the app runs from an
 /// installed version: soon after start, then every `[updates] every`.
 #[cfg(feature = "updates")]
+#[doc(hidden)]
 pub fn watch(cfg: &aio::config::Config, version: &str, data: &Path) {
     if cfg.updates.url.is_none()
         || OWN.load(std::sync::atomic::Ordering::Relaxed)

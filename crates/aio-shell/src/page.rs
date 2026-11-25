@@ -262,6 +262,7 @@ fn pick_line(id: u64, p: &Pick, many: bool) -> String {
 
 /// `s`'s char index for UTF-16 offset `units` (the page counts text in
 /// UTF-16, Rust in bytes and chars).
+#[doc(hidden)]
 pub fn char_index(s: &str, units: usize) -> usize {
     let mut seen = 0;
     for (i, c) in s.chars().enumerate() {

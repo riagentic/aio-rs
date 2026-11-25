@@ -32,7 +32,7 @@ fn the_built_literal_is_the_parsed_config() {
     assert!(bad("image = \"../s.png\"").contains("in the app's folder"));
     assert!(bad("image = \"s.jpg\"").contains("is a .png"));
     assert!(bad("image = \"s.png\"\nbackground = [\"#fff\", \"red\"]").contains("#rgb or #rrggbb"));
-    assert!(bad("image = \"s.png\"\nmin_ms = 2000\nmax_ms = 1000").contains("min_ms is more than max_ms"));
+    assert!(bad("image = \"s.png\"\nmin_ms = 2000\nmax = \"1s\"").contains("min is more than max"));
     let plain = Config::parse("[app]\nid = \"lit\"").unwrap();
     assert!(bad("image = \"s.png\"\nbar_height = 0").contains("bar_height is px"));
     assert!(bad("image = \"s.png\"\nposition = \"left\"").contains("unknown variant"));

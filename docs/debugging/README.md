@@ -39,9 +39,9 @@ impl Vault {
 # fn main() {
 let h = Handle::<Vault>::memory();
 let e = h.unlock("1".into()).unwrap_err();
-assert_eq!((e.why.as_str(), e.code()), ("a PIN has at least 4 digits", None), "the app's own refusal");
+assert_eq!((e.why.as_str(), e.code), ("a PIN has at least 4 digits", None), "the app's own refusal");
 let e = h.call("nope", serde_json::json!([])).unwrap_err();
-assert_eq!(e.code(), Some(Code::ActionRefused), "one of aio-rs's: unknown method");
+assert_eq!(e.code, Some(Code::ActionRefused), "one of aio-rs's: unknown method");
 # }
 ```
 
@@ -114,7 +114,7 @@ id = "notes"
 level = "info"              # trace, debug, info (default), warn, error
 keep = 5                    # files kept per log
 file_mb = 10                # a file rotates at this size
-heartbeat = 3600            # seconds between heartbeat lines (uptime, calls, errors); 0: none
+heartbeat = "1h"           # how often a heartbeat line (uptime, calls, errors) is written; "off": never
 suppress = ["notes.tick"]   # methods whose calls are never logged, even at debug
 per_run = false             # true: each run starts fresh files (app.1.log is the last run)
 ```
@@ -196,7 +196,7 @@ More: [feedback](feedback.md), [production](production.md), every kind in
   only the user's own reports. `aio::feedback` is the "Report a problem"
   button's cell (sending, saved, delivered or why not).
 - `aio::report::on_problem(|kind, msg| ..)` hears every problem as it
-  happens, also warnings that are not reports; `aio::report::Code::of(kind)`
+  happens, also warnings that are not reports; `aio::report::Problem::of(kind)`
   types it (`panic`, `tripped`, `refused`, `effect:timeout`,
   `budget:method`, `storm`, `degraded:<part>`, `memory:high`,
   `window:crashed`, `update:failed`, `user`, `degraded-recovered:<part>`,
@@ -205,7 +205,7 @@ More: [feedback](feedback.md), [production](production.md), every kind in
 - `aio::report::subscribe(|d| ..)` hears the same as a typed event (aio's
   `onDiagnostic`): `d.kind`, `d.message`, `d.severity` (`Error` for a
   problem, `Warn` for a warning or a vitals step up, `Info` for a
-  recovery), `d.tip`, `d.code()`, `d.held` (repeats held back);
+  recovery), `d.tip`, `d.problem()`, `d.held` (repeats held back);
   `aio::report::recent()` keeps the newest 200.
 - `data/health.json` says each part's state every 10 s; `ax health <app>`
   reads it and fails for a degraded, stuck or stopped app. A served app
@@ -250,10 +250,10 @@ auto = true
 network = ["reports.example.org"]
 
 [perf]
-method = 50
+method = "50ms"
 
 [perf.methods]
-"notes.import" = 2000
+"notes.import" = "2s"
 
 [perf.storm]
 rate = 200

@@ -25,6 +25,7 @@ times a second, and work too heavy for a method.
 ```rust
 use aio::prelude::*;
 use aio::testing::TestCells;
+use std::time::Duration;
 
 #[cell(persist)]
 pub struct Reports {
@@ -54,9 +55,9 @@ let h = t.cell::<Reports>();
 let mut keys = h.store(|s| s.schedules().unwrap().into_iter().map(|d| d.key).collect::<Vec<_>>());
 keys.sort();
 assert_eq!(keys, ["@hourly", "@weekly"]);
-t.advance(3_600_000);
+t.advance(Duration::from_secs(3600));
 assert_eq!(h.state().hourly, 1);
-t.advance(5 * 3_600_000); // five slots missed (the app was off, the laptop asleep)
+t.advance(Duration::from_secs(5 * 3600)); // five slots missed (the app was off, the laptop asleep)
 assert_eq!(h.state().hourly, 2, "missed slots fire once, not five times");
 # }
 ```
@@ -93,6 +94,7 @@ saved when the event first ran.
 ```rust
 use aio::prelude::*;
 use aio::testing::TestCells;
+use std::time::Duration;
 
 #[cell(persist)]
 pub struct Kitchen {
@@ -128,7 +130,7 @@ h.timer("rice".into(), 12).unwrap();
 h.timer("tea".into(), 4).unwrap();
 h.timer("tea".into(), 3).unwrap(); // the same key: replaced, not added
 h.stop("rice".into()).unwrap();
-t.advance(15 * 60_000);
+t.advance(Duration::from_secs(15 * 60));
 assert_eq!(h.state().rang, ["tea"]);
 assert!(h.broken().is_err());
 # }
@@ -163,6 +165,7 @@ assert!(h.broken().is_err());
 ```rust
 use aio::prelude::*;
 use aio::testing::TestCells;
+use std::time::Duration;
 
 #[cell]
 pub struct Editor {
@@ -195,7 +198,7 @@ let mut t = TestCells::new();
 let (e, d) = (t.cell::<Editor>(), t.cell::<Drafts>());
 e.typed("hel".into()).unwrap();
 e.typed("hello".into()).unwrap();
-t.advance(3_000);
+t.advance(Duration::from_secs(3));
 assert_eq!(d.state().saved, ["hello"]);
 # }
 ```
@@ -239,6 +242,7 @@ is saved, replayed and reset by the method that succeeds:
 ```rust
 use aio::prelude::*;
 use aio::testing::TestCells;
+use std::time::Duration;
 
 #[cell(persist)]
 pub struct Upload {
@@ -266,9 +270,9 @@ let mut t = TestCells::new();
 let h = t.cell::<Upload>();
 h.failed().unwrap();
 h.failed().unwrap(); // the same key: the second wait (2 s) replaces the first
-t.advance(1_500);
+t.advance(Duration::from_millis(1_500));
 assert!(!h.state().sent);
-t.advance(1_000);
+t.advance(Duration::from_secs(1));
 assert!(h.state().sent && h.state().attempt == 0);
 # }
 ```
@@ -353,7 +357,7 @@ interval or cron line, method, arguments); `ax metrics <app>` counts them.
 
 ## Testing schedules
 
-`aio::testing::TestCells` runs cells on a virtual clock. `t.advance(ms)`
+`aio::testing::TestCells` runs cells on a virtual clock. `t.advance(d)`
 moves it, fires what came due (a repeat missed more than once fires
 once, as after a sleep) and settles the effects that led to; tokio's
 timers inside effects move as far. `h.store(|s| s.schedules())` lists a
@@ -457,8 +461,8 @@ skip all of that.
   commits from effects, schedules and other threads; a call from the
   view shows at once ([performance](../performance.md)).
 - Pushes to a client are paced: a schedule's or an effect's commits
-  reach a link at most once per `[server.limits] sync_interval_ms` (50
-  ms, aio's `syncIntervalMs`), folded into one patch; a person's call
+  reach a link at most once per `[server.limits] sync_interval` (`"50ms"`,
+  aio's `syncIntervalMs`), folded into one patch; a person's call
   goes at once. To send less, call less (one effect that commits once
   per batch) or make the viewer's view smaller ([visibility](visibility.md)).
 - Keep a tick out of the timeline, reports and the debug log with
@@ -479,7 +483,7 @@ skip all of that.
   for.
 - Expecting a scheduled method to fire on a cell that isn't started: in
   the app the scheduler starts with `Cells::start`; in a test, call
-  `t.advance(ms)`.
+  `t.advance(d)`.
 - `std::thread::sleep` or a loop in a method to "wait": schedule the next
   step instead.
 - A schedule on a cell without `persist`, expected after a restart: only

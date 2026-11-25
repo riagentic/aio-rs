@@ -653,7 +653,7 @@ pub use crate::link::Presence;
 
 /// One browser tab of a view drawn from this process ([`Http::ui`]): the
 /// page's frames and who it is.
-pub struct Tab {
+pub struct TabWire {
     /// Who it is signed in as (accounts, or a user known by token); `None`:
     /// the key's holder, or with accounts nobody yet.
     pub user: Option<String>,
@@ -662,7 +662,7 @@ pub struct Tab {
     pub wire: tokio::io::DuplexStream,
 }
 
-pub(crate) type OnTab = Arc<dyn Fn(Tab) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+pub(crate) type OnTab = Arc<dyn Fn(TabWire) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// The app's UI page and what runs each tab of it.
 #[derive(Clone)]
@@ -961,7 +961,7 @@ impl Http {
     /// signed-out tab gets no link. It takes the shell's place.
     pub fn ui<F, Fut>(mut self, page: impl Into<String>, tab: F) -> Self
     where
-        F: Fn(Tab) -> Fut + Send + Sync + 'static,
+        F: Fn(TabWire) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         self.roots.retain(|r| !r.shell);

@@ -246,11 +246,12 @@ impl Todo {
 
 # fn main() {
 use aio::testing::TestCells;
+use std::time::Duration;
 let mut t = TestCells::new();
 let h = t.cell::<Todo>();
 let a = h.add("done soon".into()).unwrap();
 h.toggle(a).unwrap();
-t.advance(86_400_000); // a day on the virtual clock
+t.advance(Duration::from_secs(86_400)); // a day on the virtual clock
 assert!(h.state().tasks.is_empty());
 # }
 ```

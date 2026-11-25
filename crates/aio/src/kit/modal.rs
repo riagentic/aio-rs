@@ -243,8 +243,10 @@ pub fn toasts() -> Vec<String> {
     TOASTS.read().iter().map(|n| n.text.clone().unwrap_or_default()).collect()
 }
 
-/// Show a notice in the [`ToastHost`] for 4 seconds. Call it on the UI thread
-/// (a handler, a view's task).
+/// Show a notice in the [`ToastHost`] for 4 seconds: the usual one. Call
+/// it on the UI thread (a handler, a view's task). Another time, or until
+/// dismissed: [`toast_for`]; taken away by code: [`toast_handle`]; markup:
+/// [`toast_view`].
 pub fn toast(message: impl Into<String>, tone: Tone) {
     toast_for(message, tone, Some(Duration::from_secs(4)))
 }
@@ -263,7 +265,7 @@ pub fn toast_handle(message: impl Into<String>, tone: Tone, stay: Option<Duratio
 }
 
 /// Show any view as a notice for `stay` (`None`: until dismissed): a link,
-/// a bold word, an icon.
+/// a bold word, an icon. [`toasts`] lists it as `""`: it has no text.
 pub fn toast_view(message: View, tone: Tone, stay: Option<Duration>) {
     show(message, None, tone, stay);
 }

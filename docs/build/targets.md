@@ -107,13 +107,13 @@ css = "tailwindcss -i src/app.css -o assets/style.css"
 [build.splash]
 image = "assets/splash@2x.png"
 text = "{title}"
-min_ms = 400
-max_ms = 15000
+min = "400ms"
+max = "15s"
 background = ["#f6f7f9", "#14161a"]
 font = "sans-serif"
 font_size = 14
 bold = false
-fade_ms = 200
+fade = "200ms"
 
 [build.macos]
 bundle_id = "org.example.notes"
@@ -447,13 +447,13 @@ Support/aio/electron/`, `%LOCALAPPDATA%\aio\electron\`).
 [build.splash]
 image = "assets/splash@2x.png"   # a PNG in the app's folder; …@2x.png is drawn at half its size
 text = "{title}"                 # under the image; {title} is the app's name
-min_ms = 400                     # once shown, at least this long
-max_ms = 15000                   # no window by then: it goes anyway
+min = "400ms"                    # once shown, at least this long
+max = "15s"                      # no window by then: it goes anyway
 background = ["#f6f7f9", "#14161a"]  # light, dark; unset: the app's own colours
 font = "serif"                   # Android: the text's font family; unset: the system's
 font_size = 16                   # Android: points; unset: 14
 bold = true                      # Android: the text in bold
-fade_ms = 300                    # Android: its fade out; unset: 200
+fade = "300ms"                   # Android: its fade out; unset: 200 ms
 ```
 
 Shown from the app's start until its window has loaded, on the desktop,

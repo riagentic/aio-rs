@@ -384,7 +384,7 @@ pub async fn session<T: Cell>(
     let hello = json!({ "v": VERSION, "min": MIN, "ver": crate::BUILT_BY, "maxMessageBytes": limits.max_message, "rate": limits.calls_per_sec, "cfg": false, "appId": T::ID, "user": null });
     send_ax(&mut w, &enc("proto", hello)).await?;
     let mut pushes = crate::budgets::Pushes::default();
-    let mut paced = crate::link::Paced::new(limits.sync_interval_ms);
+    let mut paced = crate::link::Paced::new(limits.sync_interval);
     send_ax(&mut w, &state(&view, &others, &subs)).await?;
     send_ax(&mut w, &enc("boot", json!({ "id": boot_id() }))).await?;
     let h = h.by(viewer.clone());

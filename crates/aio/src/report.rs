@@ -116,7 +116,7 @@ static HOOK: Mutex<Option<Hook>> = Mutex::new(None);
 /// `window:crashed`, `degraded:<part>` …) and message. Guarded: a hook that
 /// panics is logged, never re-entered, and never takes the caller down.
 /// It also hears warnings that are not reports (`budget:*`, `refused`); see
-/// [`Code`]. It runs where the problem happened, maybe while a cell is
+/// [`Problem`]. It runs where the problem happened, maybe while a cell is
 /// mid-call: hand the work off (a channel, a task), never call a cell from it.
 pub fn on_problem(hook: impl Fn(&str, &str) + Send + Sync + 'static) {
     *HOOK.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(hook));
@@ -147,10 +147,11 @@ pub(crate) fn say(kind: &str, message: &str, severity: Severity) {
 /// info.
 pub use crate::log::Level as Severity;
 
-/// What a problem's `kind` is, typed: `on_problem(|kind, _| match Code::of(kind) { … })`.
+/// What a problem's `kind` is, typed: `on_problem(|kind, _| match Problem::of(kind) { … })`.
+/// (A refusal's wire code is [`crate::Code`].)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Code {
+pub enum Problem {
     /// `panic`: a method's panic refuses its call; anywhere else, a bug.
     Panic,
     /// `tripped`: a cell disabled after too many failures.
@@ -182,7 +183,7 @@ pub enum Code {
     Other,
 }
 
-impl Code {
+impl Problem {
     pub fn of(kind: &str) -> Self {
         match kind.split_once(':').map_or(kind, |(k, _)| k) {
             "panic" => Self::Panic,
@@ -268,7 +269,7 @@ pub struct Diagnostic {
     pub held: u64,
     /// How bad it is: `Error` (a problem), `Warn`, `Info` (a recovery).
     pub severity: Severity,
-    /// The one thing to do about it ([`Code::tip`]), when there is one.
+    /// The one thing to do about it ([`Problem::tip`]), when there is one.
     pub tip: Option<&'static str>,
     /// The cell whose call it happened in (aio's `context.cellName`).
     pub cell: Option<String>,
@@ -285,9 +286,9 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    /// Its kind, typed (aio's error codes): `report::subscribe(|d| match d.code() { … })`.
-    pub fn code(&self) -> Code {
-        Code::of(&self.kind)
+    /// Its kind, typed: `report::subscribe(|d| match d.problem() { … })`.
+    pub fn problem(&self) -> Problem {
+        Problem::of(&self.kind)
     }
 
     /// aio's error code for it, where aio-rs has the same situation
@@ -394,7 +395,7 @@ impl Bus {
                 0
             }
         };
-        let tip = Code::of(kind).tip();
+        let tip = Problem::of(kind).tip();
         let ((cell, state), call) = (cell_and_state(), Some(crate::log::call_id()).filter(|c| *c > 0));
         let message = cut(message, 2000);
         let d = Diagnostic { at, kind: kind.into(), message, held, severity, tip, cell, call, numbers, state };
@@ -704,7 +705,7 @@ pub fn build(
         "id": id,
         "createdAt": crate::log::stamp(at),
         "kind": kind,
-        "tip": Code::of(kind).tip(),
+        "tip": Problem::of(kind).tip(),
         "call": (x.call != 0).then_some(x.call),
         "title": title,
         "body": body,
@@ -817,7 +818,7 @@ pub fn on_panic() {
             for line in source(l.file()).map(|s| excerpt(&s, l.line(), l.column())).unwrap_or_default() {
                 eprintln!("  {}", crate::log::safe(&line));
             }
-            eprintln!("  → fix: {}", Code::Panic.tip().unwrap_or_default());
+            eprintln!("  → fix: {}", Problem::Panic.tip().unwrap_or_default());
         }
         let what = panic_text(info.payload());
         let at = info.location().map(|l| format!(" at {}:{}", l.file(), l.line())).unwrap_or_default();
@@ -940,19 +941,19 @@ mod tests {
     #[test]
     fn a_kind_is_a_typed_code_with_its_fix() {
         let codes =
-            ["panic", "tripped", "budget:method", "budget:effect", "effect:timeout", "degraded:sync"].map(Code::of);
+            ["panic", "tripped", "budget:method", "budget:effect", "effect:timeout", "degraded:sync"].map(Problem::of);
         assert_eq!(
             codes,
-            [Code::Panic, Code::Tripped, Code::BudgetMethod, Code::BudgetEffect, Code::EffectTimeout, Code::Degraded]
+            [Problem::Panic, Problem::Tripped, Problem::BudgetMethod, Problem::BudgetEffect, Problem::EffectTimeout, Problem::Degraded]
         );
-        assert_eq!((Code::of("budget:other"), Code::of("mine")), (Code::Other, Code::Other));
-        assert!(Code::Panic.tip().unwrap().contains("aio::reject!"));
-        assert_eq!(Code::User.tip(), None);
+        assert_eq!((Problem::of("budget:other"), Problem::of("mine")), (Problem::Other, Problem::Other));
+        assert!(Problem::Panic.tip().unwrap().contains("aio::reject!"));
+        assert_eq!(Problem::User.tip(), None);
         assert_eq!(teach("no window", "install the runtime"), "no window → fix: install the runtime");
         let about = About::default();
         assert_eq!(
             build(&about, "i", 0, "effect:timeout", "t", None, &[], &Context::default())["tip"],
-            Code::EffectTimeout.tip().unwrap()
+            Problem::EffectTimeout.tip().unwrap()
         );
         assert_eq!(build(&about, "i", 0, "user", "t", None, &[], &Context::default())["tip"], Value::Null);
     }
@@ -984,7 +985,7 @@ mod tests {
             message: "token=q".into(),
             held: 2,
             severity: Severity::Warn,
-            tip: Code::Storm.tip(),
+            tip: Problem::Storm.tip(),
             cell: Some("notes".into()),
             call: Some(7),
             numbers: vec![("took_ms", 9)],

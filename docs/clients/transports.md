@@ -228,7 +228,7 @@ and pace), and one copy dropped closes its link, not the socket.
   (`#[client]`, roles, `visible`) still decide per link.
 - Measured on loopback (a copy of each of three cells, 300 server
   changes): 3 connections before, 1 now; patch latency p50 44 → 47 µs,
-  p99 207 → 188 µs with `sync_interval_ms = 0` (the pacing window, 50 ms
+  p99 207 → 188 µs with `sync_interval = "0s"` (the pacing window, 50 ms
   by default, dominates otherwise:
   `cargo test -p aio-rs --features net,testing --test one_socket -- --ignored --nocapture`).
 

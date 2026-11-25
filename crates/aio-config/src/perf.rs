@@ -3,25 +3,28 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-/// `[perf]` in `aio.toml`, in milliseconds.
+/// `[perf]` in `aio.toml`: spans (a bare number is ms).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize, Lit)]
 #[serde(deny_unknown_fields)]
 pub struct Budgets {
-    /// A method's own time. Unset: one frame (16) in a debug build, 100 in
-    /// a release build ("feels instant").
-    pub method: Option<u64>,
-    /// One effect step. Unset: 5.
-    pub effect: Option<u64>,
+    /// A method's own time. Unset: one frame (16 ms) in a debug build,
+    /// 100 ms in a release build ("feels instant").
+    #[serde(default, with = "crate::config::opt_ms_span", skip_serializing_if = "Option::is_none")]
+    pub method: Option<Duration>,
+    /// One effect step. Unset: 5 ms.
+    #[serde(default, with = "crate::config::opt_ms_span", skip_serializing_if = "Option::is_none")]
+    pub effect: Option<Duration>,
     /// How long each await of an async method may take, unless the method
-    /// is `#[long]` (aio's `effectTimeoutMs`). Unset: 30000.
-    pub call_ceiling: Option<u64>,
-    /// Per method, `"cell.method" = ms`: one meant to be slow, while every
+    /// is `#[long]` (aio's `effectTimeoutMs`). Unset: 30 s.
+    #[serde(default, with = "crate::config::opt_ms_span", skip_serializing_if = "Option::is_none")]
+    pub call_ceiling: Option<Duration>,
+    /// Per method, `"cell.method" = "2s"`: one meant to be slow, while every
     /// other stays strict.
-    #[serde(default)]
-    pub methods: BTreeMap<String, u64>,
-    /// Per effect, `"cell.name" = ms` (the name its key starts with).
-    #[serde(default)]
-    pub effects: BTreeMap<String, u64>,
+    #[serde(default, with = "crate::config::ms_span_map")]
+    pub methods: BTreeMap<String, Duration>,
+    /// Per effect, `"cell.name" = "50ms"` (the name its key starts with).
+    #[serde(default, with = "crate::config::ms_span_map")]
+    pub effects: BTreeMap<String, Duration>,
     /// `[perf.storm]`: a runaway loop of calls.
     #[serde(default)]
     pub storm: Storm,
@@ -48,18 +51,18 @@ impl Default for Storm {
 impl Budgets {
     /// The await ceiling of async methods ([`Self::call_ceiling`], at least 1 ms).
     pub fn ceiling(&self) -> Duration {
-        Duration::from_millis(self.call_ceiling.unwrap_or(30_000).max(1))
+        self.call_ceiling.unwrap_or(Duration::from_secs(30)).max(Duration::from_millis(1))
     }
 
     /// The budget of method `label` (`cell.method`).
     pub fn method(&self, label: &str) -> Duration {
-        let default = if cfg!(any(debug_assertions, feature = "dev")) { 16 } else { 100 };
-        Duration::from_millis(self.methods.get(label).copied().or(self.method).unwrap_or(default))
+        let default = Duration::from_millis(if cfg!(any(debug_assertions, feature = "dev")) { 16 } else { 100 });
+        self.methods.get(label).copied().or(self.method).unwrap_or(default)
     }
 
     /// The budget of one step of effect `label` (`cell.name`).
     pub fn effect(&self, label: &str) -> Duration {
-        Duration::from_millis(self.effects.get(label).copied().or(self.effect).unwrap_or(5))
+        self.effects.get(label).copied().or(self.effect).unwrap_or(Duration::from_millis(5))
     }
 
     /// The `[perf.methods]` keys for `cell` that name none of its `methods`:

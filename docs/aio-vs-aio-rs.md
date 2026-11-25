@@ -461,7 +461,7 @@ row is missing; what aio still has is [above](#what-aio-has-that-aio-rs-doesnt).
 |---|---|---|---|
 | Async methods | `async` on a draft; `await cell.method()` gives its value or throw | `async fn`, split at its awaits (in branches and loops too); `h.m(..)?.await` gives its end | ✅ |
 | Effects and modes | `$do`, `concurrency` (`first` joins a call with the same arguments) | `cx.run(Effect::new(..))`, `Mode`; `#[mode(newest \| first)]` on async methods (`first` joins a running call with the same arguments, and a network caller only their own) | ✅ |
-| `ttl`, `long`, a method's own await timeout | `ttl` reuses an answer for every caller | `#[ttl(ms)]`, an answer kept per network caller, never handed to another; `#[long]`, `#[long(ms)]`; no `"warn"` (a ceiling cuts off) | 🔄 |
+| `ttl`, `long`, a method's own await timeout | `ttl` reuses an answer for every caller | `#[ttl("1m")]`, an answer kept per network caller, never handed to another; `#[long]`, `#[long(ms)]`; no `"warn"` (a ceiling cuts off) | 🔄 |
 | Retries, timeouts | `call({ timeoutMs, retries })` | `aio::effect::retry`, `Effect::timeout`, `cx.backoff` | ✅ |
 | Schedules | `every`, `cron` (UTC), `after`, `backoff`, another cell's action | `#[every]`, `#[cron]` (UTC; `[app] tz = "local"`), `cx.after`, `cx.backoff`, `cx.on::<Other>()` | ✅ |
 | Clock, ids, randomness in methods | allowed, linted | `cx.now()`, `cx.id()`, `cx.rand()` | 🔄 |
@@ -475,7 +475,7 @@ row is missing; what aio still has is [above](#what-aio-has-that-aio-rs-doesnt).
 |---|---|---|---|
 | SQLite store | `state.db` | the same file | ✅ |
 | Event log, history | journal (opt-in) | every commit an event | ➕ |
-| Write debounce | every write, `persistDebounceMs` | `#[coalesce]` methods only, `[data] coalesce_ms` | 🔄 |
+| Write debounce | every write, `persistDebounceMs` | `#[coalesce]` methods only, `[data] coalesce` | 🔄 |
 | Excluded fields | `persist: { include, exclude }`, `persist: "none"` | `#[cell(persist(include, exclude))]`, `#[transient]`, `save = f`; `#[cell(persist = false)]` | ✅ |
 | Store layout | `single` / `multi` | log + snapshots; aio's layout kept | 🔄 |
 | App-wide `persist: false`, `--no-persist` | yes | `[data] persist = false`, `--no-persist` | ✅ |
@@ -506,7 +506,7 @@ row is missing; what aio still has is [above](#what-aio-has-that-aio-rs-doesnt).
 | Merging | per-field view merges, `onConflict`, HLC | methods replayed on the server in one order (no HLC needed; `cx.made()` for last-writer-wins by when an edit was made); `Remote::merge` (`Text`, `Counter`, `SetAdd`, `Keys`, `SetRemove`), `on_conflict` | ✅ |
 | Offline queue | 500 per `sync:` cell, in the page's storage, `retention` | 500, refuses when full, `retention`, on disk if asked: written in order, kept at a drop, `aio::shutdown` and the exit | ✅ |
 | Array patches | Immer `add`/`remove`, narrowed | `insert`/`del` per item, else the array | ✅ |
-| Throttles | `syncIntervalMs`, `fullStateThreshold` | `sync_interval_ms`, `full_state_percent` | ✅ |
+| Throttles | `syncIntervalMs`, `fullStateThreshold` | `sync_interval`, `full_state_percent` | ✅ |
 | Render-staleness backpressure | a page says its paint lag (`vitals-ping {ms}`): 2x past 100 ms, 4x past 300 ms | the same steps, for aio pages and aio-rs copies (`seen {ms}`, said off the UI thread, so a frozen screen says it too); measured: a frozen screen gets 20 patches (2.8 KB, each folding 47 changes) where it got 78 (10.7 KB, 12 each), 256 ms of CPU against 405 ms | ✅ |
 | Path subscriptions | `subs`: whole cells | `Remote::subscribe`, `connect_paths`: dot paths inside a cell, only their patches, predicted where held, kept in a saved copy; aio pages' `subs` as aio's, `exact: true` for paths | ➕ |
 | Transport | `transport: uds \| ws \| auto`, the window's wire | the window's is always its private sockets; `[client] transport = auto \| ws \| poll` (`--transport`): a copy's links over plain HTTP when a proxy drops the WebSocket | ➕ |
@@ -573,7 +573,7 @@ row is missing; what aio still has is [above](#what-aio-has-that-aio-rs-doesnt).
 |---|---|---|---|
 | Cell tests | `testCell`, `bootCells`, `t.getEffects()` | `TestCells` (virtual time, seeded fuzz, `fuzz_methods`, `reset`, `last_effects`, `budget`); `t.last_asked()`: the last call's effects, schedules, tells and aborts as values (`is_schedule`, `is_tell`, ...) | ✅ |
 | Unseeded fuzz | `t.randomActions(n)` | `random_calls(&h, n)`: a fresh seed each run, printed and named by a failure, so `fuzz_methods` replays it (aio's can't be replayed) | ➕ |
-| Real timers | `t.settle(ms)` | `TestCells::real_time()`, `settle_for(ms)` (virtual time stays the default) | ✅ |
+| Real timers | `t.settle(ms)` | `TestCells::real_time()`, `settle_for(d)` (virtual time stays the default) | ✅ |
 | UI tests | `testUI` on happy-dom | `TestUi` on the real engine | ➕ |
 | Virtual clock under the page | `ui.advance` | `TestUi::advance` (the views' timers; schedules: `TestCells::advance`) | ✅ |
 | Components by name and key | `ui.find(c, key)`, `surface()` tree | `ui.find(c, key)`, `within`, `surface_tree()` | ✅ |

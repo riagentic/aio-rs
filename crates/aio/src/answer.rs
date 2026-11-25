@@ -440,7 +440,7 @@ mod tests {
         assert!(panicked.join().is_err());
         drop(reply);
         let e = answer.now().expect("answered").unwrap_err();
-        assert_eq!(e.code(), Some(crate::Code::EffectError), "{e}");
+        assert_eq!(e.code, Some(crate::Code::EffectError), "{e}");
         assert!(e.why.contains("crash: its effect panicked before it answered"), "{e}");
     }
 

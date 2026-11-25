@@ -531,12 +531,12 @@ pub(crate) struct Paced {
 }
 
 /// A lagging screen's window is at least this, times its lag's step (so a
-/// server that paces nothing, `sync_interval_ms = 0`, still eases off).
+/// server that paces nothing, `sync_interval = "0s"`, still eases off).
 const STALE_FLOOR: Duration = Duration::from_millis(50);
 
 impl Paced {
-    pub(crate) fn new(ms: u64) -> Self {
-        Self { every: Duration::from_millis(ms), last: None, due: None, stale: Stale::default() }
+    pub(crate) fn new(every: Duration) -> Self {
+        Self { every, last: None, due: None, stale: Stale::default() }
     }
 
     fn window(&self) -> Duration {
@@ -1278,7 +1278,7 @@ async fn linked(
     }
     .into();
     let mut pushes = crate::budgets::Pushes::default();
-    let mut paced = Paced::new(limits.sync_interval_ms);
+    let mut paced = Paced::new(limits.sync_interval);
     pushes.push(&first, crate::store::now_ms());
     send_view(&mut w, meter, &first).await?;
     let h = h.by(viewer.clone());
@@ -1622,7 +1622,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_lagging_screen_is_sent_its_changes_further_apart_even_a_persons() {
-        let mut p = Paced::new(50);
+        let mut p = Paced::new(Duration::from_millis(50));
         assert!(p.now(false), "the first at once");
         p.sent();
         assert!(!p.now(false) && p.now(true), "within the window: held, a person's at once");
@@ -1633,7 +1633,7 @@ mod tests {
         tokio::time::advance(Duration::from_millis(150)).await;
         assert!(p.now(false), "200 ms on");
         // A server that paces nothing still eases off a lagging screen.
-        let mut p = Paced::new(0);
+        let mut p = Paced::new(Duration::ZERO);
         p.stale.heard(150);
         p.sent();
         assert!(!p.now(false));

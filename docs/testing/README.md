@@ -123,7 +123,7 @@ assert_eq!(rich.state().balance, 5);
 
 - `TestCells` holds effects until `settle()`, so a test first sees what a
   call asked for (`t.effects()`), and moves schedules only on
-  `advance(ms)`. Effects' timers (`aio::time::sleep`, timeouts) run on the
+  `advance(d)`. Effects' timers (`aio::time::sleep`, timeouts) run on the
   same virtual clock: a 10 s backoff settles at once.
 - A schedule or effect whose call fails fails the test at its end unless
   the test took it with `t.failures()`: nothing fails silently.
@@ -310,7 +310,7 @@ and errors are recorded and replayed like answers.
 ## Common mistakes
 
 - `std::thread::sleep` in a test to "wait for" an effect: use
-  `t.settle()`, `t.advance(ms)`, `ui.until_text(..)` or `converged`.
+  `t.settle()`, `t.advance(d)`, `ui.until_text(..)` or `converged`.
 - Ignoring refusals: a refusal nobody took fails the test at its end; take
   the expected ones with `failures()` and assert on them.
 - Reading fixtures from the source tree at run time: use `include_str!`

@@ -9,8 +9,8 @@
 //! does: the Forms helper takes longer to show than the app's window.
 //!
 //! Its life is the pure [`step`]: it goes once the app's window has shown
-//! and it has been visible `min_ms`, when Electron exits, at its cap
-//! (`max_ms` with no window and no download running), when the user
+//! and it has been visible `min`, when Electron exits, at its cap
+//! (`max` with no window and no download running), when the user
 //! dismisses it (its ✕ during a download), when the download fails (the
 //! Retry / Quit question takes over) or when its helper never shows it.
 //! Nothing waits for it: the app's window shows the moment it is ready,
@@ -108,7 +108,7 @@ pub(crate) fn look(s: &Splash, os: &str, target: Option<Target>) -> Option<Look>
         border: s.border.as_deref().map(crate::firstrun::hex6),
         shadow: s.shadow.unwrap_or(os != "windows"),
         window_shadow: s.window_shadow.unwrap_or(os == "macos"),
-        fade_ms: s.fade_ms.unwrap_or(100),
+        fade_ms: s.fade.map_or(100, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
         cancel: s.cancel,
         bp,
     })
@@ -659,8 +659,8 @@ impl Session {
             status: Default::default(),
             t0: Instant::now(),
             kind,
-            min_ms: s.min_ms,
-            cap_ms: s.max_ms,
+            min_ms: u64::try_from(s.min.as_millis()).unwrap_or(u64::MAX),
+            cap_ms: u64::try_from(s.max.as_millis()).unwrap_or(u64::MAX),
             fade_ms,
             progress: s.progress,
             follow: s.position == SplashPosition::Window && s.follow_window,
@@ -794,7 +794,7 @@ impl Session {
         let Some(view) = view else { return forget() };
         match why {
             Some(Close::Cap) => eprintln!(
-                "[aio] splash: closed after {} s without the app's window ([build.splash] max_ms)",
+                "[aio] splash: closed after {} s without the app's window ([build.splash] max)",
                 self.cap_ms as f64 / 1000.0
             ),
             Some(Close::Lost) | None => {}
@@ -1537,7 +1537,7 @@ mod tests {
             bar_position: BarPosition::BottomEdge,
             bar_radius: Some(0),
             border: Some("#abc".into()),
-            fade_ms: Some(250),
+            fade: Some(Duration::from_millis(250)),
             cancel: false,
             position: SplashPosition::Pointer,
             text_position: TextPosition::Over,
@@ -1778,7 +1778,7 @@ mod tests {
         };
         let s = Splash {
             text: Some("Starting {title}".into()),
-            min_ms: 400,
+            min: Duration::from_millis(400),
             radius: 10,
             border: Some("#888".into()),
             png: picture(),
@@ -1823,7 +1823,7 @@ mod tests {
         until("closed", &|| current().is_none());
         let st = n.state();
         assert_eq!(st.closed, Some(Close::Ready));
-        assert!(n.now() - st.shown_at.unwrap() >= s.min_ms, "it stayed its minimum");
+        assert!(n.now() - st.shown_at.unwrap() >= u64::try_from(s.min.as_millis()).unwrap(), "it stayed its minimum");
     }
 
     /// The Cocoa and Windows Forms helpers on a real desktop

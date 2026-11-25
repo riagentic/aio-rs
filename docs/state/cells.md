@@ -252,8 +252,8 @@ or the pairs `api_key`, `private_key`, `secret_key`, `access_token`,
 | `#[skip_travel]` | time travel steps over its events and its timeline leaves them out (aio's `skipActions`: a tick, a hover); they stay in the log |
 | `#[redact]` | its arguments are never kept (a passphrase); its event keeps the state instead |
 | `#[every("5m")]`, `#[cron("0 9 * * 1")]` | a schedule ([scheduling](scheduling.md)) |
-| `#[ttl(ms)]` | an async method's answer reused for the same arguments |
-| `#[long]`, `#[long(ms)]` | lifts the await ceiling of an async method, or gives it its own |
+| `#[ttl("1m")]` | an async method's answer reused for the same arguments |
+| `#[long]`, `#[long("2m")]` | lifts the await ceiling of an async method, or gives it its own |
 | `#[on_start]`, `#[on_stop]` | called as the cell goes live and as it stops ([lifecycle](#lifecycle)) |
 | `#[on_aio]` | in a ported app, run at boot on what aio changed in the file (feature `compat`, [data](../migration/data.md)) |
 
@@ -530,7 +530,7 @@ field. Signals in views: [views](../ui/views.md#local-state-and-hooks).
   `h.state()` (an `Arc`, cheap) and drop it.
 - A credential-named shared field without `#[server]`: the build fails,
   on purpose.
-- Matching on a refusal's words: match on `e.code()` ([debugging](../debugging/README.md#1-read-the-error)).
+- Matching on a refusal's words: match on `e.code` ([debugging](../debugging/README.md#1-read-the-error)).
 - "no method named `add` found for struct `Handle<Todo>`": the
   `TodoCalls` trait is not in scope. Import it, or use `aio::prelude::*`
   in the cell's own module.

@@ -352,18 +352,18 @@ impl TestCells {
         f
     }
 
-    /// A call of `T`'s `method` slower than `ms` fails the test (aio's
+    /// A call of `T`'s `method` slower than `most` fails the test (aio's
     /// `perfBudget`, for this test alone): its own time, as `[perf]` counts
     /// it, of every call on this thread from now on. `failures` takes them.
     #[track_caller]
-    pub fn budget<T: Cell>(&mut self, method: &str, ms: u64) {
+    pub fn budget<T: Cell>(&mut self, method: &str, most: Duration) {
         assert!(
             T::METHODS.contains(&method),
             "budget: {} has no method `{method}` (its methods: {})",
             name::<T>(),
             T::METHODS.join(", ")
         );
-        crate::perf::watch(format!("{}.{method}", T::ID), Duration::from_millis(ms));
+        crate::perf::watch(format!("{}.{method}", T::ID), most);
     }
 
     /// The effects the last commit asked for (aio's `expect.effects`): the
@@ -439,17 +439,17 @@ impl TestCells {
         }
     }
 
-    /// Let the effects run `ms` (aio's `t.settle(ms)`): on the wall clock
+    /// Let the effects run for `d` (aio's `t.settle(ms)`): on the wall clock
     /// under [`Self::real_time`], on virtual time otherwise (at once), then
     /// [`Self::settle`]. For work an effect leaves running on its own (a
     /// thread, a device's answer) that `settle` can't see.
     #[track_caller]
-    pub fn settle_for(&mut self, ms: u64) {
+    pub fn settle_for(&mut self, d: Duration) {
         {
             let _in = self.rt.enter();
             self.cells.iter().for_each(|c| _ = c.start_held());
         }
-        self.rt.block_on(async { tokio::time::sleep(Duration::from_millis(ms)).await });
+        self.rt.block_on(async { tokio::time::sleep(d).await });
         self.settle();
     }
 
@@ -567,12 +567,24 @@ impl TestCells {
         made
     }
 
-    /// Move the schedule clock `ms` on, fire every schedule then due (a
+    /// Move the schedule clock `by` on, fire every schedule then due (a
     /// repeat missed more than once fires once, as after a sleep), and settle.
     /// Effects' timers due by then fire too (tokio's clock moved as far;
     /// under `real_time` they keep the wall clock).
     #[track_caller]
-    pub fn advance(&mut self, ms: i64) {
+    pub fn advance(&mut self, by: Duration) {
+        self.step(i64::try_from(by.as_millis()).unwrap_or(i64::MAX));
+    }
+
+    /// Step the schedule clock `by` back, as the machine's clock may (NTP,
+    /// a person setting it), and settle; effects' timers never run backwards.
+    #[track_caller]
+    pub fn rewind(&mut self, by: Duration) {
+        self.step(-i64::try_from(by.as_millis()).unwrap_or(i64::MAX));
+    }
+
+    #[track_caller]
+    fn step(&mut self, ms: i64) {
         let now = self.clock.fetch_add(ms, std::sync::atomic::Ordering::Relaxed) + ms;
         // On the wall clock, effects' timers keep their own time.
         if !self.real {

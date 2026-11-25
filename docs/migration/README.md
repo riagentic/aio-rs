@@ -28,6 +28,7 @@ and is many times slower than the aio app it replaces.
 8. [0.1 → 0.2: Dioxus is gone](#8-01--02-dioxus-is-gone)
 9. [0.2 → 0.3](#9-02--03)
 10. [0.3 → 0.4](#10-03--04)
+11. [0.4 → 0.5](0.4-to-0.5.md): its own page
 
 ## 1. Project and boot
 
@@ -91,7 +92,7 @@ cell flags, launch flags or nothing (built in). "None" says what to do instead.
 | `singleton: false`, `libraryMode` | open cells in a library or a test with `Handle::memory()` / `Store::open(..)`: no boot, no lock |
 | `childWindows`, `electron` (sandbox, permissions, `webviewTag`) | `aio::kit::Browser` and `open_window` for other sites, `aio_shell::Window { web, permissions, require_sandbox, show_cap_ms, confirm_unload, keys }`; `downloadWindow` is `[build.download_window]`, `allowLocalPeers` is `[server] local_peers`, `ignoreDebugEnv` is always on in a release build |
 | `splash` | `[build.splash]` (its look keys, `show`); its `show` at run time: `Window { splash_show }` |
-| `syncIntervalMs`, `fullStateThreshold` | `[server.limits] sync_interval_ms` (50) and `full_state_percent` (50, aio's 0.5 as a percent) |
+| `syncIntervalMs`, `fullStateThreshold` | `[server.limits] sync_interval` (`"50ms"`) and `full_state_percent` (50, aio's 0.5 as a percent) |
 | `maxConnections`, `wsLimits` | `[server.limits]` (`clients`, `max_message`, `calls_per_sec`, `bytes_per_sec`) |
 | `allowedOrigins`, `strictOrigin`, `trustProxyHeader` | `[server] hosts`, `strict_origin`, `trust_proxy` |
 | `security` | `[server.security]` |
@@ -161,7 +162,7 @@ Rename it (`begin`) when porting.
 | `concurrency` of an effect | `.mode(Mode::Newest / First / Queue)` |
 | `effectTimeoutMs` | `[perf] call_ceiling` (ms); `#[long]` lifts it |
 | `cancelOn`, an abort signal | `cx.abort("key")` |
-| `ttl` | `#[ttl(ms)]` |
+| `ttl` | `#[ttl("1m")]` (a span, or ms) |
 | `Date.now()`, `crypto.randomUUID()`, `Math.random()` in a method | `cx.now()`, `cx.id()`, `cx.rand()` |
 | `schedules: { every: "5m" }`, `schedule.every` | `#[every("5m")]`, `cx.every(..)` |
 | `schedule.cron` | `#[cron("0 9 * * 1")]`, `cx.cron(..)`: UTC as in aio (`[app] tz = "local"` reads local time) |
@@ -273,7 +274,7 @@ Rename it (`begin`) when porting.
 | `serverAuth`, `createAuthClient`, `authClient` | `[accounts]`; `aio::auth::client::Client` |
 | `serverImport`, `aio/server-only`, `aio/client-only` | `#[cfg(..)]` and Cargo features: server code isn't in the web build ([dev](../build/dev.md)) |
 | `degraded`, `degradedReport` | `aio::health::part(name)`, `aio::health::degraded()` |
-| `errorCode`, `errorSummary` | `Rejected::code()`, `Rejected::why` |
+| `errorCode`, `errorSummary` | `Rejected::code`, `Rejected::why` |
 | `log` | `aio::info!`, `aio::warn!`, … ([errors](../debugging/errors.md#logs)) |
 | `dur` | `aio::fmt::dur` |
 | `VERSION` | `aio::VERSION` |
@@ -308,7 +309,7 @@ Rename it (`begin`) when porting.
 |---|---|
 | `testCell(cell, name, t => t.send.add(..))` | `#[test]` + `Handle::<C>::memory()`, `h.add(..)` |
 | `t.expect.state(s => ..)` | `assert!(..h.state()..)` |
-| `bootCells`, `advance(ms)` | `TestCells::new()`, `t.advance(ms)`, `t.settle()` |
+| `bootCells`, `advance(ms)` | `TestCells::new()`, `t.advance(Duration::from_millis(ms))`, `t.settle()` |
 | `testUI(App, ..)`, `ui.SaveButton.click()` | `TestUi::new(App)`, `ui.click("SaveButton")` |
 | `ui.expectCell(todo, ..)` | `HANDLE.read_untracked().state()` or `ui.expect_cell(&todo::Ui, ..)` |
 | `testServer`, `testMultiClient` | `TestServer`, `Sim` |

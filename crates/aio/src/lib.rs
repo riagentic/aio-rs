@@ -133,10 +133,32 @@ pub use status::{Conn, Status};
 #[cfg(target_arch = "wasm32")]
 pub use web::{Handle, Source, sync};
 
+#[doc(hidden)]
+pub use aio_config::config::span_ms as __span_ms_of;
 /// The app's monogram: its letter in its hue, as pixels or SVG.
 pub use aio_config::icon;
 #[doc(hidden)]
 pub use aio_config_macro::config as __config_lit;
+
+/// `#[every("5m")]`, `#[ttl("1m")]`, `#[long("2m")]`: the span's ms as
+/// `$t`, worked out as the app builds by `aio.toml`'s span parser; a bad
+/// one fails the build.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __span_ms {
+    ($t:ty, $s:literal, $what:literal) => {{
+        const MS: $t = match $crate::__span_ms_of($s) {
+            Some(ms) if ms > 0 && ms <= <$t>::MAX as u64 => ms as $t,
+            _ => panic!(concat!(
+                $what,
+                "(",
+                stringify!($s),
+                "): a span is a whole number and ms, s, m, h or d (\"5m\"), more than 0"
+            )),
+        };
+        MS
+    }};
+}
 /// The app's one hue as a `u16`, from its `aio.toml` as it builds
 /// (`Config::hue`): what `kit::theme_css` takes, so the page is the colour
 /// of its icon and splash.
@@ -480,11 +502,6 @@ impl Rejected {
     pub fn lost(why: impl Into<String>) -> Self {
         Self::coded(Code::ConnectionLost, why)
     }
-
-    /// Its code (aio's `errorCode`): `None` for the method's own refusal.
-    pub fn code(&self) -> Option<Code> {
-        self.code.clone()
-    }
 }
 
 impl From<String> for Rejected {
@@ -528,24 +545,33 @@ macro_rules! reject {
 }
 
 /// What `#[cell]` generates: identity, flags and how old data upgrades.
+/// Its hidden items are the macros' plumbing, not API.
 pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned + Send + Sync + 'static {
+    /// The cell's id (`#[cell(id = "todo")]`, else its name in snake case).
     const ID: &'static str;
+    /// Its state's version (`#[cell(version = 2)]`, else 1).
     const VERSION: u32;
+    #[doc(hidden)]
     const PERSIST: bool;
+    #[doc(hidden)]
     const SHARED: bool;
     /// `#[cell(diagnostics = false)]` (aio's `diagnostics: false`): its calls
     /// stay out of the live timeline, reports and the debug log. Its state
     /// and events are kept as ever.
+    #[doc(hidden)]
     const DIAGNOSTICS: bool = true;
     /// `#[cell(persist = false)]` (aio's `persist: "none"`): the cell is
     /// never saved, also when opened on a file: it starts from its defaults
     /// on every launch. Without it, a cell opened on a store is saved there.
+    #[doc(hidden)]
     const SAVED: bool = true;
     /// `#[cell(coalesce)]` (aio's debounced persistence for the whole cell):
     /// every plain method is `#[coalesce]` (see `Cell::COALESCED`).
+    #[doc(hidden)]
     const COALESCE: bool = false;
     /// `#[cell(redact)]` (aio's `redactActions: ["vault:*"]`): every method
     /// is `#[redact]` (see `Cell::REDACTED`).
+    #[doc(hidden)]
     const REDACT: bool = false;
     /// Turn state saved by version `from` into this one. An `Err` refuses to
     /// boot (after the backup), never resets the data.
@@ -556,8 +582,10 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     /// `#[cell(migrate = f)]` is set: the cell converts its state across
     /// versions (aio's `onMigrate`), so an aio journal call stamped with an
     /// older version is skipped, as aio skips it.
+    #[doc(hidden)]
     const MIGRATES: bool = false;
     /// `#[cell(visible = f)]` is set: [`Self::project`] runs the app's code.
+    #[doc(hidden)]
     const SCREENED: bool = false;
     /// What `viewer` (who, with their role now) may see of the state, as
     /// sent to a synced client: without `#[server]` fields, filtered by
@@ -572,6 +600,7 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     const TRANSIENT: &'static [&'static str] = &[];
     /// `#[cell(persist(include = ["name", "profile.email"]))]` (aio's
     /// `persist: { include }`): only these paths are saved; empty: all of it.
+    #[doc(hidden)]
     const PERSIST_INCLUDE: &'static [&'static str] = &[];
     /// `#[server]` fields: saved, never sent to a client, and left out of
     /// problem reports and the debug log (a report may be delivered). A
@@ -621,6 +650,7 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     /// stored one to that shape (aio's declared schema); `columns = CONTACTS`
     /// (a `&[aio::columns::Col]`) declares it typed.
     #[allow(clippy::type_complexity)]
+    #[doc(hidden)]
     const TABLES: &'static [(&'static str, &'static str, Option<&'static str>, Option<columns::Columns>)] = &[];
     /// `#[aio_cell]` fields (`#[aio_cell] accounts: Accounts`, `Accounts` a
     /// `#[cell(persist, id = "accounts", version = 3)]`): in an aio file, each
@@ -628,6 +658,7 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     /// version, `migrate`, `#[transient]` and `#[table]` fields, so one cell
     /// owns many of aio's (docs/migration/data.md). Its other fields are aio-rs's only.
     #[cfg(not(target_arch = "wasm32"))]
+    #[doc(hidden)]
     const AIO_CELLS: &'static [compat::data::Slice] = &[];
     /// The `#[aio_cell]` field `field` as JSON (`None`: not one): a commit
     /// serializes only the slices that changed (aio's per-cell serialization cache).
@@ -640,10 +671,12 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     /// `#[cell(retire = ["drafts", "draftsSeen"])]`: cells no build reads
     /// any more, deleted from the file at this cell's boot (their history,
     /// and in an aio file their slices and stamps), zeroed, never left behind.
+    #[doc(hidden)]
     const RETIRED: &'static [&'static str] = &[];
     /// `#[cell(transaction)]` (aio's `transaction`): its async methods read
     /// the state as it was when they were called and commit all they wrote
     /// at their end, at once, or nothing (docs/state/methods.md).
+    #[doc(hidden)]
     const TRANSACTION: Option<Transaction> = None;
     /// What is saved of the state, by `#[cell(save = f)]` (`fn(&Self) -> Self`);
     /// `None`: the state as is. Keep it idempotent: a crash and a clean stop
@@ -669,25 +702,30 @@ pub trait CellData: Clone + Default + PartialEq + Serialize + DeserializeOwned +
     }
     /// `#[cell(machine = field)]`: move the machine for `method` before it
     /// runs, or refuse it (see [`mod@machine`]).
+    #[doc(hidden)]
     fn advance(&mut self, method: &str) -> Result {
         let _ = method;
         Ok(())
     }
     /// What is wrong with its machine, on a cell with `methods`.
+    #[doc(hidden)]
     fn machine_errors(methods: &[&str]) -> Vec<String> {
         let _ = methods;
         Vec::new()
     }
     /// Its machine's states with no way out.
+    #[doc(hidden)]
     fn machine_ends() -> Vec<String> {
         Vec::new()
     }
     /// Its top-level fields as `#[cell]` lays them out (aio's cells: one
     /// signal each): a view reading one through `client!`'s `part`
     /// re-renders only when that one changes.
+    #[doc(hidden)]
     const FIELDS: &'static [Field] = &[];
     /// Which fields differ from `other`'s: bit `i` for `FIELDS[i]` (the
     /// 64th and later share bit 63); every bit when it lays out none.
+    #[doc(hidden)]
     fn changed_fields(&self, other: &Self) -> u64 {
         let _ = other;
         !0
@@ -811,6 +849,31 @@ pub(crate) fn shown<T: CellData>(st: &T, viewer: &Caller) -> Value {
 /// aio's `schedules:`): armed whenever the cell goes live, under the key
 /// `@<method>`; one no longer declared is removed. `skip_if_running`: a
 /// tick is skipped while the method's effect from the last one still runs.
+///
+/// A span is `aio.toml`'s (`"500ms"`, `"30s"`, `"5m"`, `"12h"`, `"1d"`), as
+/// in `#[ttl]` and `#[long]`; a bare number is ms. Anything else fails the build:
+///
+/// ```compile_fail
+/// use aio::prelude::*;
+/// #[cell]
+/// pub struct Clock { pub n: u32 }
+/// #[methods]
+/// impl Clock {
+///     #[every("5 minutes")]
+///     pub fn tick(&mut self) { self.n += 1 }
+/// }
+/// ```
+/// ```
+/// use aio::prelude::*;
+/// #[cell]
+/// pub struct Clock { pub n: u32 }
+/// #[methods]
+/// impl Clock {
+///     #[every("500ms")]
+///     pub fn tick(&mut self) { self.n += 1 }
+/// }
+/// assert_eq!(<Clock as aio::Cell>::SCHEDULES[0].every, Some(500));
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Declared {
     pub method: &'static str,
@@ -865,41 +928,50 @@ pub struct Declared {
 /// }
 /// ```
 pub trait Cell: CellData {
+    /// Its methods' names. Hidden items are the macros' plumbing, not API.
     const METHODS: &'static [&'static str];
     /// Each method as its Rust signature (`add(text: String) -> Uuid`), in
     /// `METHODS` order: what `ax peer` shows a caller.
     const SIGNATURES: &'static [&'static str] = &[];
+    /// Its `#[client]` methods: what the network may call.
     const CLIENT: &'static [&'static str];
     /// `#[client(predict = false)]` methods: a synced copy sends them and
     /// shows only what the server made of them.
+    #[doc(hidden)]
     const UNPREDICTED: &'static [&'static str] = &[];
     /// `#[redact]` methods (aio's `redactActions`): their arguments (a
     /// passphrase, a seed) are never kept. Their event keeps the state they
     /// left instead, so replay still works, and shows `[redacted]` wherever
     /// events are shown; the cell's state never reaches a problem report.
+    #[doc(hidden)]
     const REDACTED: &'static [&'static str] = &[];
     /// `#[coalesce]` methods: a cursor, a scroll, a selection, called many
     /// times a second (every plain method of a `#[cell(coalesce)]` cell).
     /// Each call shows its state at once, without a write; a run of them
-    /// goes into the log `[data] coalesce_ms` (default [`PERSIST_DEBOUNCE`])
+    /// goes into the log `[data] coalesce` (default [`PERSIST_DEBOUNCE`])
     /// after its first call (aio's debounced persistence), or when a call that can't wait (one with an
     /// effect, a schedule, an id) or a time-travel step comes, or the app
     /// closes: as one event, its last call, when that alone ends where the
     /// run did (else call by call). A call that changes nothing logs
     /// nothing. A crash loses at most the window not yet logged, as in aio.
+    #[doc(hidden)]
     const COALESCED: &'static [&'static str] = &[];
     /// Its `pub async fn` methods, each with its `#[mode]` (`Queue` unless
     /// set): a call of one ends later, in a step ([`crate::Answer`]).
+    #[doc(hidden)]
     const ASYNC: &'static [(&'static str, crate::Mode)] = &[];
     /// Its `#[skip_if_running]` async methods: a schedule's tick of one,
     /// whoever set it (`cx.every`, `cx.after`…), is skipped while one runs
     /// (aio's `skipIfRunning`).
+    #[doc(hidden)]
     const SKIP_IF_RUNNING: &'static [&'static str] = &[];
     /// Its `#[skip_travel]` methods (aio's `skipActions`): time travel's
     /// steps and its timeline pass over their events (a tick, a hover);
     /// they stay in the log.
+    #[doc(hidden)]
     const UNTRAVELED: &'static [&'static str] = &[];
     /// Its `#[ttl]` async methods: their effects are keyed by their arguments too.
+    #[doc(hidden)]
     const TTL: &'static [&'static str] = &[];
     /// Each async method's reads of its own state, as `#[methods]` finds
     /// them in its body: the fields it reads, or `None` when it may read
@@ -921,23 +993,28 @@ pub trait Cell: CellData {
             .fold(0, |m, (i, _)| m | 1 << i)
     }
     /// The async method `method` is, and its mode (`None`: a plain method).
+    #[doc(hidden)]
     fn async_mode(method: &str) -> Option<crate::Mode> {
         Self::ASYNC.iter().find(|(m, _)| *m == method).map(|(_, mode)| *mode)
     }
     /// Is `method` (or a step of it, `method.N`) `#[redact]`?
+    #[doc(hidden)]
     fn redacts(method: &str) -> bool {
         Self::REDACT
             || Self::REDACTED.iter().any(|r| method.strip_prefix(r).is_some_and(|s| s.is_empty() || s.starts_with('.')))
     }
     /// The `#[on_start]` method: called as the cell goes live (it starts,
     /// or is enabled again), after the cells it depends on.
+    #[doc(hidden)]
     const ON_START: Option<&'static str> = None;
     /// The `#[on_stop]` method: called as it stops being live (shutdown,
     /// disabled, tripped), before its calls are refused.
+    #[doc(hidden)]
     const ON_STOP: Option<&'static str> = None;
     /// The `#[on_aio]` method (feature `compat`): run at boot on what aio changed in the file
     /// (the first open, or aio ran since), before the invariants check it;
     /// the adoption is one event with it, and refused, the boot is too.
+    #[doc(hidden)]
     const ON_AIO: Option<&'static str> = None;
     /// Its methods' `#[every]` and `#[cron]` schedules.
     const SCHEDULES: &'static [Declared] = &[];
@@ -1429,11 +1506,11 @@ mod tests {
     #[test]
     fn a_refusal_says_its_kind_by_a_typed_code_never_by_its_words() {
         use super::{CODES, Code, error_summary};
-        assert_eq!(Rejected::denied("give", "is not a #[client] method").code(), Some(Code::AccessDenied));
-        assert_eq!(Rejected::unknown("nope").code(), Some(Code::ActionRefused));
+        assert_eq!(Rejected::denied("give", "is not a #[client] method").code, Some(Code::AccessDenied));
+        assert_eq!(Rejected::unknown("nope").code, Some(Code::ActionRefused));
         // The method's own words are never mistaken for aio's.
         for own in ["access denied: `x` by me", "unknown method `y`", "sign in first"] {
-            assert_eq!(Rejected::new(own).code(), None, "{own}");
+            assert_eq!(Rejected::new(own).code, None, "{own}");
         }
         // The wire names are the contract.
         assert_eq!(serde_json::to_value(Code::AccessDenied).unwrap(), "ACCESS_DENIED");

@@ -17,7 +17,7 @@ store = "vault.db"
 retire = ["old.db"]
 pragmas = ["PRAGMA cache_size = -16000"]
 persist = false
-coalesce_ms = 250
+coalesce = "250ms"
 backup_every = "1d"
 backup_keep = 3
 [home]
@@ -38,6 +38,7 @@ hsts = "max-age=60"
 directives = { img-src = "'self'", frame-src = false }
 [server.limits]
 clients = 9
+sync_interval = "1s"
 [server.dirs]
 "/media" = "media"
 [client]
@@ -81,8 +82,8 @@ host = "-p 2222 me@mac"
 [build.splash]
 image = "splash.png"
 text = "Starting {title}"
-min_ms = 600
-max_ms = 10000
+min = "600ms"
+max = "10s"
 background = ["#fff", "#101418"]
 show = "first-start"
 download_text = "{title}: {got} / {total} MB"
@@ -124,12 +125,13 @@ cancel = false
 [log]
 level = "debug"
 suppress = ["lit.tick"]
+heartbeat = "30m"
 dir = "~/logs/lit"
 [perf]
-method = 50
+method = "50ms"
 call_ceiling = 20000
 [perf.methods]
-"lit.import" = 5000
+"lit.import" = "5s"
 [perf.storm]
 breaker = true
 [memory]

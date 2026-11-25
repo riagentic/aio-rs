@@ -107,7 +107,7 @@ async fn a_tool_reads_and_calls_a_running_app_on_its_door() {
     let nope = t.call("nope", serde_json::json!([])).await.unwrap_err();
     assert!(nope.why.contains("nope"));
     // Told apart by code, not words (aio's `errorCode`): aio's refusal, or the method's own.
-    assert_eq!((nope.code(), Rejected::new("empty note").code()), (Some(aio::Code::ActionRefused), None));
+    assert_eq!((nope.code, Rejected::new("empty note").code), (Some(aio::Code::ActionRefused), None));
     // Live: another caller's change reaches the tool.
     h.add("elsewhere".into()).unwrap();
     t.changed().await.unwrap();

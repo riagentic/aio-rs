@@ -101,7 +101,7 @@ fn a_write_another_call_changed_meanwhile_refuses_with_tx_conflict() {
     h.adjust(7).unwrap(); // the user's transfer lands during the fetch
     t.settle();
     let e = a.now().unwrap().unwrap_err();
-    assert_eq!(e.code(), Some(Code::TxConflict), "{e}");
+    assert_eq!(e.code, Some(Code::TxConflict), "{e}");
     assert!(e.why.contains("self.balance was changed by another call"), "{e}");
     let s = h.state();
     assert_eq!((s.balance, s.status.as_str()), (7, ""), "the transfer stands; nothing of the refresh committed");
@@ -138,7 +138,7 @@ fn a_refusal_drops_what_it_wrote_and_asked_for() {
     let mut a = h.fail().unwrap();
     t.settle();
     assert!(a.now().unwrap().unwrap_err().why.contains("refused after the await"));
-    t.advance(2_000);
+    t.advance(std::time::Duration::from_secs(2));
     let s = h.state();
     assert_eq!(s.status, "");
     assert!(s.log.is_empty(), "neither its effect nor its schedule ran: {:?}", s.log);
@@ -209,7 +209,7 @@ fn serialized_a_change_to_anything_read_meanwhile_is_a_conflict() {
     let mut a = h.tally().unwrap();
     h.touch().unwrap(); // a sync method isn't held off, and every read counts, not only the written
     t.settle();
-    assert_eq!(a.now().unwrap().unwrap_err().code(), Some(Code::TxConflict));
+    assert_eq!(a.now().unwrap().unwrap_err().code, Some(Code::TxConflict));
     assert_eq!((h.state().n, h.state().other), (0, 1));
     // A field it never read moving meanwhile is none of its business (aio's).
     let mut b = h.bump().unwrap();

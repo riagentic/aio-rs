@@ -70,6 +70,7 @@ pub enum Start {
 }
 
 /// Where the app is installed on Windows: `%LOCALAPPDATA%\Programs\<id>`.
+#[doc(hidden)]
 pub fn programs(id: &str) -> PathBuf {
     let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_default();
     local.join("Programs").join(id)
@@ -141,6 +142,7 @@ pub fn quit(id: &str) -> io::Result<()> {
 
 /// Ask app `id`'s instance running on data dir `data` (a profile, an
 /// instance, an aio home) to stop, the graceful way.
+#[doc(hidden)]
 pub fn quit_at(id: &str, data: &Path) -> io::Result<()> {
     exchange(&hand_addr(id, data)?, QUIT.into())
 }
@@ -188,6 +190,7 @@ fn handed_to_server(id: &str, serving: Option<String>) -> String {
 
 /// The app's args `ax dev` gives a debug build as JSON, when dx's own
 /// `--args` can't carry them (it splits them on spaces).
+#[doc(hidden)]
 pub const DEV_ARGS: &str = "AIORT_DEV_ARGS";
 
 /// Run this binary again with `args` (Unix: in its place, the same process).
@@ -395,6 +398,7 @@ pub(crate) const STOPPING: &str = "stopping";
 
 /// Send one launch, wait for the running instance's "ok" (`ResourceBusy`:
 /// it is ending, and took nothing).
+#[doc(hidden)]
 pub fn hand_over(addr: &str, cwd: &Path, args: &[String]) -> io::Result<()> {
     exchange(addr, json!({ "cwd": cwd, "args": args }).to_string())
 }

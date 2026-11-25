@@ -10,7 +10,7 @@ for effects, schedules, several cells, saved data and access rules.
 |---|---|
 | a method's logic, a refusal, an invariant | `Handle::<C>::memory()` |
 | effects, async methods, timers | `TestCells` + `settle()` |
-| schedules (`#[every]`, `cx.after`, cron) | `TestCells` + `advance(ms)` |
+| schedules (`#[every]`, `cx.after`, cron) | `TestCells` + `advance(d)` |
 | several cells wired together, the app's boot order | `TestCells::start(Cells)` |
 | data an older build saved, migrations | `TestCells::saved(version, json)` |
 | `#[client]` rules and roles as a network caller meets them | `TestCells::as_client(&h, caller)` |
@@ -106,15 +106,16 @@ cell booted on it (`t.cell::<C>()`) is a real `Handle<C>` whose calls are
 | `last_effects()` | the effects the last commit asked for (aio's `expect.effects`), `[]` for none |
 | `last_asked()` | everything the last commit asked for, as values (aio's `t.getEffects()`): `AskedFor::Effect` (a `HeldEffect`), `Schedule` (a `Plan`: set or cancelled), `Tell` (a notification), `Abort`; `is_effect()`, `is_schedule()` (aio's `isScheduleEffect`), `is_tell()`, `is_abort()` |
 | `settle()` | start them and wait until they, and all they lead to, are done (5 s at most) |
-| `advance(ms)` | move both clocks on, fire what is due, settle |
-| `settle_for(ms)` | let the effects run `ms` (on the wall clock under `real_time()`), then settle |
+| `advance(d)` | move both clocks on by `d` (a `Duration`), fire what is due, settle |
+| `rewind(d)` | step the schedule clock back (a machine's clock may), settle |
+| `settle_for(d)` | let the effects run for `d` (on the wall clock under `real_time()`), then settle |
 | `failures()` | take the failed schedules and effects so far |
 | `as_client(&h, caller)` | `h` as a network caller reaches it (feature `server`) |
 | `fuzz(&h, seed, n, &calls, holds)` | `n` seeded random calls, checked after each |
 | `fuzz_methods(&h, seed, n, &skip, holds)` | the same over the cell's own methods, arguments made from their types |
 | `random_calls(&h, n)` | `fuzz_methods` over every method on a fresh seed, said and returned (aio's `randomActions`) |
 | `reset(&h, json)` | `h` back at its default with `json` merged in, mid-test (aio's `t.init`; `json!({})`: `t.destroy`) |
-| `budget::<C>(method, ms)` | a call of `C.method` slower than `ms` fails the test (aio's `perfBudget`) |
+| `budget::<C>(method, d)` | a call of `C.method` slower than `d` fails the test (aio's `perfBudget`) |
 
 Free functions in `aio::testing`: `seeded::<C>(json)` (the state alone,
 no handle), `expect(&h, what, |s| ..)`, `dump(&state, max)`,
@@ -246,20 +247,21 @@ assert!(t.effects().is_empty(), "a refused call asks for nothing");
   a timeout runs under `TestCells::real_time()` (aio's `t.settle(ms)` on
   real timers): on the virtual clock its timeout would pass before the
   I/O answers. There the effects' timers keep the wall clock, `settle()`
-  waits for them, and `settle_for(ms)` gives work an effect left running
+  waits for them, and `settle_for(d)` gives work an effect left running
   on its own (a thread, a device's answer) `ms` to land. Schedules still
   move only with `advance`. A whole server goes in a
   [`TestServer` test](multi-app.md).
 
 ### Time and schedules: `advance`
 
-Nothing in a `TestCells` world moves with the wall clock. `advance(ms)`
+Nothing in a `TestCells` world moves with the wall clock. `advance(d)`
 moves the schedule clock and the effects' clock together, fires every
 schedule then due, and settles.
 
 ```rust
 use aio::prelude::*;
 use aio::testing::{TestCells, expect};
+use std::time::Duration;
 
 #[cell]
 pub struct Toast {
@@ -292,10 +294,10 @@ let h = t.cell::<Toast>();
 h.show("saved".into()).unwrap();
 let shown = h.state().at;
 
-std::thread::sleep(std::time::Duration::from_millis(20));
-t.advance(2_999);
+std::thread::sleep(Duration::from_millis(20));
+t.advance(Duration::from_millis(2_999));
 expect(&h, "real time moved nothing; not due yet", |s| s.text.is_some());
-t.advance(1);
+t.advance(Duration::from_millis(1));
 expect(&h, "hidden on time", |s| s.text.is_none());
 
 // The calls' clock (`cx.now()`) is the same clock.
@@ -303,9 +305,9 @@ h.show("again".into()).unwrap();
 assert_eq!(h.state().at, shown + 3_000);
 
 // A repeat missed more than once fires once, as after a sleep.
-t.advance(10 * 60_000);
+t.advance(Duration::from_secs(10 * 60));
 assert_eq!(h.state().polls, 1);
-t.advance(60_000);
+t.advance(Duration::from_secs(60));
 assert_eq!(h.state().polls, 2);
 # }
 ```
@@ -328,6 +330,7 @@ or an effect makes has nobody to return to, so `TestCells` keeps it:
 ```rust
 use aio::prelude::*;
 use aio::testing::{TestCells, fails};
+use std::time::Duration;
 
 #[cell]
 pub struct Job {
@@ -357,7 +360,7 @@ let mut t = TestCells::new();
 let s = t.cell::<Job>();
 s.retry().unwrap();
 s.later().unwrap();
-t.advance(10);
+t.advance(Duration::from_millis(10));
 assert_eq!(t.failures(), ["Job.run: no url (schedule `again`)", "Job.run: no url (effect `retry`)"]);
 assert!(t.failures().is_empty(), "taken");
 
@@ -760,13 +763,13 @@ drives it ([Debugging](../debugging/README.md)).
 | `t.expect.effects([..])` per last action | `last_effects()`; `effects()` is every waiting one |
 | `t.getEffects()`, `isScheduleEffect` | `last_asked()`, `AskedFor::is_schedule` |
 | `t.fuzz` with a generated seed, `skip` | `fuzz_methods` with `skip` and a given seed, or `random_calls` with a fresh one |
-| `perfBudget` per test | `budget::<C>(method, ms)`: over it, the test fails (not a log line) |
+| `perfBudget` per test | `budget::<C>(method, d)`: over it, the test fails (not a log line) |
 | `testCell` skips `onInit` (a warning) | every booted cell runs `#[on_start]`, as the app does |
 
 ## Common mistakes
 
 - `std::thread::sleep` to wait for an effect or a schedule: nothing moves
-  with the wall clock. Use `settle()` or `advance(ms)`.
+  with the wall clock. Use `settle()` or `advance(d)`.
 - `assert!(h.add(..).is_err())`: passes for the wrong refusal. Compare
   the `Rejected` or its `why`.
 - Driving the cell through ten calls to reach a state: seed it.
