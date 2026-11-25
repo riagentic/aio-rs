@@ -187,6 +187,7 @@ budgets.
 | `ondragstart` that calls `set_data`: the view runs after the browser's drag start, so the drop never gets it | warn: `"data-drag": "{id}"` |
 | a DOM property no attribute sets and air doesn't set (`src_object`, `text_content`, `inner_text`, `scroll_top`, `scroll_left`): written as an attribute, it does nothing | warn: a child for text, else a page script (`aio.node(id)`) |
 | a literal `data-t` handle on two elements of one `rsx!` that show together (a branch's arms show one at a time): a test naming it can't tell them apart, and `TestUi` refuses it | warn: a handle of its own for each |
+| a literal `data-t` equal to the id of a kit `Tab` the same component makes (`Tab::new("gpu", …)`): a tab's id is its handle, so `ax trigger` and tests can't tell them apart | warn: rename one |
 
 ### `renderer`
 

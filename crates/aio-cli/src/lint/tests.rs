@@ -688,6 +688,44 @@ fn view_checks_run_only_on_crates_that_can_hold_views() {
 }
 
 #[test]
+fn a_kit_tab_id_equal_to_a_data_t_of_its_view_is_a_warning() {
+    let d = project(&[(
+        "src/ui.rs",
+        r#"
+#[component]
+fn Gpu() -> View {
+    let tabs = vec![Tab::new("gpu", "GPU", rsx! { p { "data-t": "gpu-panel" } }), Tab::new("cpu", "CPU", rsx! {})];
+    rsx! {
+        Tabs { tabs: tabs }
+        Select { "data-t": "gpu" }
+        Tabs { tabs: vec![aio::kit::Tab::new("log", "Log", rsx! { pre { "data-t": "log" } })] }
+        p { "data-t": "cpu-load" }
+    }
+}
+
+#[component]
+fn Other() -> View {
+    rsx! { p { "data-t": "cpu" } }
+}
+"#,
+    )]);
+    let r = lint(d.path());
+    let got: Vec<_> = r
+        .issues
+        .iter()
+        .filter(|i| i.message.contains("kit Tab"))
+        .map(|i| (i.line.unwrap(), i.message.as_str()))
+        .collect();
+    assert_eq!(got.iter().map(|g| g.0).collect::<Vec<_>>(), [7, 8], "{:?}", r.issues);
+    assert!(
+        got[0].1.starts_with("data-t \"gpu\" is also the id of a kit Tab in this view (Tab::new(\"gpu\", …))"),
+        "{}",
+        got[0].1
+    );
+    assert!(got[1].1.contains("\"log\""), "a tab's panel shows with its tab list: {}", got[1].1);
+}
+
+#[test]
 fn credentials_in_source_and_assets() {
     let d = project(&[
         (

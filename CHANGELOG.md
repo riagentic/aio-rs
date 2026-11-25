@@ -75,6 +75,10 @@ version may break things.
 
 ### Added
 
+- `ax lint` warns of a literal `data-t` equal to the id of a kit `Tab`
+  the same component makes (`Tab::new("gpu", …)` beside a
+  `Select { "data-t": "gpu" }`): a tab's id is its handle, so `ax trigger`
+  and tests met two elements by one name, though `data-t` was written once.
 - `aio::capabilities::network()`: this process's `[capabilities] network`
   list, `None` when it is not held.
 - `aio::http::content_name(name, bytes)`: a file's name by its content
