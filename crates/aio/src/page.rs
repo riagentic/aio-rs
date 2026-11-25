@@ -166,9 +166,22 @@ pub const ID_AUDIT: &str = "(() => {
 /// it asks for no frame (its frames wait until it shows: one per update
 /// would pile up for as long as it stays hidden). One frame is asked for
 /// at a time, timed from the oldest update it paints (the slowest).
+/// Under software rendering (no GPU: SwiftShader, llvmpipe, as on a nested
+/// display) a paint waits on the CPU's GL, not the app: a slow one is said
+/// once at info, labelled so, and never graded.
 pub const RENDER: &str = "window.__aioPainted = (() => {
-  let worst = 0, shown = 0, asked = false;
+  let worst = 0, shown = 0, asked = false, soft, softSaid = false;
   const names = ['healthy', 'degraded', 'warning', 'frozen'];
+  const software = () => soft ??= (() => {
+    try {
+      const gl = document.createElement('canvas').getContext('webgl');
+      if (!gl) return true;
+      const ext = gl.getExtension('WEBGL_debug_renderer_info');
+      const r = String(gl.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER));
+      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      return /swiftshader|llvmpipe|softpipe|software/i.test(r);
+    } catch { return false; }
+  })();
   const grade = (ms) => ms >= T.frozen ? 3 : ms >= T.warning ? 2 : ms >= T.degraded ? 1 : 0;
   document.addEventListener('visibilitychange', () => { if (!document.hidden) shown = performance.now(); });
   return (t) => document.hidden || asked || (asked = true, requestAnimationFrame((began) => {
@@ -178,6 +191,9 @@ pub const RENDER: &str = "window.__aioPainted = (() => {
     if (g === 0) {
       if (worst >= 2) console.info('[vitals] render recovered: an update painted in ' + ms + ' ms');
       worst = 0;
+    } else if (g >= 2 && software()) {
+      if (!softSaid) console.info('[vitals] render under software rendering (no GPU): an update took ' + ms + ' ms to paint; not counted');
+      softSaid = true;
     } else if (g > worst) {
       worst = g;
       if (g >= 2) console.warn('[vitals] render ' + names[g] + ': an update took ' + ms + ' ms to paint' + HINT);

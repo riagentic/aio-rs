@@ -343,6 +343,10 @@ version may break things.
   connected (an app with no window), the X server never read it and let
   every local account in. The cookie is kept in the app's
   `logs/display.auth` (private; replaced at its next start).
+- The vitals render probe counted a slow paint under software rendering
+  (no GPU: SwiftShader on a nested display, llvmpipe in a VM) as the app's:
+  a render warning and a "1 problem" badge. It is said once at info,
+  labelled "software rendering", and never graded.
 - A `TestUi` step waits for the files its event reads: a form's submit
   read its files as the event went out, and a click that submitted it
   could end before they were read (the submit unheard on a loaded
