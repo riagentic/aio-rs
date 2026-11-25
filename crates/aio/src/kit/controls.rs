@@ -176,12 +176,15 @@ pub fn Direction(rtl: Prop<bool>, children: View) -> View {
 /// Home/End jump, and only the active tab is in the tab order, so Tab moves
 /// on into the panel. Controlled with `value`; else it remembers its own,
 /// starting at the first enabled tab (also when the chosen one is gone).
+/// Tabs that don't fit wrap to another row; `scroll` keeps them on one,
+/// scrolling sideways.
 #[component]
 pub fn Tabs(
     #[props(into)] tabs: Prop<Vec<Tab>>,
     #[props(into)] value: Prop<Option<String>>,
     #[props(into)] label: Prop<Option<String>>,
     rtl: Prop<Option<bool>>,
+    #[props(default)] scroll: Prop<bool>,
     onchange: Option<EventHandler<String>>,
     #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
@@ -215,7 +218,7 @@ pub fn Tabs(
         memo(move || tabs.with(|t| t.iter().map(|t| (t.id.clone(), t.label.clone(), t.disabled)).collect::<Vec<_>>()));
     rsx! {
         div { class: join("aio-tabs", &class.get()), ..attributes,
-            div { class: "aio-tablist", role: "tablist", "aria-label": label,
+            div { class: if scroll.get() { "aio-tablist aio-tablist--scroll" } else { "aio-tablist" }, role: "tablist", "aria-label": label,
                 for (i, (id, name, off)) in rows.get().into_iter().enumerate() {
                     button {
                         key: "{id}",

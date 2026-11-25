@@ -449,7 +449,8 @@ body{
 @media (forced-colors: active) { .aio-switch { border: 1px solid CanvasText; } .aio-switch:checked { background: Highlight; } }
 
 /* Tabs */
-.aio-tablist { display: flex; gap: .15em; border-block-end: 1px solid var(--aio-ui-line); overflow-x: auto; }
+.aio-tablist { display: flex; flex-wrap: wrap; gap: .15em; border-block-end: 1px solid var(--aio-ui-line); }
+.aio-tablist--scroll { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; }
 .aio-tab { appearance: none; background: none; border: none; border-block-end: 2px solid transparent; padding: .6em .9em; font: inherit; font-family: var(--aio-ui-font); color: var(--aio-ui-ink-soft); cursor: pointer; white-space: nowrap; }
 .aio-tab:hover:not(:disabled) { color: var(--aio-ui-ink); }
 .aio-tab--active { color: var(--aio-ui-accent-ink); border-block-end-color: var(--aio-ui-accent-ink); font-weight: 600; }

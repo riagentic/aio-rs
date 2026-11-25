@@ -79,6 +79,7 @@ version may break things.
   the kit's sheet: with `theme = "full"` the look's button (centred,
   padded, shadowed, 44 px on a phone) no longer has to be undone property
   by property ([theming](docs/ui/theming.md#what-the-look-styles)).
+- `Tabs { scroll: true }`: one row of tabs that scrolls sideways.
 - `aio::capabilities::network()`: this process's `[capabilities] network`
   list, `None` when it is not held.
 - `aio::http::content_name(name, bytes)`: a file's name by its content
@@ -200,6 +201,8 @@ version may break things.
 
 ### Changed
 
+- `Tabs` that don't fit wrap to another row, where a scrollbar showed
+  under them; `scroll: true` keeps the old row.
 - **Breaking: ax's plumbing is out of the API**: `aio_shell`'s `runtime`,
   `splash`, `place`, `prune`, `pidlock`, `macmove`, `oneclick`, `fuses`,
   `swap`, `switches`, `inspect` and `delta`, `html_open`, every

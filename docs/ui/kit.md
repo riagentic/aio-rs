@@ -172,7 +172,7 @@ assert_eq!(ui.text("state"), "export 4");
 
 | Component | Props |
 |---|---|
-| `Tabs` | `tabs: Vec<Tab>`, `value` (unset: it keeps its own, from the first enabled tab), `label`, `rtl`, `onchange(id)`. Arrows move (wrapping, skipping disabled tabs, mirrored right to left), Home and End jump; only the active tab is in the tab order, so Tab goes on into its panel. The panel renders only while active. |
+| `Tabs` | `tabs: Vec<Tab>`, `value` (unset: it keeps its own, from the first enabled tab), `label`, `rtl`, `scroll`, `onchange(id)`. Tabs that don't fit wrap to another row; `scroll: true` keeps one row that scrolls sideways. Arrows move (wrapping, skipping disabled tabs, mirrored right to left), Home and End jump; only the active tab is in the tab order, so Tab goes on into its panel. The panel renders only while active. |
 | `Tab::new(id, label, panel)` | `.disabled()`; its id is its handle |
 | `Menu` | `trigger: View`, `items: Vec<MenuItem>`, `label` (the trigger's name when it isn't text), `onselect(id)`. Enter, Space or ↓ open it on the first item (↑ on the last), arrows and Home/End move, Escape closes it and puts focus back on the trigger, Tab or a click outside closes it. Handles: `menuTrigger`, `menuScrim`, each item's id. |
 | `MenuItem::new(id, label)` | `.disabled()`, `.danger()` |

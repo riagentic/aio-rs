@@ -1479,6 +1479,7 @@ aio::kit::TabsProps.class: Prop<String>
 aio::kit::TabsProps.label: Prop<Option<String>>
 aio::kit::TabsProps.onchange: Option<EventHandler<String>>
 aio::kit::TabsProps.rtl: Prop<Option<bool>>
+aio::kit::TabsProps.scroll: Prop<bool>
 aio::kit::TabsProps.tabs: Prop<Vec<Tab>>
 aio::kit::TabsProps.value: Prop<Option<String>>
 aio::kit::Textarea: fn Textarea(_: TextareaProps) -> View

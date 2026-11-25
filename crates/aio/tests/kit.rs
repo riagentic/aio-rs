@@ -287,6 +287,33 @@ fn a_tab_that_is_gone_falls_back_to_the_first_enabled_one() {
     );
 }
 
+fn crowded() -> View {
+    let six = |p: &str| {
+        ["Overview", "Memory", "Compute", "Power", "Clocks", "History"]
+            .map(|t| Tab::new(format!("{p}{t}"), t, rsx! {}))
+            .to_vec()
+    };
+    styled(rsx! {
+        div { style: "width: 420px",
+            Tabs { "data-t": "wrapped", tabs: six("") }
+            Tabs { "data-t": "scrolled", scroll: true, tabs: six("s") }
+        }
+    })
+}
+
+#[test]
+fn tabs_that_do_not_fit_wrap_unless_asked_to_scroll() {
+    let mut ui = TestUi::new(crowded);
+    let fits = |ui: &mut TestUi, t: &str| {
+        ui.eval(&format!("(() => {{ const l = document.querySelector('[data-t={t}] [role=tablist]'); return l.scrollWidth <= l.clientWidth }})()"))
+    };
+    assert_eq!(fits(&mut ui, "wrapped"), true, "no scrollbar under the tabs");
+    assert!(ui.rect("History").y > ui.rect("Overview").y, "a second row");
+    assert_eq!(fits(&mut ui, "scrolled"), false, "one row that scrolls");
+    assert_eq!(ui.rect("sHistory").y, ui.rect("sOverview").y);
+    assert_eq!(ui.style("wrapped/Overview", "box-shadow"), "none", "the look's button stays out of a tab");
+}
+
 /// How far `t`'s label starts from its box's left edge, in px.
 fn label_start(ui: &mut TestUi, t: &str) -> f64 {
     let js = format!(
