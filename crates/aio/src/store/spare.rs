@@ -4,45 +4,41 @@
 //! only what the method touches; a Rust state is copied whole). Made once
 //! copying took [`SLOW`] or more; the copy waits beside the state it copies
 //! and is taken only while that state is still the current one.
+use crate::kind::St;
 use std::sync::{Arc, Mutex};
 
 /// A copy this slow is made ahead from then on.
 pub(crate) const SLOW: std::time::Duration = std::time::Duration::from_micros(250);
 
 /// The state a copy is asked for, and the copy once made.
-type Slot<T> = Option<(Arc<T>, Option<T>)>;
+type Slot = Option<(St, Option<St>)>;
 
 /// A job for the copies' thread.
 type Job = Box<dyn FnOnce() + Send>;
 
-/// The copy made ahead of `T`.
-pub(crate) struct Spare<T> {
+/// The copy made ahead of a state.
+#[derive(Default)]
+pub(crate) struct Spare {
     on: bool,
-    slot: Arc<Mutex<Slot<T>>>,
+    slot: Arc<Mutex<Slot>>,
 }
 
-impl<T> Default for Spare<T> {
-    fn default() -> Self {
-        Self { on: false, slot: Arc::default() }
-    }
-}
-
-impl<T: Clone + Send + Sync + 'static> Spare<T> {
-    /// A copy of `state` to change: the one made ahead, else made now
-    /// (one that took [`SLOW`] turns making them ahead on).
-    pub fn copy(&mut self, state: &Arc<T>) -> T {
+impl Spare {
+    /// A copy of `state` to change, alone in its `Arc`: the one made ahead,
+    /// else made now (one that took [`SLOW`] turns making them ahead on).
+    pub fn copy(&mut self, state: &St) -> St {
         let ahead = lock(&self.slot).take().filter(|(of, _)| Arc::ptr_eq(of, state));
         if let Some((_, Some(t))) = ahead {
             return t;
         }
         let t0 = std::time::Instant::now();
-        let t = (**state).clone();
+        let t = state.dup();
         self.on |= t0.elapsed() >= SLOW && cfg!(not(target_arch = "wasm32"));
         t
     }
 
     /// `state` is the current one: copy it ahead (when on, and not yet asked).
-    pub fn ahead(&mut self, state: &Arc<T>) {
+    pub fn ahead(&mut self, state: &St) {
         let mut slot = lock(&self.slot);
         if !self.on || slot.as_ref().is_some_and(|(of, _)| Arc::ptr_eq(of, state)) {
             return;
@@ -52,12 +48,12 @@ impl<T: Clone + Send + Sync + 'static> Spare<T> {
         let (slot, of) = (Arc::downgrade(&self.slot), Arc::downgrade(state));
         worker(Box::new(move || {
             // Skipped once its store went or the state moved on.
-            let wanted = |s: &Slot<T>, of: &Arc<T>| s.as_ref().is_some_and(|(w, _)| Arc::ptr_eq(w, of));
+            let wanted = |s: &Slot, of: &St| s.as_ref().is_some_and(|(w, _)| Arc::ptr_eq(w, of));
             let (Some(slot), Some(of)) = (slot.upgrade(), of.upgrade()) else { return };
             if !wanted(&lock(&slot), &of) {
                 return;
             }
-            let t = (*of).clone();
+            let t = of.dup();
             let mut s = lock(&slot);
             if wanted(&s, &of) {
                 *s = Some((of, Some(t)));
@@ -101,15 +97,25 @@ fn worker(_: Job) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kind::typed;
 
-    #[derive(Clone, Debug, PartialEq)]
-    struct Big(Vec<String>);
-
-    fn big() -> Arc<Big> {
-        Arc::new(Big((0..200_000).map(|i| i.to_string()).collect()))
+    #[crate::cell(id = "big")]
+    pub struct Big {
+        rows: Vec<String>,
     }
 
-    fn wait(s: &Spare<Big>) {
+    #[crate::methods]
+    impl Big {}
+
+    fn of(rows: Vec<String>) -> St {
+        Arc::new(Big { rows })
+    }
+
+    fn big() -> St {
+        of((0..200_000).map(|i| i.to_string()).collect())
+    }
+
+    fn wait(s: &Spare) {
         let t = std::time::Instant::now();
         while !lock(&s.slot).as_ref().is_some_and(|(_, c)| c.is_some()) && t.elapsed() < std::time::Duration::from_secs(10) {
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -120,26 +126,27 @@ mod tests {
     fn a_slow_copy_is_made_ahead_for_the_state_it_copies_only() {
         let mut s = Spare::default();
         let a = big();
-        assert_eq!(s.copy(&a), *a, "the first copy is made on the spot");
+        let copy = s.copy(&a);
+        assert!(copy.same(&*a) && !Arc::ptr_eq(&copy, &a), "the first copy is made on the spot");
         assert!(s.on, "it was slow: copies are made ahead from now on");
         s.ahead(&a);
         wait(&s);
-        assert!(lock(&s.slot).as_ref().is_some_and(|(of, t)| Arc::ptr_eq(of, &a) && t.as_ref() == Some(&*a)));
-        assert_eq!(s.copy(&a), *a, "taken");
+        assert!(lock(&s.slot).as_ref().is_some_and(|(of, t)| Arc::ptr_eq(of, &a) && t.as_ref().is_some_and(|t| t.same(&*a))));
+        assert!(s.copy(&a).same(&*a), "taken");
         assert!(lock(&s.slot).is_none());
         // Made for a state that moved on: not taken, a fresh copy instead.
         s.ahead(&a);
         wait(&s);
-        let b = Arc::new(Big(vec!["b".into()]));
-        assert_eq!(s.copy(&b), *b);
+        let b = of(vec!["b".into()]);
+        assert_eq!(typed::<Big>(s.copy(&b)).rows, ["b"]);
         assert!(lock(&s.slot).is_none(), "the stale copy is gone");
     }
 
     #[test]
     fn a_fast_copy_is_never_made_ahead() {
         let mut s = Spare::default();
-        let a = Arc::new(Big(vec!["a".into()]));
-        assert_eq!(s.copy(&a), *a);
+        let a = of(vec!["a".into()]);
+        assert!(s.copy(&a).same(&*a));
         s.ahead(&a);
         assert!(!s.on && lock(&s.slot).is_none());
     }

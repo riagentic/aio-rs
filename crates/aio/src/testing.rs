@@ -238,7 +238,7 @@ impl<T: Cell> Booted for Handle<T> {
     }
 
     fn fire_due(&self, now: i64) {
-        self.store(|s| s.fire_due_but(now, |d| self.skips(d)))
+        self.store(|s| s.core.fire_due_but(now, |d| self.skips(d)))
             .unwrap_or_else(|e| panic!("{}: schedules: {e}", name::<T>()));
         self.fire_foreign();
     }
@@ -402,7 +402,7 @@ impl TestCells {
     }
 
     fn boot<T: Cell>(&mut self, mut store: Store<T>) -> Handle<T> {
-        store.set_clock(self.clock.clone());
+        store.core.set_clock(self.clock.clone());
         let h = Handle::new(store).by(By::Test);
         h.hold();
         _ = h.live(true);

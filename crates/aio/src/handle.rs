@@ -222,7 +222,7 @@ pub struct Handle<T: Cell> {
 
 impl<T: Cell> crate::store::Member for Inner<T> {
     fn end(&self, joint: u64, kept: bool) {
-        lock(&self.store).joint_end(joint, kept);
+        lock(&self.store).core.joint_end(joint, kept);
     }
 
     fn react(&self) {
@@ -230,7 +230,7 @@ impl<T: Cell> crate::store::Member for Inner<T> {
         if rs.is_empty() {
             return;
         }
-        let done = lock(&self.store).unreacted();
+        let done = lock(&self.store).core.unreacted();
         done.iter().for_each(|e| rs.iter().for_each(|r| r(e)));
     }
 
@@ -270,7 +270,7 @@ impl<T: Cell> Handle<T> {
     pub fn new(store: Store<T>) -> Self {
         let inner = Inner {
             shown: Mutex::new((store.seq(), store.shared())),
-            file: store.file(),
+            file: store.core.file(),
             store: Mutex::new(store),
             dir: Mutex::default(),
             listeners: Mutex::default(),
@@ -442,7 +442,7 @@ impl<T: Cell> Handle<T> {
         };
         source.inner.file.react();
         self.inner.file.react();
-        lock(&source.inner.store).listened();
+        lock(&source.inner.store).core.listened();
         lock(&source.inner.reactions).push(Arc::new(react));
     }
 
@@ -478,10 +478,11 @@ impl<T: Cell> Handle<T> {
             // and queued effects keep commit order.
             let _order = lock(&self.inner.order);
             let (effects, events, changed) = {
-                let mut s = lock(&self.inner.store);
+                let s = &mut lock(&self.inner.store).core;
                 let mut shown = lock(&self.inner.shown);
-                let changed = shown.0 != s.seq() || !Arc::ptr_eq(&shown.1, &s.shared());
-                *shown = (s.seq(), s.shared());
+                let now = crate::kind::typed::<T>(s.shared());
+                let changed = shown.0 != s.seq() || !Arc::ptr_eq(&shown.1, &now);
+                *shown = (s.seq(), now);
                 (s.take_effects(), s.take_committed(), changed)
             };
             let acting = crate::action_hooks();
@@ -570,9 +571,9 @@ impl<T: Cell> Handle<T> {
         }
         self.count_failures();
         // A transaction its aborts ended: the next serialized call's turn.
-        if let Some(sweep) = crate::store::TxOn::<T>::SWEEP {
+        if T::TRANSACTION.is_some() {
             let turn = self.turn();
-            let swept = sweep(&mut lock(&self.inner.store));
+            let swept = lock(&self.inner.store).core.tx_sweep();
             if let Err(e) = self.end(turn, if swept { Then::Told { wake } } else { Then::Nothing }) {
                 eprintln!("[aio] {}: {e}", T::ID);
             }
@@ -605,7 +606,7 @@ impl<T: Cell> Handle<T> {
             COUNTING.with_borrow_mut(|c| c.push(me));
             (g, Counting(me))
         });
-        let fs = lock(&self.inner.store).take_failures();
+        let fs = lock(&self.inner.store).core.take_failures();
         let Some((_, last)) = fs.last() else { return };
         if lock(&self.inner.held).is_some() {
             let unseen = fs.iter().filter_map(|(by, why)| match by {
@@ -671,7 +672,7 @@ impl<T: Cell> Handle<T> {
         }
         if on && !T::SCHEDULES.is_empty() {
             let _hold = self.inner.file.call();
-            if let Err(e) = lock(&self.inner.store).declare() {
+            if let Err(e) = lock(&self.inner.store).core.declare() {
                 eprintln!("[aio] {e}");
                 crate::report::problem("schedule", &e.0);
             }
@@ -702,7 +703,7 @@ impl<T: Cell> Handle<T> {
     /// The last committed call's method and time (ms since the epoch).
     pub(crate) fn last_call(&self) -> Option<(String, i64)> {
         let _hold = self.inner.file.call();
-        lock(&self.inner.store).last_call()
+        lock(&self.inner.store).core.last_call()
     }
 
     fn spawn(&self, e: Effect<T>) {
@@ -764,7 +765,7 @@ impl<T: Cell> Handle<T> {
             r.send(Ok(a.value.clone()));
         }
         let Some((key, ms)) = a.ttl else { return };
-        let now = lock(&self.inner.store).now();
+        let now = lock(&self.inner.store).core.now();
         lock(&self.inner.answered).keep(key, now, ms, a.value);
     }
 
@@ -773,7 +774,7 @@ impl<T: Cell> Handle<T> {
         if lock(&self.inner.answered).is_empty() {
             return None;
         }
-        let now = lock(&self.inner.store).now();
+        let now = lock(&self.inner.store).core.now();
         lock(&self.inner.answered).get(method, args, who, now)
     }
 
@@ -795,7 +796,7 @@ impl<T: Cell> Handle<T> {
         // Refused, it touches nothing: no kept answer, no running call to
         // join or supersede. Asked again below, on the state it runs on.
         if let Some(w) = who {
-            lock(&self.inner.store).state().allow(w, method, &args)?;
+            lock(&self.inner.store).core.state().allow(w, method, &args)?;
         }
         if op.is_none()
             && let Some(v) = self.answers(method, &args, who)
@@ -828,7 +829,7 @@ impl<T: Cell> Handle<T> {
         }
         let turn = self.turn();
         let out = {
-            let mut s = lock(&self.inner.store);
+            let s = &mut lock(&self.inner.store).core;
             match who.map_or(Ok(()), |w| s.state().allow(w, method, &args)) {
                 Ok(()) => s.call_as(&self.by, who, from, method, args, op, reply.clone()),
                 Err(e) => Err(e),
@@ -861,9 +862,11 @@ impl<T: Cell> Handle<T> {
             drop(rt.spawn_blocking(move || {
                 let Some(inner) = me.upgrade() else { return };
                 let h = Handle { inner, by: By::System };
-                let Some(sweep) = crate::store::TxOn::<T>::SWEEP else { return };
+                if T::TRANSACTION.is_none() {
+                    return;
+                }
                 let turn = h.turn();
-                let swept = sweep(&mut lock(&h.inner.store));
+                let swept = lock(&h.inner.store).core.tx_sweep();
                 if let Err(e) = h.end(turn, if swept { Then::Told { wake: true } } else { Then::Nothing }) {
                     eprintln!("[aio] {}: {e}", T::ID);
                 }
@@ -884,13 +887,13 @@ impl<T: Cell> Handle<T> {
             return Err(crate::Rejected::coded(crate::Code::DispatchAborted, why));
         }
         let turn = self.turn();
-        let out = lock(&self.inner.store).call_as(&self.by, None, None, method, args, None, reply);
+        let out = lock(&self.inner.store).core.call_as(&self.by, None, None, method, args, None, reply);
         self.settle(turn, out).map(Option::unwrap_or_default)
     }
 
     /// An async method's await refused (`io.await?`): a failure of the cell, as a refused step is.
     pub(crate) fn failed(&self, why: &str) {
-        lock(&self.inner.store).failed(&self.by, why);
+        lock(&self.inner.store).core.failed(&self.by, why);
         self.count_failures();
     }
 
@@ -1036,7 +1039,7 @@ impl<T: Cell> Handle<T> {
         // unseen: its state is the one already shown (its reactions run).
         let turn = self.turn();
         let read = {
-            let mut s = lock(&self.inner.store);
+            let s = &mut lock(&self.inner.store).core;
             if let Err(e) = s.flush() {
                 eprintln!("[aio] {}: a held run could not be saved: {e}", T::ID);
             }
@@ -1061,7 +1064,7 @@ impl<T: Cell> Handle<T> {
         let drained = self.drain(budget).await;
         // Last, its state snapshotted: the next start reads what the calls
         // left, never replaying them with code changed meanwhile.
-        lock(&self.inner.store).close();
+        lock(&self.inner.store).core.close();
         drained
     }
 
@@ -1103,7 +1106,7 @@ impl<T: Cell> Handle<T> {
     #[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]
     pub(crate) fn op_seq(&self, op: &str) -> Option<u64> {
         let _hold = self.inner.file.call();
-        lock(&self.inner.store).op_seq(op)
+        lock(&self.inner.store).core.op_seq(op)
     }
 
     #[cfg(all(feature = "compat", feature = "server", not(target_arch = "wasm32")))]
@@ -1254,15 +1257,15 @@ impl<T: Cell> Handle<T> {
     /// next one is due, and now.
     pub(crate) fn fire(&self) -> (Option<i64>, i64) {
         if !self.enabled() || self.paused() {
-            return (None, lock(&self.inner.store).now());
+            return (None, lock(&self.inner.store).core.now());
         }
         // A held run due is weighed first, off the store's lock: the views'
         // calls (a held key's steps) never wait for that.
-        let due = lock(&self.inner.store).due();
+        let due = lock(&self.inner.store).core.due();
         let weighed = due.map(crate::store::Run::weigh);
         let turn = self.turn();
         let (next, now) = {
-            let mut s = lock(&self.inner.store);
+            let s = &mut lock(&self.inner.store).core;
             let now = s.now();
             if let Err(e) = s.fire_due_but(now, |d| self.skips(d)) {
                 eprintln!("[aio] {}: schedules: {e}", T::ID);
@@ -1295,7 +1298,7 @@ impl<T: Cell> Handle<T> {
     /// by its schedule: refused, it is that cell's failure, as its own
     /// schedule's would be; on a cell the app doesn't hold, this cell's.
     pub(crate) fn fire_foreign(&self) {
-        let due = lock(&self.inner.store).take_foreign();
+        let due = lock(&self.inner.store).core.take_foreign();
         if due.is_empty() {
             return;
         }
@@ -1303,7 +1306,7 @@ impl<T: Cell> Handle<T> {
         let failed = fire_on(T::ID, dir.as_ref(), due);
         if !failed.is_empty() {
             let mut s = lock(&self.inner.store);
-            failed.iter().for_each(|(by, why)| s.failed(by, why));
+            failed.iter().for_each(|(by, why)| s.core.failed(by, why));
             drop(s);
             self.count_failures();
         }

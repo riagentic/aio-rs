@@ -857,15 +857,20 @@ fn has_table(db: &Connection, name: &str) -> Result<bool, String> {
 /// under its id; under a `#[aio_cell]` field's cell `<cell>_<method>` when `T`
 /// has it, else `<method>`. `None`: no cell of `T`'s, or an internal method.
 pub(crate) fn method_of<T: crate::Cell>(cell: &str, method: &str) -> Option<String> {
+    method_in(<T as crate::kind::KindOf>::KIND, cell, method)
+}
+
+/// [`method_of`] cell `k`.
+pub(crate) fn method_in(k: &crate::kind::Kind, cell: &str, method: &str) -> Option<String> {
     if method.is_empty() || method.starts_with("__") {
         return None;
     }
-    if cell == T::ID {
+    if cell == k.id {
         return Some(method.into());
     }
-    T::AIO_CELLS.iter().any(|s| s.cell == cell).then(|| {
+    k.aio_cells.iter().any(|s| s.cell == cell).then(|| {
         let own = format!("{cell}_{method}");
-        if T::METHODS.contains(&own.as_str()) { own } else { method.into() }
+        if k.methods.contains(&own.as_str()) { own } else { method.into() }
     })
 }
 
@@ -924,7 +929,8 @@ pub fn replaying() -> Option<&'static str> {
 }
 
 /// The hook's answer for `cell:method` (None: no hook, or it refused).
-fn hooked<T: crate::Cell>(
+fn hooked(
+    k: &crate::kind::Kind,
     own: bool,
     seq: i64,
     kind: &str,
@@ -933,18 +939,18 @@ fn hooked<T: crate::Cell>(
     e: &Value,
 ) -> Option<Result<Journaled, String>> {
     let hook = HOOK.read().unwrap_or_else(|e| e.into_inner()).clone()?;
-    REPLAYING.set(Some(T::ID));
+    REPLAYING.set(Some(k.id));
     let answer = hook(cell, method, &args_of(e));
     REPLAYING.set(None);
     match answer {
         Replay::Refuse => None,
         // Another cell's call, as a method this cell lacks: that cell's.
-        Replay::As(m, _) if !own && !T::METHODS.contains(&m.as_str()) => None,
+        Replay::As(m, _) if !own && !k.methods.contains(&m.as_str()) => None,
         Replay::Skip(why) => {
             Some(Ok(Journaled::Skip { seq, why: Some(format!("journal entry {seq} ({kind}): {why}")) }))
         }
-        Replay::As(m, _) if !T::METHODS.contains(&m.as_str()) => {
-            Some(Err(format!("journal entry {seq} ({kind}): the port named `{m}`, no method of {}", T::ID)))
+        Replay::As(m, _) if !k.methods.contains(&m.as_str()) => {
+            Some(Err(format!("journal entry {seq} ({kind}): the port named `{m}`, no method of {}", k.id)))
         }
         Replay::As(method, args) => Some(Ok(call_of(seq, method, args, e))),
     }
@@ -971,13 +977,13 @@ fn call_of(seq: i64, method: String, args: Value, e: &Value) -> Journaled {
 /// isn't this build's (aio's `staleStamps`): a newer one always, an older
 /// one when the cell converts its state (`migrate`). Another cell's stamp
 /// is its own store's to judge.
-fn stale<T: crate::Cell>(e: &Value) -> Vec<String> {
+fn stale(k: &crate::kind::Kind, e: &Value) -> Vec<String> {
     let Some(v) = e["v"].as_object() else { return vec![] };
     v.iter()
         .filter_map(|(c, stamped)| {
-            let (now, migrates) = match c == T::ID {
-                true => (T::VERSION, T::MIGRATES),
-                false => T::AIO_CELLS.iter().find(|s| s.cell == c).map(|s| (s.version, s.migrates))?,
+            let (now, migrates) = match c == k.id {
+                true => (k.version, k.migrates),
+                false => k.aio_cells.iter().find(|s| s.cell == c).map(|s| (s.version, s.migrates))?,
             };
             let n = stamped.as_i64();
             let older = n.is_some_and(|n| n < i64::from(now));
@@ -1007,7 +1013,7 @@ pub(crate) fn journal_of(store: &Path) -> PathBuf {
 /// time-travel or write-set line, an action without a cell), or a tail mixing
 /// `T`'s calls with another cell's (only aio could then move the watermark).
 /// A torn line (a crash mid-append) is skipped, as aio does.
-pub(crate) fn journal_tail<T: crate::Cell>(journal: &Path, wm: i64) -> Result<Vec<Journaled>, String> {
+pub(crate) fn journal_tail(k: &crate::kind::Kind, journal: &Path, wm: i64) -> Result<Vec<Journaled>, String> {
     let text = match std::fs::read_to_string(journal) {
         Ok(t) => t,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
@@ -1061,21 +1067,20 @@ pub(crate) fn journal_tail<T: crate::Cell>(journal: &Path, wm: i64) -> Result<Ve
             ours.push(Journaled::Skip { seq, why: None });
             continue;
         }
-        let Some(method) = method_of::<T>(cell, m) else {
-            match m.starts_with("__") && (cell == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == cell)) || cell == "aio"
-            {
+        let Some(method) = method_in(k, cell, m) else {
+            match m.starts_with("__") && (cell == k.id || k.aio_cells.iter().any(|s| s.cell == cell)) || cell == "aio" {
                 true => {
                     return Err(format!("journal entry {seq} ({kind}) carries state, not a call aio-rs can replay"));
                 }
                 // Another cell's call: the port's hook may own it (a cell it folded in).
-                false => match hooked::<T>(false, seq, kind, cell, m, &e) {
+                false => match hooked(k, false, seq, kind, cell, m, &e) {
                     Some(j) => ours.push(j?),
                     None => others.push(kind.to_string()),
                 },
             }
             continue;
         };
-        let stale = stale::<T>(&e);
+        let stale = stale(k, &e);
         let j = match e["redacted"] == true {
             true => Journaled::Skip {
                 seq,
@@ -1092,12 +1097,12 @@ pub(crate) fn journal_tail<T: crate::Cell>(journal: &Path, wm: i64) -> Result<Ve
             },
             // Refused here, before anything is written: a write would tell aio
             // the store moved past its journal, and aio would then drop it.
-            false if !T::METHODS.contains(&method.as_str()) => match hooked::<T>(true, seq, kind, cell, m, &e) {
+            false if !k.methods.contains(&method.as_str()) => match hooked(k, true, seq, kind, cell, m, &e) {
                 Some(j) => j?,
                 None => {
                     return Err(format!(
                         "journal entry {seq} ({kind}) has no method `{method}` of {} to run it again",
-                        T::ID
+                        k.id
                     ));
                 }
             },
@@ -1107,7 +1112,7 @@ pub(crate) fn journal_tail<T: crate::Cell>(journal: &Path, wm: i64) -> Result<Ve
     }
     let calls = ours.iter().any(|j| matches!(j, Journaled::Call { .. }));
     match (calls, others.first()) {
-        (true, Some(other)) => Err(format!("its journal holds calls of {} and of another cell ({other})", T::ID)),
+        (true, Some(other)) => Err(format!("its journal holds calls of {} and of another cell ({other})", k.id)),
         (false, _) => Ok(vec![]),
         (true, None) => Ok(ours),
     }
