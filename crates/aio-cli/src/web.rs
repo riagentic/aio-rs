@@ -455,14 +455,19 @@ pub fn pack(
     }
     // A standalone app has no server to take its console: none is sent.
     let logged = dev || (cfg.app.mode != aio::config::Mode::Standalone && cfg.server.page_log);
-    let scripts = (named("page.js", page_js(dev, logged).as_bytes())?, named("start.js", start_js(dev).as_bytes())?);
+    // A release's scripts without their indentation and comment lines, as its glue.
+    let small = |js: String| if dev { js } else { trimmed(&js).unwrap_or(js) };
+    let scripts = (
+        named("page.js", small(page_js(dev, logged)).as_bytes())?,
+        named("start.js", small(start_js(dev)).as_bytes())?,
+    );
     let page = index_html(&app.name, &cfg.app, &head, body, (&scripts.0, &scripts.1)).replacen(
         "<body>\n",
         &format!("<body>\n{splash}"),
         1,
     );
     std::fs::write(out.join("index.html"), page).map_err(|e| e.to_string())?;
-    std::fs::write(out.join("worker.js"), format!("{BASE}{WORKER_JS}")).map_err(|e| e.to_string())?;
+    std::fs::write(out.join("worker.js"), small(format!("{BASE}{WORKER_JS}"))).map_err(|e| e.to_string())?;
     let mut files = site_files(out, out).map_err(|e| e.to_string())?;
     // iOS fetches its launch images itself: the worker needn't hold them.
     files.retain(|(f, _)| f != "sw.js" && !f.starts_with("apple-splash-"));
@@ -1643,8 +1648,11 @@ pub(crate) mod browser {
         assert!(index.contains("<body>\n<style>#aio-splash{") && index.contains("<p>Starting Web test</p>"));
         // The page's own files by their content, as the page names them.
         let splash = aio::http::content_name("splash.png", include_bytes!("../../aio/tests/fixtures/splash.png"));
-        let page_file = aio::http::content_name("page.js", page_js(false, false).as_bytes());
-        let start_file = aio::http::content_name("start.js", start_js(false).as_bytes());
+        // A release's scripts as its glue: without indentation and comment lines.
+        let (page_js, start_js) = (trimmed(&page_js(false, false)).unwrap(), trimmed(&start_js(false)).unwrap());
+        assert!(page_js.len() < super::page_js(false, false).len() && !page_js.contains("\n  "));
+        let page_file = aio::http::content_name("page.js", page_js.as_bytes());
+        let start_file = aio::http::content_name("start.js", start_js.as_bytes());
         for f in [&splash, &page_file, &start_file] {
             assert!(out.join(f).is_file() && index.contains(&format!("\"./{f}\"")), "{f}: {index}");
         }

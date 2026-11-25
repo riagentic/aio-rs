@@ -178,8 +178,9 @@ version may break things.
 - `data-aio-prevent` on a field keeps the keys it names (Tab in a
   `textarea` that indents), even as a modal dialog's last control: a
   field's keys were always its own, so Tab left it whatever the view did.
-- `aio::kit::Chart`: lines, bars and dots on linear, log or category
-  axes as SVG, with ticks at round numbers, a legend for two series or
+- `aio::kit::Chart` (feature `draw`, as `Heatmap` and `Canvas`: an app
+  that draws nothing compiles none of them, ~21 MB off its debug build):
+  lines, bars and dots on linear, log or category axes as SVG, with ticks at round numbers, a legend for two series or
   more, the nearest point's values on hover and a description a screen
   reader hears; `Chart { series: vec![Series::line("load", points)] }` is
   a whole chart. A line of more points than its plot has pixel columns
@@ -367,6 +368,12 @@ version may break things.
 
 ### Changed
 
+- A web build is ~8 KB smaller (the template's: 449 KB, from 458 KB): its
+  page scripts as its glue (no indentation or comment lines), the token
+  sheet's comments left out, a declaration's last `;` dropped from the
+  kit's sheet, no second JSON printer (an effect's key) and no standard
+  library sort beside aio-rs's own (the page's saved state). A list's
+  rows keep one hash table per key type, not two.
 - ax reads and writes objects with object 0.39 (from 0.37): one hashbrown
   in the workspace, a crate fewer in ax's graph.
 - **Breaking:** a module named `prelude` beside an `aio::client!(..)`
