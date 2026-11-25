@@ -126,6 +126,7 @@ In `aio`: `aio::boot` (the boot report), `aio::paths` (where files are),
 | `aio::act!` | call a method from a view; a refusal is logged |
 | `aio::ui` | page helpers: sheets, `use_css!`, Back, links, ids |
 | `aio::kit` | controls, forms (`use_form`), dialogs, toasts, `VirtualList`, `Transition`, `Spring`, `Portal`, `Island`, `SignIn`, `TimeTravelPanel`, `Markdown` ([kit](../ui/kit.md)) |
+| `aio::kit::{Chart, Heatmap, Canvas}` | charts, heat maps and 2-D drawing, feature `draw` ([drawing](../ui/drawing.md)) |
 | `aio::route`, `routes!`, `router!` | routes, params, history, links, nested routes ([routing](../ui/routing.md)) |
 | `aio::head` | the page's title and meta tags |
 | `aio::colors`, `aio::kit::theme` | the colours from one hue, the `--aio-*` tokens |

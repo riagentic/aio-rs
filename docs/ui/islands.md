@@ -9,7 +9,7 @@ cells (held resources, deferred content, sizes). Everything here is in
 
 | Need | aio-rs | aio |
 |---|---|---|
-| a chart, a heat map, a 2-D drawing | `Chart`, `Heatmap`, `Canvas` ([drawing](drawing.md)): no JS | |
+| a chart, a heat map, a 2-D drawing | `Chart`, `Heatmap`, `Canvas` (feature `draw`, [drawing](drawing.md)): no JS | |
 | a JS library or React component in a view | `WebIsland` + `Island::js` / `Island::react` | `island()`, `reactIsland()` |
 | the island reading and calling the app's cells | the JS client (`useCell`, `useCall`; [JS client](../clients/js.md)) | `aio/state-core`, `useAio` |
 | the same, for code the app doesn't vouch for | `Island::js(..).sandboxed()` | |

@@ -70,7 +70,7 @@ RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p aio-rs -p aio-rs-shell -p aio-
 if cargo hack --version >/dev/null 2>&1; then
   cargo hack clippy -p aio-rs --lib --each-feature --locked -- -D warnings
 else
-  for f in "" outbound server tls oidc br net kit air imbl updates web dev testing video compat secrets usb; do
+  for f in "" outbound server tls oidc br net kit air draw imbl updates web dev testing video compat secrets usb; do
     cargo clippy -p aio-rs --lib --no-default-features --features "$f" --locked -- -D warnings
   done
 fi
@@ -86,8 +86,10 @@ scripts/air-ir "$air_ir"
 rm -rf "$air_ir"
 # The browser build (`ax build --web`): aio's core in the page, no SQLite, no ring.
 cargo clippy -p aio-rs --lib --no-default-features --features web --locked --target wasm32-unknown-unknown -- -D warnings
-# With the kit: its views drawn by air's interpreter, its controls and the sign-in form in the page.
+# With the kit: its views drawn by air's interpreter, its controls and the sign-in form in the page
+# (and its drawing: `draw`).
 cargo clippy -p aio-rs --lib --no-default-features --features web,kit --locked --target wasm32-unknown-unknown -- -D warnings
+cargo clippy -p aio-rs --lib --no-default-features --features web,draw --locked --target wasm32-unknown-unknown -- -D warnings
 # USB in the page: the same API, each call `Unsupported` (aio::hw).
 cargo clippy -p aio-rs --lib --no-default-features --features web,usb --locked --target wasm32-unknown-unknown -- -D warnings
 # Windows: the same lint (its tests: below, and GitHub CI's Windows job).

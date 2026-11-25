@@ -160,8 +160,9 @@ version may break things.
 - `data-aio-prevent` on a field keeps the keys it names (Tab in a
   `textarea` that indents), even as a modal dialog's last control: a
   field's keys were always its own, so Tab left it whatever the view did.
-- `aio::kit::Chart`: lines, bars and dots on linear, log or category
-  axes as SVG, with ticks at round numbers, a legend for two series or
+- `aio::kit::Chart` (feature `draw`, as `Heatmap` and `Canvas`: an app
+  that draws nothing compiles none of them, ~21 MB off its debug build):
+  lines, bars and dots on linear, log or category axes as SVG, with ticks at round numbers, a legend for two series or
   more, the nearest point's values on hover and a description a screen
   reader hears; `Chart { series: vec![Series::line("load", points)] }` is
   a whole chart. A line of more points than its plot has pixel columns
