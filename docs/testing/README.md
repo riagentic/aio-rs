@@ -49,6 +49,7 @@ Which harness:
 | `testMultiClient` | `aio::testing::Sim` | a server and synced copies under seeded cuts |
 | `cassette` | `aio::cassette::Cassette` | an effect's I/O recorded once, replayed after |
 | `testBrowser` | `aio::testing::TestBrowser` | a headless Chromium a test owns (the web build) |
+| (the app's own) | `aio::testing::usb` | fake USB devices `aio::hw` talks to ([USB devices](../devices/usb.md#in-tests)) |
 | `aiol` | `ax lint` | what types can't check: impure methods, credentials, hooks, a11y |
 
 ## Running tests

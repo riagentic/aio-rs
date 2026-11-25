@@ -70,7 +70,7 @@ RUSTDOCFLAGS='-D warnings' cargo doc --no-deps -p aio-rs -p aio-rs-shell -p aio-
 if cargo hack --version >/dev/null 2>&1; then
   cargo hack clippy -p aio-rs --lib --each-feature --locked -- -D warnings
 else
-  for f in "" outbound server tls oidc br net kit air imbl updates web dev testing video compat secrets; do
+  for f in "" outbound server tls oidc br net kit air imbl updates web dev testing video compat secrets usb; do
     cargo clippy -p aio-rs --lib --no-default-features --features "$f" --locked -- -D warnings
   done
 fi
@@ -88,6 +88,8 @@ rm -rf "$air_ir"
 cargo clippy -p aio-rs --lib --no-default-features --features web --locked --target wasm32-unknown-unknown -- -D warnings
 # With the kit: its views drawn by air's interpreter, its controls and the sign-in form in the page.
 cargo clippy -p aio-rs --lib --no-default-features --features web,kit --locked --target wasm32-unknown-unknown -- -D warnings
+# USB in the page: the same API, each call `Unsupported` (aio::hw).
+cargo clippy -p aio-rs --lib --no-default-features --features web,usb --locked --target wasm32-unknown-unknown -- -D warnings
 # Windows: the same lint (its tests: below, and GitHub CI's Windows job).
 cargo clippy --workspace --all-targets --all-features --locked --target x86_64-pc-windows-gnu -- -D warnings
 # Android: the host and runtime lint clean for phones (with the NDK).
@@ -95,6 +97,9 @@ if [ -n "$ndk" ]; then
   bin="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
   CC_aarch64_linux_android="$bin/aarch64-linux-android29-clang" AR_aarch64_linux_android="$bin/llvm-ar" \
     cargo clippy -p aio-rs -p aio-rs-shell --locked --target aarch64-linux-android -- -D warnings
+  # With USB: aio::hw over the host the shell hands in.
+  CC_aarch64_linux_android="$bin/aarch64-linux-android29-clang" AR_aarch64_linux_android="$bin/llvm-ar" \
+    cargo clippy -p aio-rs -p aio-rs-shell --features aio-rs/usb --locked --target aarch64-linux-android -- -D warnings
 fi
 fi
 if on test; then

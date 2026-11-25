@@ -53,6 +53,7 @@ max_sessions = 4
 totp = false
 [capabilities]
 network = ["api.example.org", "example.org"]
+usb = ["2c97", "1209:5342"]
 [updates]
 url = "https://example.org/releases"
 keys = ["ed25519:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="]

@@ -78,6 +78,9 @@ New here? Read in this order: [setup](basics/setup.md) →
 - [Secrets and observability](auth/secrets.md): secrets in state and files, redaction, what logs never hold.
 - [The OS's secret store](auth/keychain.md): `aio::secrets`: a key or token kept by the Keychain, the Secret Service, DPAPI or Android's Keystore.
 
+**Devices**
+- [USB devices](devices/usb.md): `aio::hw`: list, watch and open USB devices, bulk, interrupt and control transfers; fake devices in tests.
+
 **Shipping**
 - [Develop, build and install](build/README.md): `ax dev`, `ax build`, installing.
 - [Development mode](build/dev.md): hot-patching, live CSS, displays, running from source, imports.

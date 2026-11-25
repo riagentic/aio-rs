@@ -513,12 +513,22 @@ pub struct Capabilities {
     /// pairing, the connect page) is the person's pick, reached without one.
     #[serde(default)]
     pub network: Vec<String>,
+    /// The USB devices `aio::hw` may see and open: `"2c97"` (a vendor's,
+    /// its id as `lsusb` shows it), `"2c97:0001"` (one product) or `"*"`
+    /// (any). Everything else is invisible to the app. The Android build
+    /// declares them (the APK opens when one is plugged in); a Linux `.deb`
+    /// installs their udev rule.
+    #[serde(default)]
+    pub usb: Vec<String>,
 }
 
 impl Capabilities {
     /// The first host `c` names that `network` leaves out, with the fix.
     fn missing(&self, c: &Config) -> Option<String> {
         if let Some(e) = self.network.iter().find_map(|e| crate::capabilities::bad_entry(e)) {
+            return Some(e);
+        }
+        if let Some(e) = self.usb.iter().find_map(|e| crate::capabilities::usb_entry(e).err()) {
             return Some(e);
         }
         let mut named: Vec<(&str, String)> = vec![];

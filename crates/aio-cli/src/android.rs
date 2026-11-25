@@ -321,9 +321,11 @@ pub fn splash_files(
 /// optional: the app still installs where there is none), the fingerprint
 /// or face's (`aio::secrets::set_biometric`), the launch mode and one VIEW
 /// filter per scheme, the app's (`[app] schemes`) and Android's own (a link
-/// reaches the copy that is open), and the theme that fixes light or dark
-/// (`splashed`: the splash's).
-fn manifest_parts(cfg: &AndroidBuild, app: &[String], splashed: bool) -> [(&'static str, String); 5] {
+/// reaches the copy that is open), USB host (optional) with the devices of
+/// `[capabilities] usb` (`usb`: plugging one in offers the app, which may
+/// then use it), and the theme that fixes light or dark (`splashed`: the
+/// splash's).
+fn manifest_parts(cfg: &AndroidBuild, app: &[String], splashed: bool, usb: &[String]) -> [(&'static str, String); 6] {
     let camera = if cfg.camera {
         "\n  <uses-permission android:name=\"android.permission.CAMERA\" />\n  \
          <uses-feature android:name=\"android.hardware.camera\" android:required=\"false\" />"
@@ -335,7 +337,20 @@ fn manifest_parts(cfg: &AndroidBuild, app: &[String], splashed: bool) -> [(&'sta
     let mut schemes: Vec<&String> = app.iter().chain(&cfg.schemes).collect();
     schemes.sort();
     schemes.dedup();
-    let mode = if schemes.is_empty() { "" } else { "\n      android:launchMode=\"singleTask\"" };
+    let filtered = usb_filter(usb).is_some();
+    let mode = if schemes.is_empty() && !filtered { "" } else { "\n      android:launchMode=\"singleTask\"" };
+    let host = if usb.is_empty() {
+        ""
+    } else {
+        "\n  <uses-feature android:name=\"android.hardware.usb.host\" android:required=\"false\" />"
+    };
+    let plugged = if filtered {
+        "\n      <intent-filter>\n        <action android:name=\"android.hardware.usb.action.USB_DEVICE_ATTACHED\" />\n      \
+         </intent-filter>\n      <meta-data android:name=\"android.hardware.usb.action.USB_DEVICE_ATTACHED\"\n        \
+         android:resource=\"@xml/aio_usb\" />"
+    } else {
+        ""
+    };
     let links: String = schemes
         .iter()
         .map(|s| {
@@ -346,26 +361,49 @@ fn manifest_parts(cfg: &AndroidBuild, app: &[String], splashed: bool) -> [(&'sta
                  <data android:scheme=\"{s}\" />\n      </intent-filter>"
             )
         })
+        .chain([plugged.to_string()])
         .collect();
     let theme = if splashed { SPLASH_THEME } else { system_theme(cfg.color_scheme) };
     [
         ("{{CAMERA}}", camera.into()),
         ("{{BIOMETRIC}}", biometric.into()),
+        ("{{USB}}", host.into()),
         ("{{LAUNCH_MODE}}", mode.into()),
         ("{{LINKS}}", links),
         ("{{THEME}}", theme.into()),
     ]
 }
 
-/// The template, filled in for `app` and its `[build.android]` (`cfg`), its
-/// launcher icon (`icon`, PNG), its splash's files ([`splash_files`], or
-/// none) and the app's `android/` files (`overlay`: path, bytes) over them:
-/// each replaces a file whole or adds one, its placeholders filled too (text).
-/// `kind`: the app, or a dev copy of it ([`Apk`]).
+/// `res/xml/aio_usb.xml`: the devices of `[capabilities] usb` the APK
+/// opens for (vendor, and product where one is named), `None` when it names
+/// no vendor (`"*"` alone offers the app for no device). Pure.
+fn usb_filter(usb: &[String]) -> Option<String> {
+    let devices: String = usb
+        .iter()
+        .filter_map(|e| match aio_config::capabilities::usb_entry(e) {
+            Ok((Some(v), p)) => Some(match p {
+                Some(p) => format!("\n  <usb-device vendor-id=\"{v}\" product-id=\"{p}\" />"),
+                None => format!("\n  <usb-device vendor-id=\"{v}\" />"),
+            }),
+            _ => None,
+        })
+        .collect();
+    (!devices.is_empty())
+        .then(|| format!("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>{devices}\n</resources>\n"))
+}
+
+/// The template, filled in for `app`, its `[build.android]` (`cfg`) and
+/// `[capabilities] usb` (`usb`), its launcher icon (`icon`, PNG), its
+/// splash's files ([`splash_files`], or none) and the app's `android/`
+/// files (`overlay`: path, bytes) over them: each replaces a file whole or
+/// adds one, its placeholders filled too (text). `kind`: the app, or a dev
+/// copy of it ([`Apk`]).
+#[allow(clippy::too_many_arguments)]
 pub fn project(
     app: &App,
     port_of: Option<&str>,
     cfg: &AndroidBuild,
+    usb: &[String],
     icon: &[u8],
     splash: &[(String, Vec<u8>)],
     overlay: &[(String, Vec<u8>)],
@@ -374,7 +412,7 @@ pub fn project(
     let page = kind == Apk::Page;
     let abis = ABIS.iter().map(|(a, _)| format!("\"{a}\"")).collect::<Vec<_>>().join(", ");
     let code = version_code(&app.version)?.to_string();
-    let parts = manifest_parts(cfg, &app.schemes, !splash.is_empty());
+    let parts = manifest_parts(cfg, &app.schemes, !splash.is_empty(), usb);
     let (suffix, label) = match kind != Apk::App {
         true => (".dev", format!("{} (dev)", crate::build::label(app))),
         false => ("", crate::build::label(app).to_string()),
@@ -403,6 +441,7 @@ pub fn project(
         .chain(page.then_some(&DEV_ACTIVITY))
         .map(|(p, t)| (p.to_string(), fill(t).into_bytes()))
         .chain([(ICON.to_string(), icon.to_vec())])
+        .chain(usb_filter(usb).map(|x| ("app/src/main/res/xml/aio_usb.xml".to_string(), x.into_bytes())))
         .chain(splash.iter().cloned())
         .filter(|(p, _)| !overlay.iter().any(|(o, _)| o == p))
         .collect();
@@ -954,7 +993,7 @@ pub fn build(
     let bin = ndk.join("toolchains/llvm/prebuilt").join(prebuilt(os)).join("bin");
     let proj = dist.join(format!(".{}-android", app.id));
     let made = (|| {
-        let mut files = project(app, port_of, cfg, &icon, &splash, &overlay, ask.kind)?;
+        let mut files = project(app, port_of, cfg, &full.capabilities.usb, &icon, &splash, &overlay, ask.kind)?;
         files.extend(asset_files(full, app_dir)?);
         write_project(&proj, &files, &sdk)?;
         for (abi, target) in ask.abis {
@@ -1092,7 +1131,16 @@ pub fn dev_apk(
     target_dir: &Path,
 ) -> Result<(PathBuf, String), String> {
     let (icon, _, overlay) = parts(app, full, app_dir)?;
-    let files = project(app, full.app.port_of.as_deref(), &full.build.android, &icon, &[], &overlay, Apk::Page)?;
+    let files = project(
+        app,
+        full.app.port_of.as_deref(),
+        &full.build.android,
+        &full.capabilities.usb,
+        &icon,
+        &[],
+        &overlay,
+        Apk::Page,
+    )?;
     let mut all = vec![];
     for (p, b) in &files {
         all.extend_from_slice(p.as_bytes());
@@ -1182,7 +1230,7 @@ mod tests {
             .lines()
             .filter_map(|l| l.trim().strip_prefix("public static native ")?.split(['(', ' ']).nth(1))
             .collect();
-        assert_eq!(calls, ["start", "connect", "fromPage", "back", "link", "allows", "answer", "stop"]);
+        assert_eq!(calls, ["start", "connect", "fromPage", "back", "link", "allows", "answer", "usbChanged", "stop"]);
         for c in calls {
             assert!(natives.contains(&format!("fn Java_aio_rt_Host_{c}<")), "{c} has no entry point");
         }
@@ -1190,6 +1238,9 @@ mod tests {
         let back = &activity[activity.find("public void onBackPressed()").expect("Back is handled")..];
         assert!(back[..back.find("\n    }").unwrap()].contains("Host.back();"), "the app is asked first");
         assert!(natives.contains("\"notTaken\", \"()V\"") && host.contains("static void notTaken()"));
+        // And each Java method the library calls is there, its signature the one called.
+        assert!(natives.contains("\"usbList\", \"()Ljava/lang/String;\"") && host.contains("static String usbList()"));
+        assert!(natives.contains("\"usbOpen\", \"(I)I\"") && host.contains("static int usbOpen(int id)"));
     }
 
     /// The body of the Java method that starts at `head`, to its closing brace.
@@ -1206,7 +1257,7 @@ mod tests {
         let app =
             App { id: "notes".into(), name: "Notes".into(), version: "1.2.3".into(), icon: None, schemes: vec![] };
         let manifest = |cfg: &AndroidBuild| {
-            let files = project(&app, None, cfg, b"png", &[], &[], Apk::App).unwrap();
+            let files = project(&app, None, cfg, &[], b"png", &[], &[], Apk::App).unwrap();
             let m = files.into_iter().find(|(p, _)| p == "app/src/main/AndroidManifest.xml").unwrap().1;
             String::from_utf8(m).unwrap()
         };
@@ -1242,7 +1293,7 @@ mod tests {
         assert!(!all.contains("{{") && !light.contains("{{"));
         // `[app] schemes` open it too, beside Android's own; one filter each.
         let app = App { schemes: vec!["myapp".into(), "every".into()], ..app.clone() };
-        let files = project(&app, None, &cfg, b"png", &[], &[], Apk::App).unwrap();
+        let files = project(&app, None, &cfg, &[], b"png", &[], &[], Apk::App).unwrap();
         let m = String::from_utf8(files.into_iter().find(|(p, _)| p == "app/src/main/AndroidManifest.xml").unwrap().1)
             .unwrap();
         assert_eq!(m.matches("android.intent.action.VIEW").count(), 3, "{m}");
@@ -1250,6 +1301,33 @@ mod tests {
             assert_eq!(m.matches(&format!("<data android:scheme=\"{s}\" />")).count(), 1, "{s}: {m}");
         }
         assert!(m.contains("android:launchMode=\"singleTask\""));
+    }
+
+    #[test]
+    fn the_apk_is_offered_for_the_usb_devices_its_capability_names() {
+        let app =
+            App { id: "notes".into(), name: "Notes".into(), version: "1.2.3".into(), icon: None, schemes: vec![] };
+        let made = |usb: &[&str]| {
+            let usb: Vec<String> = usb.iter().map(|s| s.to_string()).collect();
+            let files = project(&app, None, &AndroidBuild::default(), &usb, b"png", &[], &[], Apk::App).unwrap();
+            let text =
+                |path: &str| files.iter().find(|(p, _)| p == path).map(|(_, b)| String::from_utf8(b.clone()).unwrap());
+            (text("app/src/main/AndroidManifest.xml").unwrap(), text("app/src/main/res/xml/aio_usb.xml"))
+        };
+        let (none, filter) = made(&[]);
+        assert!(!none.contains("usb") && filter.is_none(), "{none}");
+        let (m, filter) = made(&["2c97", "1209:5342"]);
+        assert!(m.contains("<uses-feature android:name=\"android.hardware.usb.host\" android:required=\"false\" />"));
+        assert!(m.contains("<action android:name=\"android.hardware.usb.action.USB_DEVICE_ATTACHED\" />"), "{m}");
+        assert!(m.contains("android:resource=\"@xml/aio_usb\""), "{m}");
+        assert!(m.contains("android:launchMode=\"singleTask\""), "a plug reaches the copy that is open");
+        let filter = filter.unwrap();
+        assert!(filter.contains("<usb-device vendor-id=\"11415\" />"), "decimal, as Android reads it: {filter}");
+        assert!(filter.contains("<usb-device vendor-id=\"4617\" product-id=\"21314\" />"), "{filter}");
+        let (any, filter) = made(&["*"]);
+        assert!(any.contains("android.hardware.usb.host") && !any.contains("USB_DEVICE_ATTACHED"), "{any}");
+        assert!(filter.is_none() && !any.contains("launchMode"), "any device: offered for none");
+        assert!(!m.contains("{{") && !any.contains("{{"));
     }
 
     #[test]
@@ -1372,7 +1450,7 @@ mod tests {
         );
         let dark = splash_files(&s, b"PNG", "Notes", "1.0.0", &colors, ColorScheme::Dark);
         assert!(!dark.iter().any(|(f, _)| f.contains("values-night")) && dark.iter().any(|(_, b)| b == b"PNG"));
-        let all = project(&app, None, &AndroidBuild::default(), b"png", &files, &[], Apk::App).unwrap();
+        let all = project(&app, None, &AndroidBuild::default(), &[], b"png", &files, &[], Apk::App).unwrap();
         let manifest = all.iter().find(|(p, _)| p.ends_with("AndroidManifest.xml")).unwrap();
         assert!(String::from_utf8_lossy(&manifest.1).contains("android:theme=\"@style/AioSplash\""));
         // The activity: its splash at once (no system hold), gone at the
@@ -1416,7 +1494,7 @@ mod tests {
         let get = |files: &[(String, Vec<u8>)], p: &str| {
             files.iter().find(|(f, _)| f == p).map(|(_, t)| String::from_utf8_lossy(t).into_owned()).unwrap()
         };
-        let files = project(&app, None, &AndroidBuild::default(), b"png", &[], &[], Apk::App).unwrap();
+        let files = project(&app, None, &AndroidBuild::default(), &[], b"png", &[], &[], Apk::App).unwrap();
         let gradle = get(&files, "app/build.gradle.kts");
         assert!(gradle.contains("applicationId = \"aio.rt.notes\"") && gradle.contains("versionCode = 102000003"));
         assert!(gradle.contains("include(\"arm64-v8a\", \"armeabi-v7a\", \"x86_64\")"));
@@ -1429,7 +1507,7 @@ mod tests {
         assert_eq!(get(&files, ICON), "png", "the launcher icon");
         assert!(files.iter().all(|(_, t)| !String::from_utf8_lossy(t).contains("{{")), "every placeholder filled");
         let own = AndroidBuild { application_id: Some("com.example.notes".into()), ..Default::default() };
-        let gradle = get(&project(&app, None, &own, b"png", &[], &[], Apk::App).unwrap(), "app/build.gradle.kts");
+        let gradle = get(&project(&app, None, &own, &[], b"png", &[], &[], Apk::App).unwrap(), "app/build.gradle.kts");
         assert!(gradle.contains("applicationId = \"com.example.notes\""), "{gradle}");
         assert_eq!(application_id_of("notes", None, &AndroidBuild::default()), "aio.rt.notes");
     }
@@ -1447,13 +1525,13 @@ mod tests {
         assert_eq!(overlay_of(&d.path().join("none")).unwrap(), vec![], "no android/: the template as is");
         let app =
             App { id: "notes".into(), name: "Notes".into(), version: "1.2.3".into(), icon: None, schemes: vec![] };
-        let files = project(&app, None, &AndroidBuild::default(), b"png", &[], &overlay, Apk::App).unwrap();
+        let files = project(&app, None, &AndroidBuild::default(), &[], b"png", &[], &overlay, Apk::App).unwrap();
         let of = |p: &str| files.iter().filter(|(f, _)| f == p).map(|(_, b)| b.clone()).collect::<Vec<_>>();
         assert_eq!(of("app/src/main/AndroidManifest.xml"), [b"<manifest label=\"Notes\"/>".to_vec()], "replaced, once");
         assert_eq!(of("app/src/main/res/drawable/logo.png"), [vec![0x89, 0xff, 0x00]], "bytes as they are");
         assert_eq!(files.len(), TEMPLATE.len() + 2, "the template, its icon, the added file");
         let own_icon = [("app/src/main/res/drawable/ic_launcher.png".to_string(), b"mine".to_vec())];
-        let files = project(&app, None, &AndroidBuild::default(), b"png", &[], &own_icon, Apk::App).unwrap();
+        let files = project(&app, None, &AndroidBuild::default(), &[], b"png", &[], &own_icon, Apk::App).unwrap();
         assert_eq!(files.iter().filter(|(p, _)| p == ICON).map(|(_, b)| b.as_slice()).collect::<Vec<_>>(), [b"mine"]);
     }
 
@@ -1560,7 +1638,7 @@ mod tests {
         assert_eq!(application_id_of("notes-rs", Some("notes"), &own), "com.example.notes", "declared wins");
         let app =
             App { id: "notes-rs".into(), name: "Notes".into(), version: "1.3.0".into(), icon: None, schemes: vec![] };
-        let files = project(&app, Some("notes"), &none, b"png", &[], &[], Apk::App).unwrap();
+        let files = project(&app, Some("notes"), &none, &[], b"png", &[], &[], Apk::App).unwrap();
         let gradle =
             String::from_utf8_lossy(&files.iter().find(|(p, _)| p == "app/build.gradle.kts").unwrap().1).into_owned();
         assert!(gradle.contains("applicationId = \"app.aio.notes\""), "{gradle}");
@@ -1592,7 +1670,7 @@ mod tests {
         assert_eq!(label_xml("@home"), "\\@home");
         assert_eq!(label_xml("tab\there\u{7f}"), "tabhere");
         let app = App { id: "notes".into(), name: String::new(), version: "1.0.0".into(), icon: None, schemes: vec![] };
-        let files = project(&app, None, &AndroidBuild::default(), b"png", &[], &[], Apk::App).unwrap();
+        let files = project(&app, None, &AndroidBuild::default(), &[], b"png", &[], &[], Apk::App).unwrap();
         let m = String::from_utf8_lossy(&files.iter().find(|(p, _)| p.ends_with("AndroidManifest.xml")).unwrap().1)
             .into_owned();
         assert!(m.contains("android:label=\"notes\""), "no name: the id: {m}");
@@ -1638,7 +1716,7 @@ mod tests {
     fn the_dev_page_apk_is_beside_the_app_without_its_library() {
         let app =
             App { id: "notes".into(), name: "Notes".into(), version: "1.2.3".into(), icon: None, schemes: vec![] };
-        let files = project(&app, None, &AndroidBuild::default(), b"png", &[], &[], Apk::Page).unwrap();
+        let files = project(&app, None, &AndroidBuild::default(), &[], b"png", &[], &[], Apk::Page).unwrap();
         let get =
             |p: &str| files.iter().find(|(f, _)| f.ends_with(p)).map(|(_, b)| String::from_utf8_lossy(b).into_owned());
         let (gradle, manifest) = (get("app/build.gradle.kts").unwrap(), get("AndroidManifest.xml").unwrap());
@@ -1650,18 +1728,18 @@ mod tests {
         assert!(manifest.contains("usesCleartextTraffic=\"true\""), "http://127.0.0.1 over adb");
         let dev = get("DevActivity.java").unwrap();
         assert!(dev.contains("getStringExtra(\"url\")") && !dev.contains("Host."), "no library in it");
-        let real = project(&app, None, &AndroidBuild::default(), b"png", &[], &[], Apk::App).unwrap();
+        let real = project(&app, None, &AndroidBuild::default(), &[], b"png", &[], &[], Apk::App).unwrap();
         assert!(!real.iter().any(|(p, _)| p.ends_with("DevActivity.java")), "the app has no dev activity");
         let m = String::from_utf8_lossy(&real.iter().find(|(p, _)| p.ends_with("AndroidManifest.xml")).unwrap().1)
             .into_owned();
         assert!(m.contains("usesCleartextTraffic=\"false\"") && m.contains("aio.rt.MainActivity"));
         // The native dev copy: the app's activity, beside the app.
-        let copy = project(&app, None, &AndroidBuild::default(), b"png", &[], &[], Apk::Dev).unwrap();
+        let copy = project(&app, None, &AndroidBuild::default(), &[], b"png", &[], &[], Apk::Dev).unwrap();
         let g =
             String::from_utf8_lossy(&copy.iter().find(|(p, _)| p == "app/build.gradle.kts").unwrap().1).into_owned();
         assert!(g.contains("aio.rt.notes.dev") && g.contains("isEnable = true"));
         let universal = AndroidBuild { universal: true, ..Default::default() };
-        let u = project(&app, None, &universal, b"png", &[], &[], Apk::App).unwrap();
+        let u = project(&app, None, &universal, &[], b"png", &[], &[], Apk::App).unwrap();
         assert!(
             String::from_utf8_lossy(&u.iter().find(|(p, _)| p == "app/build.gradle.kts").unwrap().1)
                 .contains("isUniversalApk = true")

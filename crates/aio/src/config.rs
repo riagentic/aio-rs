@@ -731,6 +731,9 @@ mod tests {
         // A client's server is the person's pick: reached without an entry.
         assert!(c("[client]\nserver = \"10.0.0.5:8443\"").is_ok());
         assert!(c("[capabilities]\nnetwork = [\"https://x.example\"]").unwrap_err().contains("is not a host"));
+        assert_eq!(c("[capabilities]\nusb = [\"2c97\", \"1209:5342\", \"*\"]").unwrap().capabilities.usb.len(), 3);
+        let e = c("[capabilities]\nusb = [\"0x2c97\"]").unwrap_err();
+        assert!(e.starts_with("aio.toml: [capabilities] usb \"0x2c97\" is not a device: a vendor id"), "{e}");
     }
 
     #[test]

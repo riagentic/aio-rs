@@ -464,6 +464,7 @@ aio::capabilities::held: fn held(network: Option<&[String]>, what: &str, target:
 aio::capabilities::network: fn network() -> Option<Vec<String>>
 aio::capabilities::refused: fn refused(what: &str, host: &str) -> String
 aio::capabilities::set: fn set(network: &[String])
+aio::capabilities::set_usb: fn set_usb(usb: &[String])
 aio::cassette::Cassette::call: async fn call<A, R, E, F>(&self, id: &str, args: &A, run: impl FnOnce() -> F) -> Result<R, String> where A: Serialize, R: Serialize + DeserializeOwned, E: std::fmt::Display, F: std::future::Future<Output = Result<R, E>>
 aio::cassette::Cassette::frames: fn frames(&self) -> Vec<Frame>
 aio::cassette::Cassette::lenient: fn lenient(self) -> Self
@@ -1067,6 +1068,50 @@ aio::http::side::Seqs::accept: fn accept(&mut self, kind: u8, seq: u32) -> Seen
 aio::http::side::Seqs::next: fn next(&mut self, kind: u8) -> u32
 aio::http::side::decode: fn decode(frame: &[u8]) -> Option<(u8, u32, &[u8])>
 aio::http::side::encode: fn encode(kind: u8, seq: u32, body: &[u8]) -> Vec<u8>
+aio::hw::Control.index: u16
+aio::hw::Control.kind: ControlKind
+aio::hw::Control.recipient: Recipient
+aio::hw::Control.request: u8
+aio::hw::Control.value: u16
+aio::hw::ControlKind::Class
+aio::hw::ControlKind::Standard
+aio::hw::ControlKind::Vendor
+aio::hw::Device::claim: async fn claim(&self, number: u8) -> io::Result<Interface>
+aio::hw::Device::info: fn info(&self) -> &DeviceInfo
+aio::hw::DeviceInfo.class: u8
+aio::hw::DeviceInfo.id: Id
+aio::hw::DeviceInfo.interfaces: Vec<InterfaceInfo>
+aio::hw::DeviceInfo.manufacturer: Option<String>
+aio::hw::DeviceInfo.product: u16
+aio::hw::DeviceInfo.product_name: Option<String>
+aio::hw::DeviceInfo.serial: Option<String>
+aio::hw::DeviceInfo.vendor: u16
+aio::hw::DeviceInfo::open: async fn open(&self) -> io::Result<Device>
+aio::hw::Event::Plugged(DeviceInfo)
+aio::hw::Event::Unplugged(DeviceInfo)
+aio::hw::Filter::any: fn any() -> Self
+aio::hw::Filter::device: fn device(vendor: u16, product: u16) -> Self
+aio::hw::Filter::matches: fn matches(&self, d: &DeviceInfo) -> bool
+aio::hw::Filter::serial: fn serial(self, serial: impl Into<String>) -> Self
+aio::hw::Filter::vendor: fn vendor(vendor: u16) -> Self
+aio::hw::Id(_)
+aio::hw::Interface::control_in: async fn control_in(&self, setup: Control, len: u16, timeout: Duration) -> io::Result<Vec<u8>>
+aio::hw::Interface::control_out: async fn control_out(&self, setup: Control, data: &[u8], timeout: Duration) -> io::Result<()>
+aio::hw::Interface::number: fn number(&self) -> u8
+aio::hw::Interface::read: async fn read(&self, endpoint: u8, max: usize, timeout: Duration) -> io::Result<Vec<u8>>
+aio::hw::Interface::write: async fn write(&self, endpoint: u8, data: &[u8], timeout: Duration) -> io::Result<()>
+aio::hw::InterfaceInfo.class: u8
+aio::hw::InterfaceInfo.number: u8
+aio::hw::InterfaceInfo.protocol: u8
+aio::hw::InterfaceInfo.subclass: u8
+aio::hw::Recipient::Device
+aio::hw::Recipient::Endpoint
+aio::hw::Recipient::Interface
+aio::hw::Recipient::Other
+aio::hw::Watch::next: async fn next(&mut self) -> io::Result<Event>
+aio::hw::list: async fn list() -> io::Result<Vec<DeviceInfo>>
+aio::hw::open: async fn open(filter: &Filter) -> io::Result<Device>
+aio::hw::watch: fn watch() -> io::Result<Watch>
 aio::ipc::Blocking(_)
 aio::ipc::Blocking::try_clone: fn try_clone(&self) -> io::Result<Self>
 aio::ipc::Listener::accept: async fn accept(&mut self) -> io::Result<Stream>
@@ -2502,6 +2547,25 @@ aio::testing::seeded: fn seeded<T: CellData>(seed: serde_json::Value) -> T
 aio::testing::seeded_source: fn seeded_source<T: Cell>(seed: serde_json::Value) -> crate::Source<T>
 aio::testing::smoke: fn smoke(bundle: &std::path::Path) -> String
 aio::testing::totp_code: fn totp_code(secret: &str, at: i64) -> String
+aio::testing::usb::Device::interface: fn interface(self, info: InterfaceInfo, endpoints: &[(u8, usize)]) -> Self
+aio::testing::usb::Device::new: fn new(vendor: u16, product: u16) -> Self
+aio::testing::usb::Device::respond: fn respond(self, f: impl FnMut(&Transfer, &mut Io) -> Reply + Send + 'static) -> Self
+aio::testing::usb::Device::strings: fn strings(self, manufacturer: &str, product: &str, serial: &str) -> Self
+aio::testing::usb::Io(_)
+aio::testing::usb::Io::send: fn send(&mut self, endpoint: u8, data: impl Into<Vec<u8>>)
+aio::testing::usb::Plugged::info: fn info(&self) -> DeviceInfo
+aio::testing::usb::Plugged::send: fn send(&self, endpoint: u8, data: impl Into<Vec<u8>>)
+aio::testing::usb::Plugged::transfers: fn transfers(&self) -> Vec<Transfer>
+aio::testing::usb::Plugged::unplug: fn unplug(self) -> Device
+aio::testing::usb::Reply::Data(Vec<u8>)
+aio::testing::usb::Reply::Done
+aio::testing::usb::Reply::Stall
+aio::testing::usb::Reply::Wait
+aio::testing::usb::Transfer::ControlIn { setup: crate::hw::Control, len: u16 }
+aio::testing::usb::Transfer::ControlOut { setup: crate::hw::Control, data: Vec<u8> }
+aio::testing::usb::Transfer::Read { endpoint: u8, max: usize }
+aio::testing::usb::Transfer::Write { endpoint: u8, data: Vec<u8> }
+aio::testing::usb::plug: fn plug(device: Device) -> Plugged
 aio::tls::Tls.leaf_der: Vec<u8>
 aio::tls::Tls.own: bool
 aio::tls::Tls.root_pem: String
@@ -2966,6 +3030,9 @@ enum aio::held::State<T>
 enum aio::http::SameSite
 enum aio::http::encoding::Encoding
 enum aio::http::side::Seen
+enum aio::hw::ControlKind
+enum aio::hw::Event
+enum aio::hw::Recipient
 enum aio::kit::Align
 enum aio::kit::Go
 enum aio::kit::GuestEvent
@@ -2995,6 +3062,8 @@ enum aio::process::Stream
 enum aio::report::Problem
 enum aio::tell::Tell
 enum aio::testing::AskedFor
+enum aio::testing::usb::Reply
+enum aio::testing::usb::Transfer
 enum aio::ui::EvalError
 enum aio::ui::prelude::EvalError
 enum aio::update::Data
@@ -3057,11 +3126,15 @@ impl Clone for Conn
 impl Clone for ConnectionStatusProps
 impl Clone for Context
 impl Clone for Contract
+impl Clone for Control
+impl Clone for ControlKind
 impl Clone for CookieOpts
 impl Clone for Cron
 impl Clone for Crumb
 impl Clone for Data
 impl Clone for Declared
+impl Clone for Device
+impl Clone for DeviceInfo
 impl Clone for Diagnostic
 impl Clone for DirectionProps
 impl Clone for Doc
@@ -3097,10 +3170,13 @@ impl Clone for History
 impl Clone for Home
 impl Clone for HostKey
 impl Clone for Http
+impl Clone for Id
 impl Clone for Info
 impl Clone for Inline
 impl Clone for InputProps
 impl Clone for Inputs
+impl Clone for Interface
+impl Clone for InterfaceInfo
 impl Clone for Island
 impl Clone for JsCell
 impl Clone for Kind
@@ -3169,6 +3245,7 @@ impl Clone for Queued
 impl Clone for RadioGroupProps
 impl Clone for Reading
 impl Clone for Ready
+impl Clone for Recipient
 impl Clone for Recovered
 impl Clone for Refusal
 impl Clone for Rejected
@@ -3231,6 +3308,7 @@ impl Clone for Tone
 impl Clone for TooltipProps
 impl Clone for Track
 impl Clone for Transaction
+impl Clone for Transfer
 impl Clone for Travel
 impl Clone for Trend
 impl Clone for Trigger
@@ -3251,6 +3329,8 @@ impl Copy for CanvasPointer
 impl Copy for Col
 impl Copy for Columns
 impl Copy for Conn
+impl Copy for Control
+impl Copy for ControlKind
 impl Copy for Data
 impl Copy for Declared
 impl Copy for Done
@@ -3259,6 +3339,8 @@ impl Copy for Field
 impl Copy for Fill
 impl Copy for Filter
 impl Copy for Gate
+impl Copy for Id
+impl Copy for InterfaceInfo
 impl Copy for Island
 impl Copy for Kind
 impl Copy for Mark
@@ -3274,6 +3356,7 @@ impl Copy for PointerKind
 impl Copy for Position
 impl Copy for Problem
 impl Copy for ProgressOf
+impl Copy for Recipient
 impl Copy for SameSite
 impl Copy for Scale
 impl Copy for Seen
@@ -3330,10 +3413,14 @@ impl Debug for Conflict
 impl Debug for Conn
 impl Debug for Context
 impl Debug for Contract
+impl Debug for Control
+impl Debug for ControlKind
 impl Debug for CookieOpts
 impl Debug for Cron
 impl Debug for Data
 impl Debug for Declared
+impl Debug for Device
+impl Debug for DeviceInfo
 impl Debug for Diagnostic
 impl Debug for Doc
 impl Debug for Done
@@ -3366,9 +3453,12 @@ impl Debug for Hint
 impl Debug for History
 impl Debug for Home
 impl Debug for HostKey
+impl Debug for Id
 impl Debug for Info
 impl Debug for Inline
 impl Debug for Inputs
+impl Debug for Interface
+impl Debug for InterfaceInfo
 impl Debug for Island
 impl Debug for Kind
 impl Debug for Known
@@ -3426,6 +3516,7 @@ impl Debug for QrState
 impl Debug for Queued
 impl Debug for Reading
 impl Debug for Ready
+impl Debug for Recipient
 impl Debug for Recovered
 impl Debug for Refusal
 impl Debug for Refused
@@ -3479,6 +3570,7 @@ impl Debug for Toast
 impl Debug for Tone
 impl Debug for Track
 impl Debug for Transaction
+impl Debug for Transfer
 impl Debug for Travel
 impl Debug for Trend
 impl Debug for Trigger
@@ -3521,6 +3613,7 @@ impl Default for Heads
 impl Default for HostKey
 impl Default for Http
 impl Default for Inputs
+impl Default for Io
 impl Default for Known
 impl Default for Loc
 impl Default for Mark
@@ -3570,8 +3663,10 @@ impl Default for ZoomView
 impl Deref for Secret
 impl Display for AuthError
 impl Display for Closed
+impl Display for DeviceInfo
 impl Display for Error
 impl Display for EvalError
+impl Display for Filter
 impl Display for Loc
 impl Display for Refusal
 impl Display for Rejected
@@ -3580,6 +3675,7 @@ impl Drop for Child
 impl Drop for Deciding
 impl Drop for Frames
 impl Drop for Listener
+impl Drop for Plugged
 impl Drop for Sandbox
 impl Drop for Secret
 impl Drop for Spinner
@@ -3588,6 +3684,7 @@ impl Drop for TestApps
 impl Drop for TestBrowser
 impl Drop for TestCells
 impl Drop for TestUi
+impl Drop for Watch
 impl Eq for Align
 impl Eq for Answered
 impl Eq for Ask
@@ -3603,15 +3700,19 @@ impl Eq for Closed
 impl Eq for Code
 impl Eq for Conn
 impl Eq for Contract
+impl Eq for Control
+impl Eq for ControlKind
 impl Eq for CookieOpts
 impl Eq for Cron
 impl Eq for Data
 impl Eq for Declared
+impl Eq for DeviceInfo
 impl Eq for Diagnostic
 impl Eq for Done
 impl Eq for Drained
 impl Eq for Encoding
 impl Eq for Error
+impl Eq for Event
 impl Eq for Fetched
 impl Eq for Field
 impl Eq for Filter
@@ -3622,8 +3723,10 @@ impl Eq for Guest
 impl Eq for HeldEffect
 impl Eq for Hint
 impl Eq for HostKey
+impl Eq for Id
 impl Eq for Info
 impl Eq for Inputs
+impl Eq for InterfaceInfo
 impl Eq for Island
 impl Eq for Kind
 impl Eq for Known
@@ -3663,6 +3766,7 @@ impl Eq for ProgressOf
 impl Eq for QrState
 impl Eq for Reading
 impl Eq for Ready
+impl Eq for Recipient
 impl Eq for Refusal
 impl Eq for Refused
 impl Eq for Rejected
@@ -3693,6 +3797,7 @@ impl Eq for TimeAsk
 impl Eq for Toast
 impl Eq for Tone
 impl Eq for Transaction
+impl Eq for Transfer
 impl Eq for Travel
 impl Eq for Trend
 impl Eq for Unit
@@ -3715,6 +3820,8 @@ impl From<String> for ChordSpec
 impl From<String> for Rejected
 impl Hash for Code
 impl Hash for Encoding
+impl Hash for Id
+impl Hash for InterfaceInfo
 impl HeadOf for Head
 impl PartialEq for About
 impl PartialEq for Align
@@ -3744,11 +3851,14 @@ impl PartialEq for Conflict
 impl PartialEq for Conn
 impl PartialEq for Context
 impl PartialEq for Contract
+impl PartialEq for Control
+impl PartialEq for ControlKind
 impl PartialEq for CookieOpts
 impl PartialEq for Cron
 impl PartialEq for Crumb
 impl PartialEq for Data
 impl PartialEq for Declared
+impl PartialEq for DeviceInfo
 impl PartialEq for Diagnostic
 impl PartialEq for Doc
 impl PartialEq for Done
@@ -3777,9 +3887,11 @@ impl PartialEq for HeldEffect
 impl PartialEq for Hint
 impl PartialEq for History
 impl PartialEq for HostKey
+impl PartialEq for Id
 impl PartialEq for Info
 impl PartialEq for Inline
 impl PartialEq for Inputs
+impl PartialEq for InterfaceInfo
 impl PartialEq for Island
 impl PartialEq for Kind
 impl PartialEq for Known
@@ -3834,6 +3946,7 @@ impl PartialEq for QrState
 impl PartialEq for Queued
 impl PartialEq for Reading
 impl PartialEq for Ready
+impl PartialEq for Recipient
 impl PartialEq for Recovered
 impl PartialEq for Refusal
 impl PartialEq for Refused
@@ -3880,6 +3993,7 @@ impl PartialEq for Toast
 impl PartialEq for Tone
 impl PartialEq for Track
 impl PartialEq for Transaction
+impl PartialEq for Transfer
 impl PartialEq for Travel
 impl PartialEq for Trend
 impl PartialEq for Trigger
@@ -3990,11 +4104,14 @@ impl StructuralPartialEq for Conflict
 impl StructuralPartialEq for Conn
 impl StructuralPartialEq for Context
 impl StructuralPartialEq for Contract
+impl StructuralPartialEq for Control
+impl StructuralPartialEq for ControlKind
 impl StructuralPartialEq for CookieOpts
 impl StructuralPartialEq for Cron
 impl StructuralPartialEq for Crumb
 impl StructuralPartialEq for Data
 impl StructuralPartialEq for Declared
+impl StructuralPartialEq for DeviceInfo
 impl StructuralPartialEq for Diagnostic
 impl StructuralPartialEq for Doc
 impl StructuralPartialEq for Done
@@ -4023,9 +4140,11 @@ impl StructuralPartialEq for HeldEffect
 impl StructuralPartialEq for Hint
 impl StructuralPartialEq for History
 impl StructuralPartialEq for HostKey
+impl StructuralPartialEq for Id
 impl StructuralPartialEq for Info
 impl StructuralPartialEq for Inline
 impl StructuralPartialEq for Inputs
+impl StructuralPartialEq for InterfaceInfo
 impl StructuralPartialEq for Island
 impl StructuralPartialEq for Kind
 impl StructuralPartialEq for Known
@@ -4078,6 +4197,7 @@ impl StructuralPartialEq for QrState
 impl StructuralPartialEq for Queued
 impl StructuralPartialEq for Reading
 impl StructuralPartialEq for Ready
+impl StructuralPartialEq for Recipient
 impl StructuralPartialEq for Recovered
 impl StructuralPartialEq for Refusal
 impl StructuralPartialEq for Refused
@@ -4124,6 +4244,7 @@ impl StructuralPartialEq for Toast
 impl StructuralPartialEq for Tone
 impl StructuralPartialEq for Track
 impl StructuralPartialEq for Transaction
+impl StructuralPartialEq for Transfer
 impl StructuralPartialEq for Travel
 impl StructuralPartialEq for Trend
 impl StructuralPartialEq for Trigger
@@ -4310,6 +4431,7 @@ mod aio::held
 mod aio::http
 mod aio::http::encoding
 mod aio::http::side
+mod aio::hw
 mod aio::ipc
 mod aio::kit
 mod aio::kit::markdown
@@ -4335,6 +4457,7 @@ mod aio::sha256
 mod aio::sync
 mod aio::tell
 mod aio::testing
+mod aio::testing::usb
 mod aio::time
 mod aio::tls
 mod aio::ui
@@ -4463,6 +4586,14 @@ struct aio::http::side::Closed
 struct aio::http::side::Frame
 struct aio::http::side::Frames
 struct aio::http::side::Seqs
+struct aio::hw::Control
+struct aio::hw::Device
+struct aio::hw::DeviceInfo
+struct aio::hw::Filter
+struct aio::hw::Id
+struct aio::hw::Interface
+struct aio::hw::InterfaceInfo
+struct aio::hw::Watch
 struct aio::ipc::Blocking
 struct aio::ipc::Listener
 struct aio::ipc::Only
@@ -4596,6 +4727,9 @@ struct aio::testing::TestIo
 struct aio::testing::TestPage<'a, T: Cell>
 struct aio::testing::TestServer<T: Cell>
 struct aio::testing::TestUi
+struct aio::testing::usb::Device
+struct aio::testing::usb::Io
+struct aio::testing::usb::Plugged
 struct aio::tls::Tls
 struct aio::ui::BrowserTab
 struct aio::ui::Eval
