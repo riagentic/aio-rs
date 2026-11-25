@@ -254,6 +254,14 @@ and how sure (`likely`: two probes agree; `possible`: one measured it;
 `speculative`). The way back is said as recovered. A frozen `loop` fails
 the `runtime` part, so health says degraded.
 
+A paint is timed from when its frame began: a display that draws seldom
+(a nested or virtual one, a window behind others) doesn't count. Under
+software rendering (no GPU: SwiftShader on a nested display, llvmpipe in
+a VM, as the page's WebGL renderer says) a paint waits on the CPU's GL,
+not the app: a slow one is said once at info (`[vitals] render under
+software rendering (no GPU): ...; not counted`), never graded, never a
+problem in the dev overlay.
+
 Every layer feeds one snapshot, so a hint sees them all at once: the
 loop each second, the worst link's round trip at each pong (and whether
 that link is on loopback), the window's paint at each step its probe

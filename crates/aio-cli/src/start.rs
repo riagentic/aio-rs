@@ -134,6 +134,20 @@ fn put_display(
     }
 }
 
+/// Move the access cookie of `n`, a display handed to the app, into the
+/// app's private `logs` (replaced at its next start): every X client the app
+/// starts later reads it (Chromium's GPU process connects after the window
+/// is up: without it, "Authorization required" and a GPU process that keeps
+/// failing), and the display, ending on its own, leaves no file behind.
+fn keep_cookie(n: &mut crate::display::Nested, logs: &Path) -> Result<(), String> {
+    let kept = logs.join("display.auth");
+    _ = std::fs::remove_file(&kept);
+    std::fs::copy(&n.auth, &kept).map_err(|e| format!("{}: {e}", kept.display()))?;
+    _ = std::fs::remove_file(&n.auth);
+    n.auth = kept;
+    Ok(())
+}
+
 /// Where the window goes for `asked` (`--display`, else `AIORT_DISPLAY`),
 /// as `ax dev` decides it; a nested display started for it comes along,
 /// handed to the app once it is up (it ends with its last window).
@@ -198,6 +212,7 @@ pub fn run(t: &crate::target::Target, bin: &Path, args: &[String], asked: Option
     if let Some(n) = nested.as_mut() {
         // No private bus: handed to the app, it would outlive it.
         n.bus = None;
+        keep_cookie(n, &plan.logs)?;
     }
     put_display(&mut cmd, display, nested.as_ref(), std::env::var("AIORT_ELECTRON_ARGS").ok().as_deref());
     let cdp = crate::cdp::open(&plan.logs, cdp)?;
@@ -240,11 +255,7 @@ pub fn run(t: &crate::target::Target, bin: &Path, args: &[String], asked: Option
             Some(Ok(line)) => {
                 rec["startedAt"] = health.as_ref().map_or(Value::Null, |h| h["startedAt"].clone());
                 _ = write(&rec);
-                // The app holds it now; it ends with its last window. Its cookie was
-                // read as the window connected, so it goes.
-                if let Some(n) = &nested {
-                    _ = std::fs::remove_file(&n.auth);
-                }
+                // The app holds it now; it ends with its last window.
                 std::mem::forget(nested);
                 let cdp = cdp.map_or(String::new(), |p| format!(" (DevTools protocol on 127.0.0.1:{p})"));
                 return Ok(format!("{name}: started in {took:.1} s: {line}{cdp}"));
@@ -458,6 +469,9 @@ mod tests {
         let Some(home) = std::env::args().next_back().map(PathBuf::from).filter(|h| h.join(FAKE).exists()) else {
             return;
         };
+        // Its window: connected before it is up, and held.
+        #[cfg(target_os = "linux")]
+        let _window = home.join(X11).exists().then(|| x_hello().expect("the window connects"));
         let _dirs = aio::paths::AppDirs::at(&home, "notes").unwrap();
         let now = now_ms();
         let doc = json!({
@@ -466,7 +480,103 @@ mod tests {
         });
         std::fs::write(home.join("data/health.json"), doc.to_string()).unwrap();
         println!("up");
+        #[cfg(target_os = "linux")]
+        if home.join(X11).exists() {
+            // An X client that connects once the start said up, as Chromium's GPU process does.
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            let up = || record(&home.join("logs")).is_some_and(|r| !r["startedAt"].is_null());
+            while !up() && std::time::Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            let said = match x_hello() {
+                Ok(_) => "in".to_string(),
+                Err(e) => format!("refused: {e}"),
+            };
+            std::fs::write(home.join(X11), said).unwrap();
+        }
         std::thread::sleep(Duration::from_secs(60));
+    }
+
+    /// An X connection to `DISPLAY` with the cookie in `XAUTHORITY` (none:
+    /// no cookie), as Xlib makes it: held open, or the server's refusal.
+    #[cfg(target_os = "linux")]
+    fn x_hello() -> Result<std::os::unix::net::UnixStream, String> {
+        use std::io::{Read, Write};
+        let d = std::env::var("DISPLAY").map_err(|e| e.to_string())?;
+        let n = d.trim_start_matches(':').split('.').next().unwrap_or_default().to_string();
+        // The first MIT-MAGIC-COOKIE-1 record (big-endian lengths) for display n.
+        let file = std::fs::read(std::env::var("XAUTHORITY").unwrap_or_default()).unwrap_or_default();
+        let (mut at, mut cookie) = (0, None);
+        let field = |at: &mut usize| -> Option<Vec<u8>> {
+            let len = u16::from_be_bytes(file.get(*at..*at + 2)?.try_into().ok()?) as usize;
+            let f = file.get(*at + 2..*at + 2 + len)?.to_vec();
+            *at += 2 + len;
+            Some(f)
+        };
+        while at + 2 <= file.len() && cookie.is_none() {
+            at += 2;
+            let f: Option<Vec<Vec<u8>>> = (0..4).map(|_| field(&mut at)).collect();
+            let Some(f) = f else { break };
+            cookie = (f[1] == n.as_bytes() && f[2] == b"MIT-MAGIC-COOKIE-1").then(|| f[3].clone());
+        }
+        let (name, data) = match &cookie {
+            Some(c) => (&b"MIT-MAGIC-COOKIE-1"[..], c.as_slice()),
+            None => (&b""[..], &b""[..]),
+        };
+        let pad = |v: &[u8]| [v, &[0u8; 3][..(4 - v.len() % 4) % 4]].concat();
+        let mut hello = vec![b'l', 0, 11, 0, 0, 0];
+        hello.extend((name.len() as u16).to_le_bytes());
+        hello.extend((data.len() as u16).to_le_bytes());
+        hello.extend([0, 0]);
+        hello.extend(pad(name));
+        hello.extend(pad(data));
+        let mut s =
+            std::os::unix::net::UnixStream::connect(format!("/tmp/.X11-unix/X{n}")).map_err(|e| e.to_string())?;
+        s.write_all(&hello).map_err(|e| e.to_string())?;
+        let mut head = [0u8; 8];
+        s.read_exact(&mut head).map_err(|e| e.to_string())?;
+        if head[0] == 1 {
+            return Ok(s);
+        }
+        let mut why = vec![0u8; head[1] as usize];
+        _ = s.read_exact(&mut why);
+        Err(String::from_utf8_lossy(&why).into_owned())
+    }
+
+    /// The stand-in app's X client probe: its result, written there.
+    #[cfg(target_os = "linux")]
+    const X11: &str = "x11-probe";
+
+    /// A display `ax start` made stays open to the app's later X clients.
+    /// Headless only (Xvfb; skipped with a desktop, where Xephyr would show).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_nested_display_lets_the_apps_later_x_clients_in() {
+        let on_path = |e: &str| std::env::split_paths(&std::env::var_os("PATH").unwrap()).any(|d| d.join(e).is_file());
+        if crate::display::desktop() || !on_path("Xvfb") {
+            return eprintln!("skipped: needs Xvfb, and no desktop");
+        }
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(t.path().join(FAKE), "").unwrap();
+        std::fs::write(t.path().join(X11), "").unwrap();
+        let p = plan(t.path());
+        let exe = std::env::current_exe().unwrap();
+        let args = s(&["start::tests::fake_app", "--nocapture", "--test-threads=1", &t.path().to_string_lossy()]);
+        run(&target_of(&p), &exe, &args, Some("isolated"), WAIT).unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(20);
+        let said = loop {
+            let said = std::fs::read_to_string(t.path().join(X11)).unwrap();
+            if !said.is_empty() || std::time::Instant::now() > end {
+                break said;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let target = crate::target::Target { name: "notes".into(), id: "notes".into(), plan: p.clone(), pkg: None };
+        crate::stop::one("notes", &target, true, Duration::ZERO).unwrap();
+        assert_eq!(said, "in", "a later X client of the app");
+        let cookie = std::fs::metadata(p.logs.join("display.auth")).unwrap();
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&cookie.permissions()) & 0o077, 0, "the user's alone");
     }
 
     #[cfg(unix)]

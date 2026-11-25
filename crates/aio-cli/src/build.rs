@@ -1144,6 +1144,11 @@ fn target(
         lines.extend(how);
         return Ok((lines.join("\n"), files));
     }
+    #[cfg(unix)]
+    if t.kind == Kind::Deb {
+        // Asked before the release build, not after it.
+        crate::package::maintainer(app_of(&crate::dev::locate(meta, name)?)?.1.app.maintainer.as_deref())?;
+    }
     let p = match t.kind {
         Kind::Android => {
             return android(&t.bin, crate::android::Ask::RELEASE);

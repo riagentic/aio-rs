@@ -392,8 +392,6 @@ pub struct New<'a> {
     pub template: &'a str,
     /// Its id (`--id`): its data's home.
     pub id: &'a str,
-    /// Its Debian maintainer, `Name <email>`.
-    pub maintainer: &'a str,
     pub aio: Aio,
     /// `--target a,b`: its `[build] targets`.
     pub targets: Vec<&'a str>,
@@ -404,15 +402,7 @@ pub struct New<'a> {
 impl<'a> New<'a> {
     /// The window app `name` on this ax's aio-rs, nothing else asked.
     pub fn of(name: &'a str) -> Self {
-        New {
-            name,
-            template: "app",
-            id: name,
-            maintainer: NO_MAINTAINER,
-            aio: Aio::this(),
-            targets: vec![],
-            tailwind: false,
-        }
+        New { name, template: "app", id: name, aio: Aio::this(), targets: vec![], tailwind: false }
     }
 }
 
@@ -654,6 +644,14 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# A CPU-heavy crate of your own (a parser, a simulator, a codec) runs 10-30x
+# slower unoptimized: optimize it even in debug builds. `dev` covers every
+# debug build ax makes (desktop-dev inherits it); release's "z" is for size.
+# [profile.dev.package.my-crate]
+# opt-level = 3
+# [profile.release.package.my-crate]
+# opt-level = 3
+
 # Every debug build ax makes: one copy of the libraries (ax dev, test, lint).
 # Its Rust runs as the release build's (no debug assertions, no overflow
 # checks): what you try under ax dev is what people get.
@@ -710,7 +708,6 @@ aio-shell = {{ package = "aio-rs-shell", {shell1}, default-features = false }}
         true => String::new(),
         false => format!("\n[build]\n{}\n", build.join("\n")),
     };
-    let maintainer = n.maintainer;
     let toml = format!(
         r#"# aio.toml: the app's one config file, with the settings to look at first.
 # Every setting and its default: {docs}/reference/aio-toml.md
@@ -721,7 +718,7 @@ mode = "{mode}"         # standalone | client-server | client | server | cli
 version = "0.1"         # major.minor: ax numbers builds from git (0.1.<commit count>)
 lang = "en"             # the page's language, <html lang>
 dir = "ltr"             # ltr | rtl | auto: the page's direction, never guessed from lang
-maintainer = "{maintainer}" # "Name <email>": the Debian package's (ax build --deb)
+# maintainer = "Name <email>" # the Debian package's: ax build --deb asks for it
 
 [history]
 keep = "90d"            # how long the event log keeps every step
@@ -918,19 +915,18 @@ pub fn git_init(app: &Path, identity: bool) -> String {
     }
 }
 
-/// The placeholder maintainer when git has no `user.name` and `user.email`.
-pub const NO_MAINTAINER: &str = "Your Name <you@example.org>";
-
-/// `Name <email>` from git's `user.name` and `user.email` (`dir`'s config,
-/// else the global one), when both are set and fit a TOML string as they are.
-pub fn git_maintainer(dir: &Path) -> Option<String> {
-    let get = |k: &str| {
-        let out = std::process::Command::new("git").arg("-C").arg(dir).args(["config", k]).output().ok()?;
-        let v = String::from_utf8(out.stdout).ok()?.trim().to_string();
-        (out.status.success() && !v.is_empty()).then_some(v)
+/// Whether git has a `user.name` and a `user.email` for `dir` (its config,
+/// else the global one). Never written into the app: a repo shares it.
+pub fn git_identity(dir: &Path) -> bool {
+    let set = |k: &str| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["config", k])
+            .output()
+            .is_ok_and(|o| o.status.success() && !o.stdout.trim_ascii().is_empty())
     };
-    let m = format!("{} <{}>", get("user.name")?, get("user.email")?);
-    (!m.chars().any(|c| c == '"' || c == '\\' || c.is_control())).then_some(m)
+    set("user.name") && set("user.email")
 }
 
 /// What to say when an app called `name` already keeps data in `data`
@@ -991,11 +987,12 @@ mod tests {
     fn each_template_writes_a_whole_app_with_its_config_valid() {
         let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
         for (t, _) in TEMPLATES {
-            let all = files(&New { template: t, maintainer: "A <a@example.org>", ..New::of("my-tool") }).unwrap();
+            let all = files(&New { template: t, ..New::of("my-tool") }).unwrap();
             let get = |p: &str| get(&all, p);
             let cfg = aio::config::Config::parse(get("aio.toml")).unwrap_or_else(|e| panic!("{t}: {e}"));
             assert_eq!((cfg.app.id.as_str(), cfg.app.name.as_str()), ("my-tool", "my-tool"));
-            assert_eq!(cfg.app.maintainer.as_deref(), Some("A <a@example.org>"), "ax build --deb works as created");
+            assert_eq!(cfg.app.maintainer, None, "no one's email in a file the repo shares: ax build --deb asks");
+            assert!(get("aio.toml").contains("# maintainer = \"Name <email>\""), "where to set it");
             let git = format!(r#"git = "https://github.com/riagentic/aio-rs", tag = "{tag}""#);
             assert!(get("Cargo.toml").contains(&format!(r#"aio = {{ package = "aio-rs", {git}"#)), "a release");
             assert!(
@@ -1020,6 +1017,12 @@ mod tests {
                 ),
                 "ax dev's profile"
             );
+            // The heavy-crate example, uncommented, is valid and in place.
+            let on = get("Cargo.toml").replace("# [profile.", "[profile.").replace("# opt-level = 3", "opt-level = 3");
+            let on: toml::Table = toml::from_str(&on).unwrap_or_else(|e| panic!("{t}: {e}"));
+            for p in ["dev", "release"] {
+                assert_eq!(on["profile"][p]["package"]["my-crate"]["opt-level"].as_integer(), Some(3), "{t} {p}");
+            }
             assert_eq!(get("CLAUDE.md"), "@AGENTS.md\n", "aio: every template's CLAUDE.md imports AGENTS.md");
             let docs = format!("https://github.com/riagentic/aio-rs/blob/{tag}/docs");
             for f in ["AGENTS.md", "README.md", "aio.toml"] {

@@ -302,7 +302,8 @@ builds, signs and publishes on a `v*` tag ([release](release.md#github-workflow)
 ## Common mistakes
 
 - Sizing with `cargo build --release`: use `ax build --sizes`.
-- `--deb` without `[app] maintainer`: refused, it names the key.
+- `--deb` without `[app] maintainer`, or with a placeholder (`example.org`,
+  `.invalid`): refused before the build, it names the key.
 - A `.dmg` from Linux: it needs a Mac (`[build.macos] host`).
 - Expecting `ax dev` to keep in-memory view state across a restart: a
   hot patch keeps it, a rebuild starts the views again (the cells'

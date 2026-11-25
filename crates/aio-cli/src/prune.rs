@@ -78,23 +78,40 @@ pub fn show(v: &[Decision], applied: bool) -> String {
     out.join("\n")
 }
 
-/// `ax prune [--yes] [--days N] [--keep a,b]` over the store `root`.
-pub fn run(root: &Path, args: &[&str], now: SystemTime) -> Out {
-    let value = |f: &str| args.iter().position(|a| *a == f).map(|i| args.get(i + 1).copied());
-    let days = match value("--days") {
-        None => DAYS,
-        Some(v) => v.and_then(|d| d.parse::<u64>().ok()).ok_or("--days takes a whole number of days, like --days 7")?,
-    };
-    let keep: Vec<&str> = value("--keep").flatten().map(|k| k.split(',').map(str::trim).collect()).unwrap_or_default();
-    let yes = args.iter().any(|a| *a == "--yes" || *a == "-y");
+/// `--days N` of `args` (pure): [`DAYS`] when not given.
+pub fn days(args: &[&str]) -> Result<u64, String> {
+    match args.iter().position(|a| *a == "--days").map(|i| args.get(i + 1)) {
+        None => Ok(DAYS),
+        Some(v) => v
+            .and_then(|d| d.parse::<u64>().ok())
+            .ok_or_else(|| "--days takes a whole number of days, like --days 7".into()),
+    }
+}
+
+/// The store `root`'s plan under the command's rules.
+fn judged(root: &Path, keep: &[&str], days: u64, now: SystemTime) -> Result<Vec<Decision>, String> {
     let plan = aio_shell::prune::plan(root, now).map_err(|e| format!("{}: {e}", root.display()))?;
-    let plan: Vec<Decision> = plan
+    Ok(plan
         .into_iter()
         .map(|d| {
             let stamped = d.path.join(aio_shell::runtime::USED).exists();
-            judge(d, stamped, &keep, days, now)
+            judge(d, stamped, keep, days, now)
         })
-        .collect();
+        .collect())
+}
+
+/// What `ax prune --yes` (`--days days`) would free of the store `root`.
+pub fn freed(root: &Path, days: u64, now: SystemTime) -> u64 {
+    judged(root, &[], days, now).map_or(0, |p| p.iter().filter(|d| !d.keep).map(|d| d.bytes).sum())
+}
+
+/// `ax prune [--yes] [--days N] [--keep a,b]` over the store `root`.
+pub fn run(root: &Path, args: &[&str], now: SystemTime) -> Out {
+    let value = |f: &str| args.iter().position(|a| *a == f).map(|i| args.get(i + 1).copied());
+    let days = days(args)?;
+    let keep: Vec<&str> = value("--keep").flatten().map(|k| k.split(',').map(str::trim).collect()).unwrap_or_default();
+    let yes = args.iter().any(|a| *a == "--yes" || *a == "-y");
+    let plan = judged(root, &keep, days, now)?;
     if !yes {
         return Ok(show(&plan, false));
     }
@@ -114,8 +131,9 @@ pub fn legacy(dir: &Path, yes: bool) -> Result<Option<String>, String> {
     }
     if !yes {
         return Ok(Some(format!(
-            "ax 0.2's build folder {} is unused (builds go to aio's cache home now): `ax prune --yes` removes it",
-            dir.display()
+            "ax 0.2's build folder {} ({}) is unused (builds go to aio's cache home now): `ax prune --yes` removes it",
+            dir.display(),
+            crate::places::human(crate::places::size(dir))
         )));
     }
     std::fs::remove_dir_all(dir).map_err(|e| format!("not removed: {}: {e}", dir.display()))?;
