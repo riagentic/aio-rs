@@ -1,6 +1,7 @@
 //! One cell's state over SQLite: the event log is the truth, snapshots make
 //! boot and time travel fast. Boot = the newest snapshot + the events after it.
 use crate::cx::{Asks, Plan};
+use crate::kind::{AnyCell, Kind, KindOf, St, own, unshared};
 use crate::{By, Cell, Cx, Inputs, Rejected, Result};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -27,7 +28,7 @@ mod shared;
 mod tx;
 use shared::{Db, Kept};
 pub(crate) use shared::{Hold, Member, Shared, Then, hold, release};
-pub(crate) use tx::On as TxOn;
+
 mod spare;
 
 /// One committed call.
@@ -154,7 +155,19 @@ impl From<rusqlite::Error> for Error {
 }
 
 pub struct Store<T: Cell> {
-    state: Arc<T>,
+    pub(crate) core: Core,
+    cell: std::marker::PhantomData<T>,
+}
+
+/// [`Core::tx_call`] ([`crate::kind::Tx`]).
+pub(crate) type TxCall =
+    fn(&mut Core, crate::Transaction, &By, &str, Value, Cx, crate::answer::Reply, Option<&str>) -> Result<Value>;
+
+/// A store as the runtime keeps it, its cell's type erased ([`crate::kind`]):
+/// [`Store`] is its typed face.
+pub(crate) struct Core {
+    kind: &'static Kind,
+    state: St,
     seq: u64,
     /// Its connection, and its file's shared one.
     db: Db,
@@ -169,7 +182,7 @@ pub struct Store<T: Cell> {
     /// to yet; `None`: nobody listens.
     to_react: Option<Vec<Event>>,
     /// The joint commit it last wrote in, and the store as it was before.
-    mark: Option<(u64, Mark<T>)>,
+    mark: Option<(u64, Mark)>,
     /// The file and its identity at open: a commit checks it is still there
     /// (D5: on Unix a deleted file takes writes silently, then they're lost).
     file: Option<(std::path::PathBuf, FileId)>,
@@ -189,12 +202,12 @@ pub struct Store<T: Cell> {
     /// (the state's copy, the method, its invariants), for time travel.
     took: std::collections::VecDeque<(u64, std::time::Duration)>,
     /// A run of `#[coalesce]` calls in the state but not yet in the log.
-    held: Option<Held<T>>,
+    held: Option<Held>,
     /// What is saved of the committed state, kept from its commit so the
     /// next one needn't serialize it again; `None`: not known.
     saved: Option<Value>,
     /// The next call's copy of the state, made ahead when copying is slow.
-    spare: spare::Spare<T>,
+    spare: spare::Spare,
     /// `[history] keep` in ms: events older are folded (`keep_history`).
     keep: Option<i64>,
     /// How long a run of `#[coalesce]` calls is held (`[data] coalesce`).
@@ -210,7 +223,7 @@ pub struct Store<T: Cell> {
     /// Why its log no longer replays ([`Store::quarantined`]).
     quarantined: Option<String>,
     /// `#[cell(transaction)]`: its async calls in flight.
-    txs: tx::Txs<T>,
+    txs: tx::Txs,
     /// Synced clients' calls their method or the invariants refused, by
     /// `op`, newest last ([`REFUSED_OPS`]): a re-send is refused the same,
     /// never applied on a later state.
@@ -224,42 +237,42 @@ const REFUSED_OPS: usize = 4_096;
 /// run's one event when it alone ends where the run did), the state before
 /// the run, and when the run began.
 #[derive(Clone)]
-struct Held<T> {
+struct Held {
     by: By,
     /// Each call's method, arguments and time, in order.
     calls: Vec<(String, Value, i64)>,
-    base: Arc<T>,
+    base: St,
     since: std::time::Instant,
 }
 
 /// A held run as its flush weighs it ([`Store::due`]).
-pub(crate) struct Run<T> {
+pub(crate) struct Run {
     by: By,
     calls: Vec<(String, Value, i64)>,
-    base: Arc<T>,
-    now: Arc<T>,
+    base: St,
+    now: St,
 }
 
 /// What a flush needs of a run: whether it ends where it began (`same`:
 /// nothing to log), and whether its last call alone makes it (`alone`: one
 /// event). The costly part of a flush (a copy, the call again, two
 /// comparisons of the whole state), worked out on the run's own states.
-pub(crate) struct Weighed<T> {
+pub(crate) struct Weighed {
     calls: usize,
-    now: Arc<T>,
+    now: St,
     same: bool,
     alone: bool,
 }
 
-impl<T: Cell> Run<T> {
+impl Run {
     /// Weigh it (pure; off the store's lock: a key held meanwhile goes on).
-    pub(crate) fn weigh(self) -> Weighed<T> {
-        let same = *self.now == *self.base;
+    pub(crate) fn weigh(self) -> Weighed {
+        let same = self.now.same(&*self.base);
         let alone = !same && {
             let (method, args, at) = self.calls.last().expect("a run has a call");
             self.calls.iter().all(|c| c.0 == *method) && {
-                let mut st = (*self.base).clone();
-                apply_guarded(&mut st, &Cx::live(*at, &self.by), method, args.clone()).is_ok() && st == *self.now
+                let mut st = self.base.dup();
+                apply_guarded(own(&mut st), &Cx::live(*at, &self.by), method, args.clone()).is_ok() && st.same(&*self.now)
             }
         };
         Weighed { calls: self.calls.len(), now: self.now, same, alone }
@@ -267,15 +280,15 @@ impl<T: Cell> Run<T> {
 }
 
 /// A store as a joint commit found it ([`Store::mark`]).
-pub(crate) struct Mark<T> {
-    state: Arc<T>,
+pub(crate) struct Mark {
+    state: St,
     seq: u64,
     unsnapped: u32,
     effects: usize,
     foreign: usize,
     committed: usize,
     to_react: usize,
-    held: Option<Held<T>>,
+    held: Option<Held>,
     journal_wm: Option<i64>,
 }
 
@@ -717,6 +730,7 @@ fn open(
     version: u32,
     tables: &[crate::compat::data::Bound],
     slices: &[crate::compat::data::Slice],
+    code: Option<crate::kind::BoundCode>,
 ) -> Result<Opened, Error> {
     crate::paths::guard(path).map_err(|e| Error(e.to_string()))?;
     // This build reads this cell's data: part of its contract.
@@ -739,8 +753,10 @@ fn open(
     if aio_kv.is_some() {
         ours(&db, true)?;
         db.execute_batch(crate::compat::data::KV_TABLE)?;
-        let own = tables.iter().map(|t| (id, t));
-        declare(&db, own.chain(slices.iter().flat_map(|s| s.tables.iter().map(|t| (s.cell, t)))))?;
+        if let Some(code) = code {
+            let own = tables.iter().map(|t| (id, t));
+            (code.declare)(&db, &own.chain(slices.iter().flat_map(|s| s.tables.iter().map(|t| (s.cell, t)))).collect::<Vec<_>>())?;
+        }
     }
     // One cell, aio's: its slice; many (`#[aio_cell]` fields): each slice by field,
     // at this version, the first older one naming the backup.
@@ -768,11 +784,8 @@ fn open(
 
 /// Bound tables `(cell, binding)` made or brought to their declared shape
 /// (aio's `initSchema`); never one of aio-rs's own tables.
-fn declare<'a>(
-    db: &Connection,
-    tables: impl Iterator<Item = (&'a str, &'a crate::compat::data::Bound)>,
-) -> Result<(), Error> {
-    for (cell, &(field, table, _, cols)) in tables {
+pub(crate) fn declare(db: &Connection, tables: &[(&str, &crate::compat::data::Bound)]) -> Result<(), Error> {
+    for &(cell, &(field, table, _, cols)) in tables {
         if TABLES.contains(&table) {
             return Err(Error(format!("{cell}.{field}: table {table} is aio-rs's own; bind the field to another")));
         }
@@ -786,13 +799,13 @@ fn declare<'a>(
 
 /// aio-rs's own file, set up: cell `id`'s bound tables declared, and their rows
 /// by field (changed by the app's own SQL, they come in as aio's changes do).
-fn bind(
+pub(crate) fn bind(
     db: &Connection,
     id: &str,
     version: u32,
     tables: &[crate::compat::data::Bound],
 ) -> Result<Option<(Value, u32)>, Error> {
-    declare(db, tables.iter().map(|t| (id, t)))?;
+    declare(db, &tables.iter().map(|t| (id, t)).collect::<Vec<_>>())?;
     let got = crate::compat::data::bound(db, tables).map_err(Error)?;
     Ok((!got.is_empty()).then_some((Value::Object(got), version)))
 }
@@ -826,15 +839,15 @@ fn newest(db: &Connection, path: &Path, id: &str, version: u32, aio_file: bool) 
 /// A cell of `#[aio_cell]` fields may retire its own id: aio's slice of that
 /// name (an earlier build's, before it read aio's cells by field) and its
 /// stamp go, its own history here stays.
-fn retire<T: Cell>(db: &Kept, kv: Option<&crate::compat::data::Kv>) -> Result<(), Error> {
-    if T::RETIRED.is_empty() {
+fn retire(k: &Kind, db: &Kept, kv: Option<&crate::compat::data::Kv>) -> Result<(), Error> {
+    if k.retired.is_empty() {
         return Ok(());
     }
-    let reads = |c: &str| (c == T::ID && T::AIO_CELLS.is_empty()) || T::AIO_CELLS.iter().any(|s| s.cell == c);
-    if let Some(c) = T::RETIRED.iter().find(|c| reads(c)) {
-        return Err(Error(format!("{}: it retires cell {c}, which it still reads", T::ID)));
+    let reads = |c: &str| (c == k.id && k.aio_cells.is_empty()) || k.aio_cells.iter().any(|s| s.cell == c);
+    if let Some(c) = k.retired.iter().find(|c| reads(c)) {
+        return Err(Error(format!("{}: it retires cell {c}, which it still reads", k.id)));
     }
-    erase(db, kv, T::RETIRED, T::ID).map(|_| ())
+    erase(db, kv, k.retired, k.id).map(|_| ())
 }
 
 /// The history of `cells` gone from the file (and, in an aio file, their
@@ -860,15 +873,16 @@ fn erase(db: &Kept, kv: Option<&crate::compat::data::Kv>, cells: &[&str], own: &
     Ok(gone)
 }
 
-/// The journal beside aio's file at `path` past its watermark, as cell `T`
+/// The journal beside aio's file at `path` past its watermark, as cell `k`
 /// replays it ([`crate::compat::data::journal_tail`]).
-fn journal_tail<T: Cell>(
+fn journal_tail(
+    k: &Kind,
     db: &Connection,
     kv: &crate::compat::data::Kv,
     path: &Path,
 ) -> Result<Vec<crate::compat::data::Journaled>, Error> {
     let wm = kv.journal_wm(db).map_err(Error)?;
-    crate::compat::data::journal_tail::<T>(&crate::compat::data::journal_of(path), wm).map_err(|e| {
+    crate::compat::data::journal_tail(k, &crate::compat::data::journal_of(path), wm).map_err(|e| {
         Error(format!(
             "{}: {e}: start the aio app once and stop it (it folds its journal into the snapshot), then open it here",
             crate::paths::parent(path).display()
@@ -877,34 +891,33 @@ fn journal_tail<T: Cell>(
 }
 
 /// Saved state of version `v` as this version of the cell.
-fn decode<T: Cell>(text: &str, v: u32) -> Result<T, Error> {
-    let mut old: Value = serde_json::from_str(text).map_err(|e| Error(format!("{}: corrupt snapshot: {e}", T::ID)))?;
+fn decode(k: &Kind, text: &str, v: u32) -> Result<St, Error> {
+    let mut old: Value = serde_json::from_str(text).map_err(|e| Error(format!("{}: corrupt snapshot: {e}", k.id)))?;
     // Written by an older build that booted on this data ([`DOWNGRADED`]).
     let downgraded = old.as_object_mut().and_then(|m| m.remove(DOWNGRADED));
     // A newer build's data (a rollback): what this build declares, read as it
     // is; the rest is kept by every write (`Store::ahead`, aio's downgrade).
-    if v > T::VERSION {
-        return serde_json::from_value(old).map_err(|e| {
+    if v > k.version {
+        return (k.from_json)(old).map_err(|e| {
             Error(format!(
                 "{}: data from a newer build (v{v} > v{}) doesn't fit this build: {e}; run the newer build, or give this one a version past v{v} with a `migrate` that converts it down",
-                T::ID,
-                T::VERSION
+                k.id,
+                k.version
             ))
         });
     }
-    if v == T::VERSION {
-        let st: T = serde_json::from_value(old.clone())
-            .map_err(|e| Error(format!("{}: snapshot doesn't fit v{v}: {e}", T::ID)))?;
+    if v == k.version {
+        let st = (k.from_json)(old.clone()).map_err(|e| Error(format!("{}: snapshot doesn't fit v{v}: {e}", k.id)))?;
         // D9: data this build doesn't declare would be dropped by the next
         // snapshot. Never silently: refuse, and say what and how to fix it.
-        let now = serde_json::to_value(&st).map_err(|e| Error(format!("{}: unserializable state: {e}", T::ID)))?;
+        let now = st.to_json().map_err(|e| Error(format!("{}: unserializable state: {e}", k.id)))?;
         let lost = undeclared(&old, &now);
         // Back from a rollback (aio's roll-forward): the older build's own
         // fields go, as aio's restore merge drops them, said; the rest is ours.
         if !lost.is_empty() && downgraded.is_some() {
             eprintln!(
                 "[aio] {}: an older build ran on this data and wrote fields this build doesn't declare ({}); they are dropped, as aio drops them",
-                T::ID,
+                k.id,
                 lost.join(", ")
             );
             return Ok(st);
@@ -912,13 +925,13 @@ fn decode<T: Cell>(text: &str, v: u32) -> Result<T, Error> {
         if !lost.is_empty() {
             return Err(Error(format!(
                 "{}: the saved data has fields this build doesn't declare ({}); declare them again, or bump the cell's version with a `migrate` that drops them on purpose",
-                T::ID,
+                k.id,
                 lost.join(", ")
             )));
         }
         return Ok(st);
     }
-    T::migrate(old, v).map_err(|e| Error(format!("{}: migrate from v{v} failed: {e}", T::ID)))
+    (k.migrate)(old, v).map_err(|e| Error(format!("{}: migrate from v{v} failed: {e}", k.id)))
 }
 
 /// The key a snapshot written by an older build booted on newer data
@@ -929,15 +942,15 @@ pub(crate) const DOWNGRADED: &str = "__downgraded";
 /// The file's data (saved by version `v`) as this cell: its aio slice
 /// (`whole`), or only some fields (`#[aio_cell]` slices, bound tables' rows) over
 /// `st`, its other fields kept.
-fn adopt<T: Cell>(st: &T, slice: &Value, v: u32, whole: bool) -> Result<T, Error> {
+fn adopt(st: &dyn AnyCell, slice: &Value, v: u32, whole: bool) -> Result<St, Error> {
     if whole {
-        return decode(&slice.to_string(), v);
+        return decode(st.kind(), &slice.to_string(), v);
     }
     let mut all = json(st)?;
     if let (Some(m), Some(s)) = (all.as_object_mut(), slice.as_object()) {
         m.extend(s.clone());
     }
-    decode(&all.to_string(), v)
+    decode(st.kind(), &all.to_string(), v)
 }
 
 /// Paths in `old` that `new` (the same data decoded and encoded again) lost.
@@ -966,8 +979,8 @@ fn undeclared(old: &Value, new: &Value) -> Vec<String> {
         .collect()
 }
 
-fn json<T: Cell>(st: &T) -> Result<Value, Error> {
-    serde_json::to_value(st).map_err(|e| Error(format!("{}: unserializable state: {e}", T::ID)))
+fn json(st: &dyn AnyCell) -> Result<Value, Error> {
+    st.to_json().map_err(|e| Error(format!("{}: unserializable state: {e}", st.kind().id)))
 }
 
 /// `v` with each value replaced by its JSON type (`"string"`, `"number"`,
@@ -986,14 +999,15 @@ pub fn shape_of(v: &Value) -> Value {
 /// What is saved of `st` when its cell shapes it: `save` applied, the
 /// `#[transient]` fields left out; `None`: all of it, as is. A panicking
 /// `save` saves nothing: never a write that quietly didn't happen.
-fn shaped<T: Cell>(st: &T) -> Result<Option<Value>, Error> {
+fn shaped(st: &dyn AnyCell) -> Result<Option<Value>, Error> {
+    let k = st.kind();
     let saved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| st.save()))
-        .map_err(|_| Error(format!("{}: its `save` panicked; nothing was saved", T::ID)))?;
-    if saved.is_none() && filters::<T>().next().is_none() {
+        .map_err(|_| Error(format!("{}: its `save` panicked; nothing was saved", k.id)))?;
+    if saved.is_none() && filters(k).next().is_none() {
         return Ok(None);
     }
-    let mut v = json(saved.as_ref().unwrap_or(st))?;
-    unsaved_out::<T>(&mut v);
+    let mut v = json(saved.as_deref().unwrap_or(st))?;
+    unsaved_out(k, &mut v);
     Ok(Some(v))
 }
 
@@ -1005,18 +1019,15 @@ fn shaped<T: Cell>(st: &T) -> Result<Option<Value>, Error> {
 /// `Err(prev)`: the cell's shape needs the whole (its `save`, a
 /// `persist(include)` of its own), or a slice did not serialize.
 #[allow(clippy::type_complexity)]
-fn quick_saved<T: Cell>(
-    next: &T,
-    was: &T,
-    mut prev: Value,
-) -> std::result::Result<Quick, Value> {
-    if !T::PERSIST_INCLUDE.is_empty() || !prev.is_object() || next.save().is_some() {
+fn quick_saved(next: &dyn AnyCell, was: &dyn AnyCell, mut prev: Value) -> std::result::Result<Quick, Value> {
+    let k = next.kind();
+    if !k.persist_include.is_empty() || !prev.is_object() || next.save().is_some() {
         return Err(prev);
     }
     let mask = next.changed_fields(was);
-    let changed = |name: &str| T::FIELDS.iter().position(|f| f.name == name).is_none_or(|i| mask & (1 << i.min(63)) != 0);
+    let changed = |name: &str| k.fields.iter().position(|f| f.name == name).is_none_or(|i| mask & (1 << i.min(63)) != 0);
     let mut news = vec![];
-    for s in T::AIO_CELLS.iter().filter(|s| changed(s.field)) {
+    for s in k.aio_cells.iter().filter(|s| changed(s.field)) {
         let Some(Ok(mut v)) = next.slice_json(s.field) else { return Err(prev) };
         let f = crate::filter::Filter { include: s.include, exclude: s.transient };
         if !f.is_all() {
@@ -1027,7 +1038,7 @@ fn quick_saved<T: Cell>(
     let Some(m) = prev.as_object_mut() else { return Err(prev) };
     let was = news.into_iter().map(|(s, v)| (s, m.insert(s.field.into(), v))).collect();
     // Its own paths left out (`#[transient]`, `persist(exclude)`), into the new slices too.
-    let own = crate::filter::Filter { include: &[], exclude: T::TRANSIENT };
+    let own = crate::filter::Filter { include: &[], exclude: k.transient };
     if !own.is_all() {
         crate::filter::strip(&mut prev, own);
     }
@@ -1036,9 +1047,9 @@ fn quick_saved<T: Cell>(
 
 /// What it doesn't save (`#[transient]`, `persist(include, exclude)`): the
 /// cell's own (`None`) and its `#[aio_cell]` slices' (`Some(field)`).
-fn filters<T: Cell>() -> impl Iterator<Item = (Option<&'static str>, crate::filter::Filter)> {
-    let own = crate::filter::Filter { include: T::PERSIST_INCLUDE, exclude: T::TRANSIENT };
-    let slices = T::AIO_CELLS.iter().map(|s| (Some(s.field), crate::filter::Filter { include: s.include, exclude: s.transient }));
+fn filters(k: &'static Kind) -> impl Iterator<Item = (Option<&'static str>, crate::filter::Filter)> {
+    let own = crate::filter::Filter { include: k.persist_include, exclude: k.transient };
+    let slices = k.aio_cells.iter().map(|s| (Some(s.field), crate::filter::Filter { include: s.include, exclude: s.transient }));
     std::iter::once((None, own)).chain(slices).filter(|(_, f)| !f.is_all())
 }
 
@@ -1051,8 +1062,8 @@ fn part<'a>(v: &'a mut Value, at: Option<&str>) -> Option<&'a mut Value> {
 }
 
 /// `v` without what it doesn't save.
-fn unsaved_out<T: Cell>(v: &mut Value) {
-    for (at, f) in filters::<T>() {
+fn unsaved_out(k: &'static Kind, v: &mut Value) {
+    for (at, f) in filters(k) {
         if let Some(p) = part(v, at) {
             crate::filter::strip(p, f);
         }
@@ -1060,8 +1071,8 @@ fn unsaved_out<T: Cell>(v: &mut Value) {
 }
 
 /// `v` (saved) with what it doesn't save taken from `was` (a state).
-fn unsaved_from<T: Cell>(v: &mut Value, was: &Value) {
-    for (at, f) in filters::<T>() {
+fn unsaved_from(k: &'static Kind, v: &mut Value, was: &Value) {
+    for (at, f) in filters(k) {
         let from = at.map_or(Some(was), |a| was.get(a));
         if let (Some(p), Some(from)) = (part(v, at), from) {
             *p = crate::filter::graft(p, from, f);
@@ -1075,60 +1086,61 @@ fn unsaved_from<T: Cell>(v: &mut Value, was: &Value) {
 /// abort the process): its `#[transient]` fields are still left out, and a
 /// cell with `visible` keeps its state to itself. Its `#[server]` fields
 /// are left out: a report may leave the machine.
-pub(crate) fn reported<T: Cell>(st: &T) -> Option<Value> {
+pub(crate) fn reported(st: &dyn AnyCell) -> Option<Value> {
+    let k = st.kind();
     let v = match std::thread::panicking() {
         false => shaped(st).ok()?.or_else(|| json(st).ok())?,
-        true if crate::screened::<T>() => return None,
+        true if crate::kind::screened(k) => return None,
         true => json(st).ok()?,
     };
     // Screened by `visible` as a client with the key sees it (aio's), which
     // leaves out the `#[server]` fields too.
-    let saved = (!std::thread::panicking()).then(|| serde_json::from_value::<T>(v.clone()).ok()).flatten();
+    let saved = (!std::thread::panicking()).then(|| (k.from_json)(v.clone()).ok()).flatten();
     let mut v = match saved {
-        Some(saved) => crate::shown(&saved, &crate::Caller::default()),
+        Some(saved) => crate::kind::shown(&*saved, &crate::Caller::default()),
         None => {
             let mut v = v;
             if let Some(m) = v.as_object_mut() {
-                T::SERVER.iter().for_each(|k| _ = m.remove(*k));
+                k.server.iter().for_each(|k| _ = m.remove(*k));
             }
             v
         }
     };
-    unsaved_out::<T>(&mut v);
+    unsaved_out(k, &mut v);
     Some(v)
 }
 
 /// `st` as the debug log may show it: without its `#[server]` fields.
-fn logged<T: Cell>(st: &T) -> Result<Value, Error> {
+fn logged(st: &dyn AnyCell) -> Result<Value, Error> {
     let mut v = json(st)?;
     if let Some(m) = v.as_object_mut() {
-        T::SERVER.iter().for_each(|k| _ = m.remove(*k));
+        st.kind().server.iter().for_each(|k| _ = m.remove(*k));
     }
     Ok(v)
 }
 
-fn unshaped<T: Cell>(v: Value) -> Result<T, Error> {
-    serde_json::from_value(v).map_err(|e| Error(format!("{}: its saved shape doesn't fit: {e}", T::ID)))
+fn unshaped(k: &Kind, v: Value) -> Result<St, Error> {
+    (k.from_json)(v).map_err(|e| Error(format!("{}: its saved shape doesn't fit: {e}", k.id)))
 }
 
 /// A snapshot of `st`: what is saved of it. `exact`: only when it brings
 /// `st` back whole (`None` otherwise), so events after it replay on the
 /// state they ran on. The close's snapshot needn't be: the next boot starts
 /// from it, so it is what the next events ran on.
-fn snapshot<T: Cell>(st: &T, exact: bool) -> Result<Option<String>, Error> {
+fn snapshot(st: &dyn AnyCell, exact: bool) -> Result<Option<String>, Error> {
     Ok(match shaped(st)? {
         None => Some(json(st)?.to_string()),
-        Some(v) if !exact || unshaped::<T>(v.clone())? == *st => Some(v.to_string()),
+        Some(v) if !exact || unshaped(st.kind(), v.clone())?.same(st) => Some(v.to_string()),
         Some(_) => None,
     })
 }
 
 /// `st` repaired by its cell's `restore`. A panicking repair is reported and
 /// `st` stands: a failed repair must not cost the app its boot.
-fn repaired<T: Cell>(st: T) -> T {
+fn repaired(st: St) -> St {
     let keep = st.clone();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| st.restore())).unwrap_or_else(|_| {
-        eprintln!("[aio] {}: `restore` panicked; the state stays as saved", T::ID);
+        eprintln!("[aio] {}: `restore` panicked; the state stays as saved", keep.kind().id);
         keep
     })
 }
@@ -1136,13 +1148,13 @@ fn repaired<T: Cell>(st: T) -> T {
 /// `st` as it comes back from storage (every boot): what is saved of it,
 /// repaired. However the app stopped, it comes back the same. A `save` that
 /// panics is reported and `st` boots as it is: the log still holds it all.
-fn restored<T: Cell>(st: &T) -> Result<T, Error> {
-    Ok(repaired(match shaped(st) {
-        Ok(Some(v)) => unshaped(v)?,
-        Ok(None) => st.clone(),
+fn restored(st: &St) -> Result<St, Error> {
+    Ok(repaired(match shaped(&**st) {
+        Ok(Some(v)) => unshaped(st.kind(), v)?,
+        Ok(None) => st.dup(),
         Err(e) => {
             eprintln!("[aio] {e}; the state boots as it is");
-            st.clone()
+            st.dup()
         }
     }))
 }
@@ -1154,19 +1166,14 @@ pub(crate) enum Applied {
 
 /// `st.apply(…)`, with a panic caught: the caller gets it as a value,
 /// and `st` (a copy the caller drops on error) is never kept half-done.
-pub(crate) fn apply_guarded<T: Cell>(st: &mut T, cx: &Cx, method: &str, args: Value) -> Result<Value, Applied> {
+pub(crate) fn apply_guarded(st: &mut dyn AnyCell, cx: &Cx, method: &str, args: Value) -> Result<Value, Applied> {
+    let id = st.kind().id;
     // Its state machine first: refused here, or moved to where it is going.
     st.advance(method).map_err(Applied::Refused)?;
     // In `ax dev`, through the hot-patch jump table: an edited method runs
     // its new code at once (a release build calls it directly).
-    let run = || {
-        // `ax dev`'s hot-patch: with no patch applied, the function itself.
-        #[cfg(feature = "dev")]
-        return aio_hotpatch::HotFn::current(<T as Cell>::apply).call((st, cx, method, args));
-        #[cfg(not(feature = "dev"))]
-        st.apply(cx, method, args)
-    };
-    let run = || crate::report::during(|| format!("{}.{method}", T::ID), run);
+    let run = || st.apply(cx, method, args);
+    let run = || crate::report::during(|| format!("{id}.{method}"), run);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
         Ok(r) => r.map_err(Applied::Refused),
         Err(p) => Err(Applied::Panicked(
@@ -1191,22 +1198,28 @@ impl From<Applied> for Rejected {
 /// replays and how a synced copy follows its server. The event must commit
 /// again with the same inputs, or the log and the code disagree.
 pub fn apply_event<T: Cell>(st: &T, ev: &Event) -> Result<T, String> {
+    replayed(st, ev).map(|st| Arc::unwrap_or_clone(crate::kind::typed(st)))
+}
+
+/// [`apply_event`], its cell's type erased.
+pub(crate) fn replayed(st: &dyn AnyCell, ev: &Event) -> Result<St, String> {
+    let k = st.kind();
     if let Some(made) = made(&ev.args) {
         return unredacted(st, made, ev.v);
     }
     if ev.method == REWIND {
-        return decode(&ev.args["state"].to_string(), ev.v).map(repaired).map_err(|e| e.0);
+        return decode(k, &ev.args["state"].to_string(), ev.v).map(repaired).map_err(|e| e.0);
     }
-    if ev.v != T::VERSION {
+    if ev.v != k.version {
         // Old code wrote it; new code may compute something else.
-        return Err(format!("it is from v{}, before the upgrade to v{}", ev.v, T::VERSION));
+        return Err(format!("it is from v{}, before the upgrade to v{}", ev.v, k.version));
     }
     if ev.method == RESTORE {
-        return restored(st).map_err(|e| e.0);
+        return restored(&st.dup()).map_err(|e| e.0);
     }
     let cx = Cx::replay(ev.at, ev.inputs.clone(), &ev.by);
-    let mut next = st.clone();
-    apply_guarded(&mut next, &cx, &ev.method, ev.args.clone())
+    let mut next = st.dup();
+    apply_guarded(own(&mut next), &cx, &ev.method, ev.args.clone())
         .map_err(Rejected::from)
         .and_then(|_| next.check())
         .map_err(|e| format!("refused: {e}"))?;
@@ -1218,17 +1231,17 @@ pub fn apply_event<T: Cell>(st: &T, ev: &Event) -> Result<T, String> {
 
 /// A cell's machine fits its methods and every state is reachable (else no
 /// store opens); a state with no way out is said.
-pub(crate) fn machine_ok<T: Cell>() -> Result<(), Error> {
-    let bad = T::machine_errors(T::METHODS);
+pub(crate) fn machine_ok(k: &Kind) -> Result<(), Error> {
+    let bad = (k.machine_errors)(k.methods);
     if !bad.is_empty() {
-        return Err(Error(format!("{}: its machine is wrong: {}", T::ID, bad.join("; "))));
+        return Err(Error(format!("{}: its machine is wrong: {}", k.id, bad.join("; "))));
     }
     static SAID: std::sync::Mutex<Vec<&str>> = std::sync::Mutex::new(Vec::new());
-    let ends = T::machine_ends();
+    let ends = (k.machine_ends)();
     let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
-    if !ends.is_empty() && !said.contains(&T::ID) {
-        said.push(T::ID);
-        eprintln!("[aio] {}: its machine can't leave {} (an end state?)", T::ID, ends.join(", "));
+    if !ends.is_empty() && !said.contains(&k.id) {
+        said.push(k.id);
+        eprintln!("[aio] {}: its machine can't leave {} (an end state?)", k.id, ends.join(", "));
     }
     Ok(())
 }
@@ -1236,20 +1249,21 @@ pub(crate) fn machine_ok<T: Cell>() -> Result<(), Error> {
 /// What a `#[redact]` method's event keeps instead of its arguments: the
 /// state it left, without its `#[transient]` fields, which it may therefore
 /// not change (replay could not bring them back). `None`: not redacted.
-fn redacted<T: Cell>(method: &str, before: &T, after: &T) -> Result<Option<Value>> {
+fn redacted(method: &str, before: &dyn AnyCell, after: &dyn AnyCell) -> Result<Option<Value>> {
+    let k = after.kind();
     // An async method's steps (`unlock.1`) carry what it awaited: theirs too.
-    if !T::redacts(method) {
+    if !(k.redacts)(method) {
         return Ok(None);
     }
-    let (was, left) = (crate::json(before)?, crate::json(after)?);
+    let (was, left) = (crate::kind::json(before)?, crate::kind::json(after)?);
     let mut kept = left.clone();
-    unsaved_out::<T>(&mut kept);
+    unsaved_out(k, &mut kept);
     let mut back = kept.clone();
-    unsaved_from::<T>(&mut back, &was);
+    unsaved_from(k, &mut back, &was);
     crate::ensure!(
         back == left,
         "{}.{method} is #[redact] and can't change what isn't saved (#[transient], persist(include, exclude)): its arguments aren't kept, so replay couldn't bring it back",
-        T::ID
+        k.id
     );
     Ok(Some(serde_json::json!({ REDACTED: kept })))
 }
@@ -1262,11 +1276,12 @@ fn made(args: &Value) -> Option<&Value> {
 
 /// A `#[redact]` event replayed: the state it left, with the `#[transient]`
 /// fields it could not change.
-fn unredacted<T: Cell>(st: &T, made: &Value, v: u32) -> Result<T, String> {
-    let left: T = decode(&made.to_string(), v).map_err(|e| e.0)?;
-    let (mut v, was) = (json(&left).map_err(|e| e.0)?, json(st).map_err(|e| e.0)?);
-    unsaved_from::<T>(&mut v, &was);
-    unshaped(v).map_err(|e| e.0)
+fn unredacted(st: &dyn AnyCell, made: &Value, v: u32) -> Result<St, String> {
+    let k = st.kind();
+    let left = decode(k, &made.to_string(), v).map_err(|e| e.0)?;
+    let (mut v, was) = (json(&*left).map_err(|e| e.0)?, json(st).map_err(|e| e.0)?);
+    unsaved_from(k, &mut v, &was);
+    unshaped(k, v).map_err(|e| e.0)
 }
 
 /// Apply the log's events `from..=to` to `st`. Each must commit again
@@ -1274,12 +1289,13 @@ fn unredacted<T: Cell>(st: &T, made: &Value, v: u32) -> Result<T, String> {
 /// (boot after a version bump): events an older build wrote after its last
 /// snapshot (a crash left them unsnapped) run with this build's code on the
 /// migrated state; one that no longer applies refuses the boot (D10).
-fn replay<T: Cell>(db: &Connection, st: &mut T, from: u64, to: u64, upgrading: bool) -> Result<(), Error> {
-    read_log(db, T::ID, T::VERSION, from, to, upgrading, &mut |ev, older| {
-        *st = apply_event(st, &ev).map_err(|e| match older {
+fn replay(db: &Connection, st: &mut St, from: u64, to: u64, upgrading: bool) -> Result<(), Error> {
+    let k = st.kind();
+    read_log(db, k.id, k.version, from, to, upgrading, &mut |ev, older| {
+        *st = replayed(&**st, &ev).map_err(|e| match older {
             Some(v) => format!(
                 "written by v{v}, it doesn't apply to v{}: {e}; open the data once with the v{v} build to finish its log, then upgrade",
-                T::VERSION
+                k.version
             ),
             None => e,
         })?;
@@ -1332,19 +1348,236 @@ fn read_log(
 impl<T: Cell> Store<T> {
     /// A store kept in memory only: for tests and cells without `persist`.
     pub fn memory() -> Self {
-        Self::with(T::default())
+        Self::of(Core::memory(T::KIND))
     }
 
     /// An in-memory store starting from `state`.
     pub fn with(state: T) -> Self {
+        Self::of(Core::with(Arc::new(state)))
+    }
+
+    #[cfg(feature = "testing")]
+    /// A memory store booted from data saved by version `v` of the cell,
+    /// as `open` boots it: refused when it doesn't fit (D9, D10), else
+    /// migrated and restored (`#[transient]` fields back to their defaults,
+    /// `restore` run). For tests (`TestCells::saved`).
+    pub(crate) fn from_saved(text: &str, v: u32) -> Result<Self, Error> {
+        Ok(Self::of(Core::with(restored(&decode(T::KIND, text, v)?)?)))
+    }
+
+    /// Open (or create) the store in the SQLite file at `path`. A version
+    /// change backs the file up first; data that doesn't fit refuses to boot.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
+        Core::boot(T::KIND, path.as_ref(), None).map(Self::of)
+    }
+
+    /// Open (or create) an aio app's `state.db` (docs/migration/data.md) for app
+    /// `app`: aio-rs's tables go beside aio's, which stay in aio's shapes. The cell
+    /// starts from aio's snapshot (either layout) at its `__versions` stamp,
+    /// migrated like any older data, and each commit writes it back in aio's
+    /// layout in the same transaction, so aio can open the file after. aio's
+    /// data that changed since (aio ran) comes in as a new event.
+    pub fn open_aio(path: impl AsRef<Path>, app: &str) -> Result<Self, Error> {
+        Core::boot(T::KIND, path.as_ref(), Some(app)).map(Self::of)
+    }
+
+    fn of(core: Core) -> Self {
+        Self { core, cell: std::marker::PhantomData }
+    }
+
+    pub fn state(&self) -> &T {
+        crate::kind::typed_ref(&*self.core.state)
+    }
+
+    /// The state, cheap to keep (shared, not copied).
+    pub fn shared(&self) -> Arc<T> {
+        crate::kind::typed(self.core.shared())
+    }
+
+    /// The state right after event `seq` (0: the start).
+    pub fn state_at(&self, seq: u64) -> Result<T, Error> {
+        self.core.state_at(seq).map(|st| Arc::unwrap_or_clone(crate::kind::typed(st)))
+    }
+
+    /// The last committed event's number (0: none yet).
+    pub fn seq(&self) -> u64 {
+        self.core.seq()
+    }
+
+    /// Run one method atomically. The state changes only when the method
+    /// returns `Ok`, the invariants hold and the event is in the log.
+    pub fn call(&mut self, by: &By, method: &str, args: Value) -> Result<Value> {
+        self.core.call(by, method, args)
+    }
+
+    /// A call a synced client already made on its copy: `inputs` are the ids
+    /// and random numbers it used (so its prediction and this event agree),
+    /// `op` its id. A call with an `op` seen before is not applied again:
+    /// `Ok(None)`.
+    pub fn call_from(&mut self, by: &By, method: &str, args: Value, op: &str) -> Result<Option<Value>> {
+        self.core.call_from(by, method, args, op)
+    }
+
+    /// Put a held run into the log, in one write (aio wrote its state once
+    /// per window): one event, its last call, when the run is one method's
+    /// and that call alone ends where the run did from where it began (a
+    /// cursor's steps); else each call, in order (a step in one panel, then
+    /// in the other; `down` after `down`). A run that came back to where it
+    /// began logs nothing. Refused (storage), the run stays held.
+    pub fn flush(&mut self) -> Result {
+        self.core.flush()
+    }
+
+    /// The held run into the log and a snapshot of the state now (one that
+    /// brings it back whole), as before code changes under a running app
+    /// (`ax dev`'s hot-patch): a later boot replays only calls of the new code.
+    pub fn checkpoint(&mut self) -> Result {
+        self.core.checkpoint()
+    }
+
+    /// Is a run of coalesced calls waiting to go into the log?
+    pub fn holds(&self) -> bool {
+        self.core.holds()
+    }
+
+    /// Hold a run of `#[coalesce]` calls `d` before it goes into the log
+    /// (`[data] coalesce`, aio's `persistDebounceMs`); zero: each call at once.
+    pub fn set_coalesce(&mut self, d: std::time::Duration) -> Result {
+        self.core.set_coalesce(d)
+    }
+
+    /// Every saved schedule, soonest first.
+    pub fn schedules(&self) -> Result<Vec<Due>, Error> {
+        self.core.schedules()
+    }
+
+    /// Run every schedule due at `now`, in time order. A refused call is
+    /// reported and still re-armed (or removed), so it can't fire in a loop.
+    /// Returns how many fired.
+    pub fn fire_due(&mut self, now: i64) -> Result<usize, Error> {
+        self.core.fire_due(now)
+    }
+
+    /// Set when this open recovered from a damaged file (tell the user).
+    /// Why the cell is quarantined: its log no longer replays (a release
+    /// run), so it runs at its last snapshot, refuses calls and keeps its
+    /// log as it is (aio's quarantine).
+    pub fn quarantined(&self) -> Option<&str> {
+        self.core.quarantined()
+    }
+
+    pub fn recovered(&self) -> Option<&Recovered> {
+        self.core.recovered()
+    }
+
+    /// How hard each commit is saved from now on.
+    pub fn set_durability(&mut self, d: crate::config::Durability) -> Result<(), Error> {
+        self.core.set_durability(d)
+    }
+
+    /// Set the app's own pragmas (`[data] pragmas`) on the store's file;
+    /// one SQLite ignores is refused, never left looking set.
+    pub fn set_pragmas(&mut self, ps: &[String]) -> Result<(), Error> {
+        self.core.set_pragmas(ps)
+    }
+
+    /// How hard commits are saved, as SQLite says (not a remembered setting).
+    pub fn durability(&self) -> Result<crate::config::Durability, Error> {
+        self.core.durability()
+    }
+
+    /// Every kept event, oldest first.
+    pub fn events(&self) -> Result<Vec<Event>, Error> {
+        self.core.events()
+    }
+
+    /// The newest `n` events, oldest first.
+    pub fn newest(&self, n: usize) -> Result<Vec<Event>, Error> {
+        self.core.newest(n)
+    }
+
+    /// The newest `n` events time travel steps through (none of a
+    /// `#[skip_travel]` method's), oldest first.
+    pub fn travel_steps(&self, n: usize) -> Result<Vec<Event>, Error> {
+        self.core.travel_steps(n)
+    }
+
+    /// Another cell's history gone from this store's file (`ax persist
+    /// --drop`: one no build declares any more, as `#[cell(retire)]` does),
+    /// never this cell's or one it reads; whether there was any.
+    pub fn drop_cell(&self, cell: &str) -> Result<bool, Error> {
+        self.core.drop_cell(cell)
+    }
+
+    /// How long the method of event `seq` took, if it ran in this run
+    /// (one of the newest `TOOK`).
+    pub fn took(&self, seq: u64) -> Option<std::time::Duration> {
+        self.core.took(seq)
+    }
+
+    /// Where the cell is in its history ([`Position`]).
+    pub fn position(&self) -> Result<Position, Error> {
+        self.core.position()
+    }
+
+    /// Step through the history ([`Travel`]): returns the event the state is
+    /// right after now.
+    pub fn travel(&mut self, by: &By, t: Travel) -> Result<u64> {
+        self.core.travel(by, t)
+    }
+
+    /// Go back to the state after event `seq`. This is a new event, so the
+    /// steps in between stay in the history (and can be returned to). Like
+    /// a boot, it brings back what was saved of that state, repaired.
+    pub fn rewind(&mut self, by: &By, seq: u64) -> Result {
+        self.core.rewind(by, seq)
+    }
+
+    /// Replace the state with `state` (this version's JSON, as `aio
+    /// snapshot` writes it): a new event like a rewind, so the state before
+    /// it stays in the history. One that doesn't fit the type, or that the
+    /// cell's `check` refuses, changes nothing.
+    pub fn load(&mut self, by: &By, state: Value) -> Result {
+        self.core.load(by, state)
+    }
+
+    /// What this version saves of the state now, as a shape: each value
+    /// replaced by its JSON type (`ax migrations` compares a stored
+    /// snapshot against it).
+    pub fn shape(&self) -> Result<Value, Error> {
+        self.core.shape()
+    }
+
+    /// Keep the history `keep` long (`[history] keep`): the events older
+    /// are folded now, then every `SNAP_EVERY` commits. Returns how many
+    /// were folded now.
+    pub fn keep_history(&mut self, keep: std::time::Duration) -> Result<usize, Error> {
+        self.core.keep_history(keep)
+    }
+
+    /// Fold the events older than `before` (ms since the epoch) into a
+    /// snapshot: time travel then reaches back to that snapshot only.
+    /// Returns how many events were folded.
+    pub fn fold_before(&mut self, before: i64) -> Result<usize, Error> {
+        self.core.fold_before(before)
+    }
+}
+
+impl Core {
+    fn memory(k: &'static Kind) -> Self {
+        Self::with((k.default)())
+    }
+
+    fn with(state: St) -> Self {
         // A wrong machine is a bug in the cell's code, said before any call.
-        if let Err(e) = machine_ok::<T>() {
+        if let Err(e) = machine_ok(state.kind()) {
             panic!("{e}");
         }
         let db = Db::memory().expect("in-memory SQLite");
         init(&db.conn(), false).expect("in-memory schema");
         let mut s = Self {
-            state: Arc::new(state),
+            kind: state.kind(),
+            state,
             seq: 0,
             db,
             unsnapped: 0,
@@ -1375,67 +1608,44 @@ impl<T: Cell> Store<T> {
         s
     }
 
-    #[cfg(feature = "testing")]
-    /// A memory store booted from data saved by version `v` of the cell,
-    /// as `open` boots it: refused when it doesn't fit (D9, D10), else
-    /// migrated and restored (`#[transient]` fields back to their defaults,
-    /// `restore` run). For tests (`TestCells::saved`).
-    pub(crate) fn from_saved(text: &str, v: u32) -> Result<Self, Error> {
-        Ok(Self::with(restored(&decode::<T>(text, v)?)?))
-    }
-
-    /// Open (or create) the store in the SQLite file at `path`. A version
-    /// change backs the file up first; data that doesn't fit refuses to boot.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
-        Self::boot(path.as_ref(), None)
-    }
-
-    /// Open (or create) an aio app's `state.db` (docs/migration/data.md) for app
-    /// `app`: aio-rs's tables go beside aio's, which stay in aio's shapes. The cell
-    /// starts from aio's snapshot (either layout) at its `__versions` stamp,
-    /// migrated like any older data, and each commit writes it back in aio's
-    /// layout in the same transaction, so aio can open the file after. aio's
-    /// data that changed since (aio ran) comes in as a new event.
-    pub fn open_aio(path: impl AsRef<Path>, app: &str) -> Result<Self, Error> {
-        Self::boot(path.as_ref(), Some(app))
-    }
-
-    fn boot(path: &Path, app: Option<&str>) -> Result<Self, Error> {
-        machine_ok::<T>()?;
-        if !T::SAVED || (ONLY_PERSIST.load(std::sync::atomic::Ordering::Relaxed) && !T::PERSIST) {
-            return Ok(Self::memory());
+    fn boot(k: &'static Kind, path: &Path, app: Option<&str>) -> Result<Self, Error> {
+        machine_ok(k)?;
+        if !k.saved || (ONLY_PERSIST.load(std::sync::atomic::Ordering::Relaxed) && !k.persist) {
+            return Ok(Self::memory(k));
         }
         let _one = BOOT.lock().unwrap_or_else(|e| e.into_inner());
-        let Opened { db, recovered, aio_kv, seed } = open(path, app, T::ID, T::VERSION, T::TABLES, T::AIO_CELLS)?;
+        let Opened { db, recovered, aio_kv, seed } = open(path, app, k.id, k.version, k.tables, k.aio_cells, k.bound_code)?;
         if let Some(r) = &recovered {
-            told_recovered(T::ID, r);
+            told_recovered(k.id, r);
         }
         let c = db.conn();
         // aio's journal past its save, read (or refused) before anything is written.
-        let tail = aio_kv.as_ref().map(|kv| journal_tail::<T>(&c, kv, path)).transpose()?.unwrap_or_default();
+        let tail = aio_kv.as_ref().map(|kv| journal_tail(k, &c, kv, path)).transpose()?.unwrap_or_default();
         // aio's data that doesn't fit refuses the boot before anything is written.
-        let whole = aio_kv.is_some() && T::AIO_CELLS.is_empty();
+        let whole = aio_kv.is_some() && k.aio_cells.is_empty();
         let seed = match aio_kv.is_some() {
             true => seed
-                .map(|(raw, v)| Ok::<_, Error>((Some(adopt(&T::default(), &raw, v, whole)?), raw, v)))
+                .map(|(raw, v)| Ok::<_, Error>((Some(adopt(&*(k.default)(), &raw, v, whole)?), raw, v)))
                 .transpose()?,
             false => seed.map(|(raw, v)| (None, raw, v)),
         };
-        let (base, last) = newest(&c, path, T::ID, T::VERSION, aio_kv.is_some())?;
-        retire::<T>(&c, aio_kv.as_ref())?;
-        let seed = match (&aio_kv, T::TABLES.is_empty()) {
-            (None, false) => bind(&c, T::ID, T::VERSION, T::TABLES)?.map(|(raw, v)| (None, raw, v)),
+        let (base, last) = newest(&c, path, k.id, k.version, aio_kv.is_some())?;
+        retire(k, &c, aio_kv.as_ref())?;
+        let seed = match (&aio_kv, k.bound_code) {
+            (None, Some(code)) if !k.tables.is_empty() => {
+                (code.bind)(&c, k.id, k.version, k.tables)?.map(|(raw, v)| (None, raw, v))
+            }
             _ => seed,
         };
         let (from, mut st, migrated) = match &base {
-            None => (0, T::default(), false),
-            Some((seq, v, text)) => (*seq as u64, decode::<T>(text, *v)?, *v < T::VERSION),
+            None => (0, (k.default)(), false),
+            Some((seq, v, text)) => (*seq as u64, decode(k, text, *v)?, *v < k.version),
         };
-        let ahead = base.filter(|(_, v, _)| *v > T::VERSION).map(|(_, v, text)| {
+        let ahead = base.filter(|(_, v, _)| *v > k.version).map(|(_, v, text)| {
             eprintln!(
                 "[aio] {}: its data is from a newer build (v{v} > v{}): it boots, and keeps that build's fields it doesn't declare; fields it declares may be misread. Roll forward, or give this build a version past v{v} with a `migrate` that converts it down",
-                T::ID,
-                T::VERSION
+                k.id,
+                k.version
             );
             (v, serde_json::from_str(&text).unwrap_or(Value::Null))
         });
@@ -1447,9 +1657,9 @@ impl<T: Cell> Store<T> {
                 eprintln!(
                     "[aio] {}: QUARANTINED: {e}. It runs at its last snapshot (event {from}) and refuses calls; its \
                      log and snapshot are kept as they are for a fixed build: fix the method or the version, and start again",
-                    T::ID
+                    k.id
                 );
-                crate::report::problem("quarantined", &format!("{}: {e}", T::ID));
+                crate::report::problem("quarantined", &format!("{}: {e}", k.id));
                 st = at_snapshot;
                 Some(e.0)
             }
@@ -1461,7 +1671,7 @@ impl<T: Cell> Store<T> {
             Some(r) => {
                 let keep = back.clone();
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| back.recovered(r))).unwrap_or_else(|_| {
-                    eprintln!("[aio] {}: `recovered` panicked; the good copy's state boots", T::ID);
+                    eprintln!("[aio] {}: `recovered` panicked; the good copy's state boots", k.id);
                     keep
                 })
             }
@@ -1469,7 +1679,8 @@ impl<T: Cell> Store<T> {
         };
         let file = file_id(path).map(|id| (path.to_path_buf(), id));
         let mut s = Self {
-            state: Arc::new(st),
+            kind: k,
+            state: st,
             seq: last,
             db,
             unsnapped: 0,
@@ -1499,20 +1710,20 @@ impl<T: Cell> Store<T> {
         // Quarantined: the snapshot's state, repaired as any boot's, at its
         // own event; nothing is written.
         if s.quarantined.is_some() {
-            (s.state, s.seq) = (Arc::new(back), from);
+            (s.state, s.seq) = (back, from);
             return Ok(s);
         }
         // A failed snapshot only costs time: the next boot replays the log.
         if (migrated || last > from)
             && let Err(e) = s.snap(true)
         {
-            eprintln!("[aio] {}: snapshot at boot failed: {e}", T::ID);
+            eprintln!("[aio] {}: snapshot at boot failed: {e}", k.id);
         }
         // aio's data differs (the first open, or aio ran since): a new event,
         // so the history before it stays. Repaired as its replay will be.
         // aio-rs's own file, migrated: its tables hold the older shape, so they
         // are made again from the migrated state instead of read.
-        let native = s.aio_kv.is_none() && !T::TABLES.is_empty();
+        let native = s.aio_kv.is_none() && !k.tables.is_empty();
         if native && migrated {
             let mut st = match shaped(&*s.state)? {
                 Some(v) => v,
@@ -1520,7 +1731,7 @@ impl<T: Cell> Store<T> {
             };
             let c = s.db.conn();
             let tx = Atomic::new(&c)?;
-            crate::compat::data::write_bound(&tx, T::ID, &mut st, None, T::TABLES).map_err(Error)?;
+            crate::compat::data::write_bound(&tx, k.id, &mut st, None, k.tables).map_err(Error)?;
             tx.commit()?;
         }
         let adopted = match seed.filter(|_| !(native && migrated)) {
@@ -1528,25 +1739,25 @@ impl<T: Cell> Store<T> {
                 // Some fields only: over the state as it stands, the rest kept.
                 let st = match (whole, st) {
                     (true, Some(st)) => st,
-                    _ => adopt(&back, &raw, v, whole)?,
+                    _ => adopt(&*back, &raw, v, whole)?,
                 };
-                let new = repaired(st.clone()) != back;
+                let new = !repaired(st.dup()).same(&*back);
                 if new {
                     // Settled by `#[on_aio]`, checked as a call's result is:
                     // a state the invariants refuse never boots.
-                    let refused = |e: Rejected| Error(format!("{}: adopting aio's data: {e}", T::ID));
-                    let (st, asks) = match T::ON_AIO.filter(|_| s.aio_kv.is_some()) {
+                    let refused = |e: Rejected| Error(format!("{}: adopting aio's data: {e}", k.id));
+                    let (st, asks) = match k.on_aio.filter(|_| s.aio_kv.is_some()) {
                         None => (st, Asks::default()),
                         Some(m) => {
-                            let (mut st, cx) = (repaired(st), Cx::live(s.now(), &By::System));
-                            apply_guarded(&mut st, &cx, m, Value::Null).map_err(|e| refused(e.into()))?;
+                            let (mut st, cx) = (unshared(repaired(st)), Cx::live(s.now(), &By::System));
+                            apply_guarded(own(&mut st), &cx, m, Value::Null).map_err(|e| refused(e.into()))?;
                             (st, cx.into_asks())
                         }
                     };
-                    let args = serde_json::json!({ "v1": v, "state": crate::json(&st).map_err(|e| Error(e.why))? });
+                    let args = serde_json::json!({ "v1": v, "state": crate::kind::json(&*st).map_err(|e| Error(e.why))? });
                     let st = repaired(st);
                     st.check().map_err(refused)?;
-                    s.commit(&By::System, REWIND, &args, &asks, now_ms(), Arc::new(st), None, &[]).map_err(|e| Error(e.why))?;
+                    s.commit(&By::System, REWIND, &args, &asks, now_ms(), st, None, &[]).map_err(|e| Error(e.why))?;
                     s.effects.extend(asks.effects);
                 }
                 new
@@ -1555,9 +1766,9 @@ impl<T: Cell> Store<T> {
         };
         // Unsaved fields back to their defaults, the repair applied: the
         // same state whether the app stopped cleanly or crashed.
-        if !adopted && back != *s.state {
-            s.commit(&By::System, RESTORE, &Value::Null, &Asks::default(), now_ms(), Arc::new(back), None, &[])
-                .map_err(|e| Error(format!("{}: restore: {e}", T::ID)))?;
+        if !adopted && !back.same(&*s.state) {
+            s.commit(&By::System, RESTORE, &Value::Null, &Asks::default(), now_ms(), back, None, &[])
+                .map_err(|e| Error(format!("{}: restore: {e}", k.id)))?;
         }
         s.replay_journal(tail)?;
         refresh_good(&s.db.conn(), path)?;
@@ -1570,6 +1781,7 @@ impl<T: Cell> Store<T> {
     /// (replay never runs I/O again), the watermark moved in the transaction
     /// of each. A tail aio-rs can't replay refuses the boot, the file kept.
     fn replay_journal(&mut self, tail: Vec<crate::compat::data::Journaled>) -> Result<(), Error> {
+        let k = self.kind;
         let Some(kv) = self.aio_kv.clone() else { return Ok(()) };
         let Some(last) = tail.last().map(|j| match j {
             crate::compat::data::Journaled::Call { seq, .. } | crate::compat::data::Journaled::Skip { seq, .. } => *seq,
@@ -1581,7 +1793,7 @@ impl<T: Cell> Store<T> {
             match j {
                 crate::compat::data::Journaled::Skip { why, .. } => {
                     if let Some(why) = why {
-                        eprintln!("[aio] {}: {why}", T::ID);
+                        eprintln!("[aio] {}: {why}", k.id);
                     }
                 }
                 crate::compat::data::Journaled::Call { seq, method, args, by, at } => {
@@ -1590,7 +1802,7 @@ impl<T: Cell> Store<T> {
                     self.run(by, method, args.clone(), *at, None).map_err(|e| {
                         Error(format!(
                             "{}: aio's journal entry {seq} ({method}) doesn't run again here: {e}; start the aio app once and stop it, then open it here",
-                            T::ID
+                            k.id
                         ))
                     })?;
                 }
@@ -1606,7 +1818,7 @@ impl<T: Cell> Store<T> {
         }
         drop(c);
         let calls = tail.iter().filter(|j| matches!(j, crate::compat::data::Journaled::Call { .. })).count();
-        eprintln!("[aio] {}: replayed {calls} calls of aio's journal (up to entry {last})", T::ID);
+        eprintln!("[aio] {}: replayed {calls} calls of aio's journal (up to entry {last})", k.id);
         Ok(())
     }
 
@@ -1621,17 +1833,15 @@ impl<T: Cell> Store<T> {
         self.clock = Some(clock);
     }
 
-    pub fn state(&self) -> &T {
-        &self.state
-    }
-
-    /// The state, cheap to keep (shared, not copied).
-    pub fn shared(&self) -> Arc<T> {
+    pub(crate) fn shared(&self) -> St {
         self.state.clone()
     }
 
-    /// The last committed event's number (0: none yet).
-    pub fn seq(&self) -> u64 {
+    pub(crate) fn state(&self) -> &dyn AnyCell {
+        &*self.state
+    }
+
+    pub(crate) fn seq(&self) -> u64 {
         self.seq
     }
 
@@ -1639,24 +1849,19 @@ impl<T: Cell> Store<T> {
     /// [`Self::call_from`]); `None`: never taken here.
     #[cfg(all(feature = "compat", feature = "server"))]
     pub(crate) fn op_seq(&self, op: &str) -> Option<u64> {
+        let k = self.kind;
         self.db
             .conn()
-            .query_row("SELECT seq FROM ops WHERE cell = ?1 AND op = ?2", params![T::ID, op], |r| r.get::<_, i64>(0))
+            .query_row("SELECT seq FROM ops WHERE cell = ?1 AND op = ?2", params![k.id, op], |r| r.get::<_, i64>(0))
             .ok()
             .map(|s| s as u64)
     }
 
-    /// Run one method atomically. The state changes only when the method
-    /// returns `Ok`, the invariants hold and the event is in the log.
-    pub fn call(&mut self, by: &By, method: &str, args: Value) -> Result<Value> {
+    pub(crate) fn call(&mut self, by: &By, method: &str, args: Value) -> Result<Value> {
         self.run(by, method, args, self.now(), None)
     }
 
-    /// A call a synced client already made on its copy: `inputs` are the ids
-    /// and random numbers it used (so its prediction and this event agree),
-    /// `op` its id. A call with an `op` seen before is not applied again:
-    /// `Ok(None)`.
-    pub fn call_from(&mut self, by: &By, method: &str, args: Value, op: &str) -> Result<Option<Value>> {
+    pub(crate) fn call_from(&mut self, by: &By, method: &str, args: Value, op: &str) -> Result<Option<Value>> {
         self.call_as(by, None, None, method, args, Some(op), None)
     }
 
@@ -1673,12 +1878,13 @@ impl<T: Cell> Store<T> {
         op: Option<&str>,
         reply: Option<crate::Reply>,
     ) -> Result<Option<Value>> {
+        let k = self.kind;
         let now = self.now();
         let Some(op) = op else {
             let cx = Cx::live(now, by).with_who(who, from).with_reply(reply);
             let out = self.apply_and_commit(by, method, args, cx, None, None).map(Some);
-            if let Some(sweep) = tx::On::<T>::SWEEP {
-                sweep(self);
+            if let Some(tx) = self.kind.tx {
+                (tx.sweep)(self);
             }
             return out;
         };
@@ -1688,7 +1894,7 @@ impl<T: Cell> Store<T> {
             .conn()
             .query_row(
                 "SELECT EXISTS (SELECT 1 FROM ops WHERE cell = ?1 AND op = ?2)",
-                params![T::ID, op.to_string()],
+                params![k.id, op.to_string()],
                 |r| r.get(0),
             )
             .map_err(|e| Rejected::new(format!("storage: {e}")))?;
@@ -1698,17 +1904,18 @@ impl<T: Cell> Store<T> {
         if let Some(e) = self.refused.0.get(&op.to_string()) {
             return Err(e.clone());
         }
-        let cx = Cx::synced(now, T::ID, by, &op).with_who(who, from).with_reply(reply);
+        let cx = Cx::synced(now, k.id, by, &op).with_who(who, from).with_reply(reply);
         let out = self.apply_and_commit(by, method, args, cx, None, Some(&op.to_string())).map(Some);
-        if let Some(sweep) = tx::On::<T>::SWEEP {
-            sweep(self);
+        if let Some(tx) = self.kind.tx {
+            (tx.sweep)(self);
         }
         out
     }
 
     /// A failure of the cell not made by a call (an async method's awaited `?`).
     pub(crate) fn failed(&mut self, by: &By, why: &str) {
-        crate::report::tell("refused", &format!("{}.{why}", T::ID));
+        let k = self.kind;
+        crate::report::tell("refused", &format!("{}.{why}", k.id));
         self.failures.push((by.clone(), why.into()));
     }
 
@@ -1727,7 +1934,8 @@ impl<T: Cell> Store<T> {
         fired: Option<&Due>,
         op: Option<&str>,
     ) -> Result<Value> {
-        crate::log::in_call(T::ID, || self.apply_and_commit_in_call(by, method, args, cx, fired, op))
+        let k = self.kind;
+        crate::log::in_call(k.id, || self.apply_and_commit_in_call(by, method, args, cx, fired, op))
     }
 
     fn apply_and_commit_in_call(
@@ -1739,8 +1947,9 @@ impl<T: Cell> Store<T> {
         fired: Option<&Due>,
         op: Option<&str>,
     ) -> Result<Value> {
-        let shown = (T::DIAGNOSTICS && crate::report::args_kept())
-            .then(|| if T::redacts(method) { Value::from("[redacted]") } else { args.clone() });
+        let k = self.kind;
+        let shown = (k.diagnostics && crate::report::args_kept())
+            .then(|| if (k.redacts)(method) { Value::from("[redacted]") } else { args.clone() });
         let (panics, t) = (self.panics.last().copied(), std::time::Instant::now());
         let out = self.apply_and_commit_once(by, method, args, cx, fired, op);
         let took = t.elapsed();
@@ -1748,9 +1957,9 @@ impl<T: Cell> Store<T> {
         self.spare.ahead(&self.state);
         crate::perf::called(took);
         let refused = out.as_ref().err().map(|e| e.why.as_str());
-        if T::DIAGNOSTICS {
-            crate::log::called(T::ID, method, took, refused);
-            crate::report::called(T::ID, method, self.now(), took, refused, shown.as_ref());
+        if k.diagnostics {
+            crate::log::called(k.id, method, took, refused);
+            crate::report::called(k.id, method, self.now(), took, refused, shown.as_ref());
         }
         let panicked = self.panics.last().copied() != panics;
         if let Err(e) = &out
@@ -1758,7 +1967,7 @@ impl<T: Cell> Store<T> {
         {
             // A panic was reported as it happened; a refusal is told here.
             if !panicked {
-                crate::report::tell("refused", &format!("{}.{method}: {e}", T::ID));
+                crate::report::tell("refused", &format!("{}.{method}: {e}", k.id));
             }
             self.failures.push((by.clone(), format!("{method}: {e}")));
         }
@@ -1774,10 +1983,11 @@ impl<T: Cell> Store<T> {
         fired: Option<&Due>,
         op: Option<&str>,
     ) -> Result<Value> {
+        let k = self.kind;
         let at = cx.now();
-        crate::perf::storm(T::ID, method)?;
+        crate::perf::storm(k.id, method)?;
         let call = crate::Call {
-            cell: T::ID,
+            cell: k.id,
             method,
             args: &args,
             by,
@@ -1788,13 +1998,13 @@ impl<T: Cell> Store<T> {
         let rewritten = crate::ask_before(&call)?;
         let args = rewritten.unwrap_or(args);
         if self.panics.len() >= PANICS_MAX {
-            crate::reject!("{}: stopped after {PANICS_MAX} panics within a minute; restart the app", T::ID);
+            crate::reject!("{}: stopped after {PANICS_MAX} panics within a minute; restart the app", k.id);
         }
         let base = method.split_once('.').map_or(method, |(m, _)| m);
-        if let (Some(call), Some(cfg), Some(_)) = (tx::On::<T>::CALL, T::TRANSACTION, T::async_mode(base))
+        if let (Some(tx), Some(_)) = (k.tx, (k.async_mode)(base))
             && let Some(reply) = cx.reply()
         {
-            return call(self, cfg, by, method, args, cx, reply, op);
+            return (tx.call)(self, tx.cfg, by, method, args, cx, reply, op);
         }
         let cx = cx.with_live(self.state.clone());
         let t0 = std::time::Instant::now();
@@ -1802,13 +2012,13 @@ impl<T: Cell> Store<T> {
         let t1 = std::time::Instant::now();
         // a panic is this call's refusal; the state (only a copy was
         // touched) stays as it was.
-        let out = match apply_guarded(&mut next, &cx, method, args.clone()) {
+        let out = match apply_guarded(own(&mut next), &cx, method, args.clone()) {
             Err(Applied::Panicked(why)) => {
                 let now = std::time::Instant::now();
                 self.panics.retain(|t| now.duration_since(*t) < PANIC_WINDOW);
                 self.panics.push(now);
                 eprintln!("{}", panicked(method, &why, self.panics.len(), &*self.state));
-                return Err(Rejected::coded(crate::Code::ReduceError, format!("{}.{method} panicked: {why}", T::ID)));
+                return Err(Rejected::coded(crate::Code::ReduceError, format!("{}.{method} panicked: {why}", k.id)));
             }
             Err(Applied::Refused(e)) => return Err(self.refused_op(op, e)),
             Ok(out) => out,
@@ -1818,23 +2028,24 @@ impl<T: Cell> Store<T> {
         let t3 = std::time::Instant::now();
         let mut asks = cx.into_asks();
         asks.op = op.map(String::from);
-        let quiet = asks.effects.is_empty() && asks.plans.is_empty() && asks.inputs == Default::default();
-        let coalesced = T::COALESCED.contains(&method) || (T::COALESCE && !T::redacts(method));
-        if coalesced && fired.is_none() && asks.op.is_none() && quiet && !self.coalesce.is_zero() {
+        // In this order, a cell that coalesces nothing pays for none of it.
+        let coalesced = k.coalesced.contains(&method) || (k.coalesce && !(k.redacts)(method));
+        let quiet = || asks.effects.is_empty() && asks.plans.is_empty() && asks.inputs == Default::default();
+        if coalesced && fired.is_none() && asks.op.is_none() && !self.coalesce.is_zero() && quiet() {
             self.hold(by, method, args, at, next)?;
             let p = crate::perf::Phases { clone: t1 - t0, apply: t2 - t1, check: t3 - t2, commit: t3.elapsed() };
-            crate::perf::method(T::ID, method, p);
+            crate::perf::method(k.id, method, p);
             return Ok(out);
         }
         // A held run goes into the log first: this call ran after it.
         self.flush()?;
-        self.commit(by, method, &args, &asks, at, Arc::new(next), fired, &[])?;
+        self.commit(by, method, &args, &asks, at, next, fired, &[])?;
         let p = crate::perf::Phases { clone: t1 - t0, apply: t2 - t1, check: t3 - t2, commit: t3.elapsed() };
         if self.took.len() == TOOK {
             self.took.pop_front();
         }
         self.took.push_back((self.seq, p.own()));
-        crate::perf::method(T::ID, method, p);
+        crate::perf::method(k.id, method, p);
         self.effects.extend(asks.effects);
         Ok(out)
     }
@@ -1856,8 +2067,8 @@ impl<T: Cell> Store<T> {
 
     /// A coalesced call: its state is shown at once, its event waits (see
     /// [`Self::flush`]). One that changes nothing is not even held.
-    fn hold(&mut self, by: &By, method: &str, args: Value, at: i64, next: T) -> Result {
-        if next == *self.state {
+    fn hold(&mut self, by: &By, method: &str, args: Value, at: i64, next: St) -> Result {
+        if next.same(&*self.state) {
             return Ok(());
         }
         let mut h = match self.held.take() {
@@ -1869,25 +2080,19 @@ impl<T: Cell> Store<T> {
                 Held { by: by.clone(), calls: vec![], base, since: std::time::Instant::now() }
             }
         };
-        self.state = Arc::new(next);
+        self.state = next;
         h.calls.push((method.into(), args, at));
         self.held = Some(h);
         Ok(())
     }
 
-    /// Put a held run into the log, in one write (aio wrote its state once
-    /// per window): one event, its last call, when the run is one method's
-    /// and that call alone ends where the run did from where it began (a
-    /// cursor's steps); else each call, in order (a step in one panel, then
-    /// in the other; `down` after `down`). A run that came back to where it
-    /// began logs nothing. Refused (storage), the run stays held.
-    pub fn flush(&mut self) -> Result {
+    pub(crate) fn flush(&mut self) -> Result {
         self.flush_with(None)
     }
 
     /// [`Self::flush`], with what [`Run::weigh`] found of the run if that
     /// is still the run held.
-    fn flush_with(&mut self, weighed: Option<Weighed<T>>) -> Result {
+    fn flush_with(&mut self, weighed: Option<Weighed>) -> Result {
         if self.held.is_none() {
             return Ok(());
         }
@@ -1915,7 +2120,7 @@ impl<T: Cell> Store<T> {
 
     /// The held run, once due to go into the log: [`Run::weigh`] it off the
     /// store's lock, then [`Self::flush_idle`] with what it found.
-    pub(crate) fn due(&self) -> Option<Run<T>> {
+    pub(crate) fn due(&self) -> Option<Run> {
         let h = self.held.as_ref().filter(|h| h.since.elapsed() >= self.coalesce)?;
         Some(Run { by: h.by.clone(), calls: h.calls.clone(), base: h.base.clone(), now: self.state.clone() })
     }
@@ -1923,13 +2128,14 @@ impl<T: Cell> Store<T> {
     /// Flush a held run [`Self::set_coalesce`] (default [`PERSIST_DEBOUNCE`])
     /// after its first call; else how long until then. `weighed`: the run
     /// [`Self::due`] gave, weighed (unused if more calls came since).
-    pub(crate) fn flush_idle(&mut self, weighed: Option<Weighed<T>>) -> Option<std::time::Duration> {
+    pub(crate) fn flush_idle(&mut self, weighed: Option<Weighed>) -> Option<std::time::Duration> {
+        let k = self.kind;
         let left = self.coalesce.checked_sub(self.held.as_ref()?.since.elapsed());
         match left {
             Some(d) if !d.is_zero() => Some(d),
             _ => {
                 if let Err(e) = self.flush_with(weighed) {
-                    eprintln!("[aio] {}: a held run could not be saved: {e}", T::ID);
+                    eprintln!("[aio] {}: a held run could not be saved: {e}", k.id);
                     return Some(self.coalesce.max(PERSIST_DEBOUNCE));
                 }
                 None
@@ -1941,20 +2147,18 @@ impl<T: Cell> Store<T> {
     /// snapshot of the state, so the next boot starts from what the calls
     /// left and replays none of them (with code that may have changed).
     pub(crate) fn close(&mut self) {
+        let k = self.kind;
         if let Err(e) = self.flush() {
-            eprintln!("[aio] {}: a held run could not be saved at close: {e}", T::ID);
+            eprintln!("[aio] {}: a held run could not be saved at close: {e}", k.id);
         }
         if self.unsnapped > 0
             && let Err(e) = self.snap(false)
         {
-            eprintln!("[aio] {}: snapshot at close failed: {e}", T::ID);
+            eprintln!("[aio] {}: snapshot at close failed: {e}", k.id);
         }
     }
 
-    /// The held run into the log and a snapshot of the state now (one that
-    /// brings it back whole), as before code changes under a running app
-    /// (`ax dev`'s hot-patch): a later boot replays only calls of the new code.
-    pub fn checkpoint(&mut self) -> Result {
+    pub(crate) fn checkpoint(&mut self) -> Result {
         self.flush()?;
         if self.unsnapped > 0 {
             self.snap(true).map_err(|e| Rejected::new(format!("storage: {e}")))?;
@@ -1962,14 +2166,11 @@ impl<T: Cell> Store<T> {
         Ok(())
     }
 
-    /// Is a run of coalesced calls waiting to go into the log?
-    pub fn holds(&self) -> bool {
+    pub(crate) fn holds(&self) -> bool {
         self.held.is_some()
     }
 
-    /// Hold a run of `#[coalesce]` calls `d` before it goes into the log
-    /// (`[data] coalesce`, aio's `persistDebounceMs`); zero: each call at once.
-    pub fn set_coalesce(&mut self, d: std::time::Duration) -> Result {
+    pub(crate) fn set_coalesce(&mut self, d: std::time::Duration) -> Result {
         self.coalesce = d;
         if d.is_zero() { self.flush() } else { Ok(()) }
     }
@@ -1985,12 +2186,13 @@ impl<T: Cell> Store<T> {
         args: &Value,
         asks: &Asks,
         at: i64,
-        next: Arc<T>,
+        next: St,
         fired: Option<&Due>,
         earlier: &[(String, Value, i64)],
     ) -> Result {
+        let k = self.kind;
         if let Some(why) = &self.quarantined {
-            let why = format!("{} is quarantined (its log no longer replays: {why}): fix the build and start again", T::ID);
+            let why = format!("{} is quarantined (its log no longer replays: {why}): fix the build and start again", k.id);
             return Err(Rejected::coded(crate::Code::PersistError, why));
         }
         // A schedule names a method by its name: a typo is refused now, by the
@@ -1998,23 +2200,23 @@ impl<T: Cell> Store<T> {
         for p in &asks.plans {
             if let Plan::Set { key, method: m, .. } = p
                 && !m.contains(':')
-                && !T::METHODS.contains(&m.as_str())
+                && !k.methods.contains(&m.as_str())
             {
-                crate::reject!("schedule `{key}`: {} has no method `{m}` (its methods: {})", T::ID, T::METHODS.join(", "));
+                crate::reject!("schedule `{key}`: {} has no method `{m}` (its methods: {})", k.id, k.methods.join(", "));
             }
         }
         // A #[redact] call keeps the state it made, never its arguments.
-        let kept = redacted(method, &*self.state, &next)?;
+        let kept = redacted(method, &*self.state, &*next)?;
         let args = kept.as_ref().unwrap_or(args);
         let (inputs_text, by_text) = (crate::json(&asks.inputs)?.to_string(), crate::json(by)?.to_string());
         // aio's slice is what is saved of it: no `#[transient]` field on disk.
-        let saved = |st: &T| match shaped(st)? {
+        let saved = |st: &dyn AnyCell| match shaped(st)? {
             Some(v) => Ok(v),
             None => json(st),
         };
         // aio-rs's own file keeps its bound tables too.
-        let bound = self.aio_kv.is_some() || !T::TABLES.is_empty();
-        let quick = match (self.aio_kv.is_some() && !T::AIO_CELLS.is_empty(), self.saved.take()) {
+        let bound = self.aio_kv.is_some() || !k.tables.is_empty();
+        let quick = match (self.aio_kv.is_some() && !k.aio_cells.is_empty(), self.saved.take()) {
             (true, Some(prev)) => quick_saved(&*next, &*self.state, prev).map_err(|prev| self.saved = Some(prev)).ok(),
             (_, prev) => {
                 self.saved = prev;
@@ -2023,15 +2225,15 @@ impl<T: Cell> Store<T> {
         };
         let kv_state = match quick {
             Some(_) => None,
-            None => bound.then(|| saved(&next)).transpose().map_err(|e| Rejected::new(e.0))?,
+            None => bound.then(|| saved(&*next)).transpose().map_err(|e| Rejected::new(e.0))?,
         };
         // What its tables hold now: only the rows that changed are written.
         // With `#[aio_cell]` fields, only the slices that changed are written.
         // The committed state's saved form is kept from its own commit.
-        let kv_prev = match quick.is_none() && bound && !(T::TABLES.is_empty() && T::AIO_CELLS.is_empty()) {
+        let kv_prev = match quick.is_none() && bound && !(k.tables.is_empty() && k.aio_cells.is_empty()) {
             true => Some(match self.saved.take() {
                 Some(v) => v,
-                None => saved(&self.state).map_err(|e| Rejected::new(e.0))?,
+                None => saved(&*self.state).map_err(|e| Rejected::new(e.0))?,
             }),
             false => None,
         };
@@ -2051,13 +2253,13 @@ impl<T: Cell> Store<T> {
             .db
             .conn()
             .with("SELECT EXISTS (SELECT 1 FROM log WHERE cell = ?1 AND seq > ?2)", |s| {
-                s.query_row(params![T::ID, self.seq as i64], |r| r.get(0))
+                s.query_row(params![k.id, self.seq as i64], |r| r.get(0))
             })
             .map_err(db)?;
         if newer {
             eprintln!(
                 "[aio] storage: another writer added to {}'s log after event {}; refusing writes",
-                T::ID,
+                k.id,
                 self.seq
             );
             crate::reject!("storage: something else wrote to this app's data; restart the app to see it");
@@ -2066,10 +2268,10 @@ impl<T: Cell> Store<T> {
         let keep = kv_prev.is_some() || quick.is_some();
         let calls = earlier.iter().map(|(m, a, t)| (m.as_str(), a, *t, "{}")).chain([(method, args, at, &*inputs_text)]);
         let w = Write {
-            cell: T::ID,
-            version: T::VERSION,
-            tables: T::TABLES,
-            slices: T::AIO_CELLS,
+            cell: k.id,
+            version: k.version,
+            tables: k.tables,
+            slices: k.aio_cells,
             by: &by_text,
             calls: calls.collect(),
             kv: self.aio_kv.as_ref(),
@@ -2088,7 +2290,7 @@ impl<T: Cell> Store<T> {
         self.effects.extend(asks.plans.iter().map(|p| Box::new(p.clone()) as Box<dyn std::any::Any + Send>));
         self.journal_wm = None;
         for ((m, a, t), s) in earlier.iter().zip(logged_seqs) {
-            let ev = Event { seq: s, method: m.clone(), args: a.clone(), inputs: Default::default(), by: by.clone(), at: *t, v: T::VERSION };
+            let ev = Event { seq: s, method: m.clone(), args: a.clone(), inputs: Default::default(), by: by.clone(), at: *t, v: k.version };
             if let Some(r) = &mut self.to_react {
                 r.push(ev.clone());
             }
@@ -2102,7 +2304,7 @@ impl<T: Cell> Store<T> {
             inputs: asks.inputs.clone(),
             by: by.clone(),
             at,
-            v: T::VERSION,
+            v: k.version,
         };
         if let Some(r) = &mut self.to_react {
             r.push(ev.clone());
@@ -2112,14 +2314,14 @@ impl<T: Cell> Store<T> {
         // A dev build at `debug` says what each call changed, key by key.
         if crate::DEV_BUILD
             && crate::log::enabled(crate::log::Level::Debug)
-            && !crate::log::suppressed(T::ID, method)
+            && !crate::log::suppressed(k.id, method)
             && kept.is_none()
-            && T::DIAGNOSTICS
+            && k.diagnostics
             && let (Ok(a), Ok(b)) = (logged(&*self.state), logged(&*next))
         {
             let ops = crate::patch::diff(&a, &b);
             if !ops.is_empty() {
-                crate::debug!(cat: "diff", "{}.{method}: {}", T::ID, crate::patch::said(&a, &ops));
+                crate::debug!(cat: "diff", "{}.{method}: {}", k.id, crate::patch::said(&a, &ops));
             }
         }
         self.state = next;
@@ -2129,10 +2331,10 @@ impl<T: Cell> Store<T> {
         if before / SNAP_EVERY != self.unsnapped / SNAP_EVERY {
             if let Err(e) = self.snap(true) {
                 // The log already holds the event; the next boot replays it.
-                eprintln!("[aio] {}: snapshot failed: {e}", T::ID);
+                eprintln!("[aio] {}: snapshot failed: {e}", k.id);
             }
             if let Err(e) = self.fold_kept() {
-                eprintln!("[aio] {}: [history] keep: folding failed: {e}", T::ID);
+                eprintln!("[aio] {}: [history] keep: folding failed: {e}", k.id);
             }
         }
         Ok(())
@@ -2178,7 +2380,7 @@ impl<T: Cell> Store<T> {
         }
     }
 
-    fn marked(&self) -> Mark<T> {
+    fn marked(&self) -> Mark {
         Mark {
             state: self.state.clone(),
             seq: self.seq,
@@ -2194,7 +2396,7 @@ impl<T: Cell> Store<T> {
 
     /// Back to `m`: a joint commit its calls went into was refused, so
     /// none of them are on disk.
-    fn undo(&mut self, m: Mark<T>) {
+    fn undo(&mut self, m: Mark) {
         self.state = m.state;
         self.seq = m.seq;
         self.unsnapped = m.unsnapped;
@@ -2217,9 +2419,10 @@ impl<T: Cell> Store<T> {
 
     /// The last committed event's method and time (ms since the epoch).
     pub(crate) fn last_call(&self) -> Option<(String, i64)> {
+        let k = self.kind;
         self.db
             .conn()
-            .query_row("SELECT method, at FROM log WHERE cell = ?1 ORDER BY seq DESC LIMIT 1", [T::ID], |r| {
+            .query_row("SELECT method, at FROM log WHERE cell = ?1 ORDER BY seq DESC LIMIT 1", [k.id], |r| {
                 Ok((r.get(0)?, r.get(1)?))
             })
             .optional()
@@ -2237,32 +2440,30 @@ impl<T: Cell> Store<T> {
         std::mem::take(&mut self.effects)
     }
 
-    /// Every saved schedule, soonest first.
-    pub fn schedules(&self) -> Result<Vec<Due>, Error> {
+    pub(crate) fn schedules(&self) -> Result<Vec<Due>, Error> {
+        let k = self.kind;
         let c = self.db.conn();
         let mut q = c
             .prepare("SELECT key, due, every, method, args, cron FROM sched WHERE cell = ?1 ORDER BY due, key")?;
-        let rows = q.query_map([T::ID], |r| {
+        let rows = q.query_map([k.id], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, String>(4)?, r.get(5)?))
         })?;
         rows.map(|row| {
             let (key, due, every, method, args, cron) = row?;
             let args =
-                serde_json::from_str(&args).map_err(|e| Error(format!("{}: corrupt schedule {key}: {e}", T::ID)))?;
+                serde_json::from_str(&args).map_err(|e| Error(format!("{}: corrupt schedule {key}: {e}", k.id)))?;
             Ok(Due { key, due, every, cron, method, args })
         })
         .collect()
     }
 
-    /// Run every schedule due at `now`, in time order. A refused call is
-    /// reported and still re-armed (or removed), so it can't fire in a loop.
-    /// Returns how many fired.
-    pub fn fire_due(&mut self, now: i64) -> Result<usize, Error> {
+    pub(crate) fn fire_due(&mut self, now: i64) -> Result<usize, Error> {
         self.fire_due_but(now, |_| false)
     }
 
     /// [`Self::fire_due`], re-arming without a call the schedules `skip` names.
     pub(crate) fn fire_due_but(&mut self, now: i64, skip: impl Fn(&Due) -> bool) -> Result<usize, Error> {
+        let k = self.kind;
         let due: Vec<Due> = self.schedules()?.into_iter().filter(|d| d.due <= now).collect();
         let mut fired = 0;
         for d in &due {
@@ -2272,19 +2473,19 @@ impl<T: Cell> Store<T> {
             }
             fired += 1;
             if skip(d) {
-                rearm(&self.db.conn(), T::ID, d, now)?;
+                rearm(&self.db.conn(), k.id, d, now)?;
                 continue;
             }
             // Another cell's method (`cell:method`): its handle calls it.
             if d.method.contains(':') {
-                rearm(&self.db.conn(), T::ID, d, now)?;
+                rearm(&self.db.conn(), k.id, d, now)?;
                 self.foreign.push(d.clone());
                 continue;
             }
             let by = By::Schedule(d.key.clone());
             if let Err(e) = self.run(&by, &d.method, d.args.clone(), now, Some(d)) {
-                eprintln!("[aio] {}: schedule `{}` ({}) refused: {e}", T::ID, d.key, d.method);
-                rearm(&self.db.conn(), T::ID, d, now)?;
+                eprintln!("[aio] {}: schedule `{}` ({}) refused: {e}", k.id, d.key, d.method);
+                rearm(&self.db.conn(), k.id, d, now)?;
             }
         }
         Ok(fired)
@@ -2292,9 +2493,10 @@ impl<T: Cell> Store<T> {
 
     /// Is `d` still set as it was read (same key, same due)?
     fn armed(&self, d: &Due) -> Result<bool, Error> {
+        let k = self.kind;
         Ok(self.db.conn().query_row(
             "SELECT EXISTS (SELECT 1 FROM sched WHERE cell = ?1 AND key = ?2 AND due = ?3)",
-            params![T::ID, d.key, d.due],
+            params![k.id, d.key, d.due],
             |r| r.get(0),
         )?)
     }
@@ -2303,15 +2505,16 @@ impl<T: Cell> Store<T> {
     /// one already saved with the same timing keeps its next run, a changed
     /// one starts over from now, and an `@` one no longer declared goes.
     pub(crate) fn declare(&mut self) -> Result<(), Error> {
+        let k = self.kind;
         let (now, have) = (self.now(), self.schedules()?);
         let c = self.db.conn();
         let tx = Atomic::new(&c)?;
         for d in &have {
-            if d.key.strip_prefix('@').is_some_and(|m| !T::SCHEDULES.iter().any(|s| s.method == m)) {
-                tx.execute("DELETE FROM sched WHERE cell = ?1 AND key = ?2", params![T::ID, d.key])?;
+            if d.key.strip_prefix('@').is_some_and(|m| !k.schedules.iter().any(|s| s.method == m)) {
+                tx.execute("DELETE FROM sched WHERE cell = ?1 AND key = ?2", params![k.id, d.key])?;
             }
         }
-        for s in T::SCHEDULES {
+        for s in k.schedules {
             let key = format!("@{}", s.method);
             if have.iter().any(|d| d.key == key && d.every == s.every && d.cron.as_deref() == s.cron) {
                 continue;
@@ -2320,33 +2523,28 @@ impl<T: Cell> Store<T> {
                 (Some(ms), _) => now + ms,
                 (None, Some(c)) => {
                     let c = crate::cron::Cron::parse(c)
-                        .map_err(|e| Error(format!("{}.{}: #[cron]: {e}", T::ID, s.method)))?;
-                    c.next(now).ok_or_else(|| Error(format!("{}.{}: #[cron] never runs", T::ID, s.method)))?
+                        .map_err(|e| Error(format!("{}.{}: #[cron]: {e}", k.id, s.method)))?;
+                    c.next(now).ok_or_else(|| Error(format!("{}.{}: #[cron] never runs", k.id, s.method)))?
                 }
                 (None, None) => continue,
             };
             tx.execute(
                 "INSERT OR REPLACE INTO sched (cell, key, due, every, method, args, cron) VALUES (?1, ?2, ?3, ?4, ?5, 'null', ?6)",
-                params![T::ID, key, due, s.every, s.method, s.cron],
+                params![k.id, key, due, s.every, s.method, s.cron],
             )?;
         }
         Ok(tx.commit()?)
     }
 
-    /// Set when this open recovered from a damaged file (tell the user).
-    /// Why the cell is quarantined: its log no longer replays (a release
-    /// run), so it runs at its last snapshot, refuses calls and keeps its
-    /// log as it is (aio's quarantine).
-    pub fn quarantined(&self) -> Option<&str> {
+    pub(crate) fn quarantined(&self) -> Option<&str> {
         self.quarantined.as_deref()
     }
 
-    pub fn recovered(&self) -> Option<&Recovered> {
+    pub(crate) fn recovered(&self) -> Option<&Recovered> {
         self.recovered.as_ref()
     }
 
-    /// How hard each commit is saved from now on.
-    pub fn set_durability(&mut self, d: crate::config::Durability) -> Result<(), Error> {
+    pub(crate) fn set_durability(&mut self, d: crate::config::Durability) -> Result<(), Error> {
         let mode = match d {
             crate::config::Durability::Normal => "NORMAL",
             crate::config::Durability::Full => "FULL",
@@ -2354,14 +2552,11 @@ impl<T: Cell> Store<T> {
         self.db.pragmas(&[format!("PRAGMA synchronous = {mode}")]).map_err(Error)
     }
 
-    /// Set the app's own pragmas (`[data] pragmas`) on the store's file;
-    /// one SQLite ignores is refused, never left looking set.
-    pub fn set_pragmas(&mut self, ps: &[String]) -> Result<(), Error> {
+    pub(crate) fn set_pragmas(&mut self, ps: &[String]) -> Result<(), Error> {
         self.db.pragmas(ps).map_err(Error)
     }
 
-    /// How hard commits are saved, as SQLite says (not a remembered setting).
-    pub fn durability(&self) -> Result<crate::config::Durability, Error> {
+    pub(crate) fn durability(&self) -> Result<crate::config::Durability, Error> {
         let n: i64 = self.db.conn().query_row("PRAGMA synchronous", [], |r| r.get(0))?;
         Ok(if n >= 2 { crate::config::Durability::Full } else { crate::config::Durability::Normal })
     }
@@ -2369,46 +2564,44 @@ impl<T: Cell> Store<T> {
     /// Snapshot the state (`exact`: only if it comes back whole, else
     /// `SNAP_EVERY` events later).
     fn snap(&mut self, exact: bool) -> Result<(), Error> {
+        let k = self.kind;
         let Some(text) = snapshot(&*self.state, exact)? else { return Ok(()) };
         let (v, text) = match &self.ahead {
-            None => (T::VERSION, text),
+            None => (k.version, text),
             Some((v, newer)) => {
                 let mut mine: Value = serde_json::from_str(&text).map_err(|e| Error(e.to_string()))?;
                 crate::filter::reattach(&mut mine, newer);
                 if let Some(m) = mine.as_object_mut() {
-                    m.insert(DOWNGRADED.into(), T::VERSION.into());
+                    m.insert(DOWNGRADED.into(), k.version.into());
                 }
                 (*v, mine.to_string())
             }
         };
         self.db.conn().execute(
             "INSERT OR REPLACE INTO snap (cell, seq, v, state) VALUES (?1, ?2, ?3, ?4)",
-            params![T::ID, self.seq as i64, v, text],
+            params![k.id, self.seq as i64, v, text],
         )?;
         self.unsnapped = 0;
         Ok(())
     }
 
-    /// Every kept event, oldest first.
-    pub fn events(&self) -> Result<Vec<Event>, Error> {
+    pub(crate) fn events(&self) -> Result<Vec<Event>, Error> {
         self.newest(usize::MAX)
     }
 
-    /// The newest `n` events, oldest first.
-    pub fn newest(&self, n: usize) -> Result<Vec<Event>, Error> {
+    pub(crate) fn newest(&self, n: usize) -> Result<Vec<Event>, Error> {
         self.newest_of(n, |_| true)
     }
 
-    /// The newest `n` events time travel steps through (none of a
-    /// `#[skip_travel]` method's), oldest first.
-    pub fn travel_steps(&self, n: usize) -> Result<Vec<Event>, Error> {
-        self.newest_of(n, |m| !untraveled::<T>(m))
+    pub(crate) fn travel_steps(&self, n: usize) -> Result<Vec<Event>, Error> {
+        self.newest_of(n, |m| !untraveled(self.kind, m))
     }
 
     fn newest_of(&self, n: usize, keep: impl Fn(&str) -> bool) -> Result<Vec<Event>, Error> {
+        let k = self.kind;
         let c = self.db.conn();
         let mut q = c.prepare("SELECT seq, method, args, inputs, by, at, v FROM log WHERE cell = ?1 ORDER BY seq DESC")?;
-        let rows = q.query_map(params![T::ID], |r| {
+        let rows = q.query_map(params![k.id], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get(1)?,
@@ -2422,7 +2615,7 @@ impl<T: Cell> Store<T> {
         let kept = rows.filter(|row| row.as_ref().map_or(true, |r: &(i64, String, String, String, String, i64, u32)| keep(&r.1)));
         let mut out = kept.take(n).map(|row| {
             let (seq, method, args, inputs, by, at, v) = row?;
-            let bad = |e: serde_json::Error| Error(format!("{}: corrupt event {seq}: {e}", T::ID));
+            let bad = |e: serde_json::Error| Error(format!("{}: corrupt event {seq}: {e}", k.id));
             Ok(Event {
                 seq: seq as u64,
                 method,
@@ -2439,77 +2632,77 @@ impl<T: Cell> Store<T> {
     }
 
     fn floor(&self) -> Result<u64, Error> {
+        let k = self.kind;
         let f: Option<i64> =
-            self.db.conn().query_row("SELECT seq FROM floor WHERE cell = ?1", [T::ID], |r| r.get(0)).optional()?;
+            self.db.conn().query_row("SELECT seq FROM floor WHERE cell = ?1", [k.id], |r| r.get(0)).optional()?;
         Ok(f.unwrap_or(0) as u64)
     }
 
-    /// Another cell's history gone from this store's file (`ax persist
-    /// --drop`: one no build declares any more, as `#[cell(retire)]` does),
-    /// never this cell's or one it reads; whether there was any.
-    pub fn drop_cell(&self, cell: &str) -> Result<bool, Error> {
-        if cell == T::ID || T::AIO_CELLS.iter().any(|s| s.cell == cell) {
-            return Err(Error(format!("{}: it reads {cell}: a declared cell is never dropped", T::ID)));
+    pub(crate) fn drop_cell(&self, cell: &str) -> Result<bool, Error> {
+        let k = self.kind;
+        if cell == k.id || k.aio_cells.iter().any(|s| s.cell == cell) {
+            return Err(Error(format!("{}: it reads {cell}: a declared cell is never dropped", k.id)));
         }
         erase(&self.db.conn(), self.aio_kv.as_ref(), &[cell], "")
     }
 
     /// The state right after event `seq` (0: the start).
-    pub fn state_at(&self, seq: u64) -> Result<T, Error> {
+    pub(crate) fn state_at(&self, seq: u64) -> Result<St, Error> {
+        let k = self.kind;
         if seq > self.seq {
-            return Err(Error(format!("{}: no event {seq} yet (last is {})", T::ID, self.seq)));
+            return Err(Error(format!("{}: no event {seq} yet (last is {})", k.id, self.seq)));
         }
         let floor = self.floor()?;
         if seq < floor {
-            return Err(Error(format!("{}: history before event {floor} was folded", T::ID)));
+            return Err(Error(format!("{}: history before event {floor} was folded", k.id)));
         }
         let base: Option<(i64, u32, String)> = self
             .db
             .conn()
             .query_row(
                 "SELECT seq, v, state FROM snap WHERE cell = ?1 AND seq <= ?2 ORDER BY seq DESC LIMIT 1",
-                params![T::ID, seq as i64],
+                params![k.id, seq as i64],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
         let (from, mut st) = match base {
             Some((s, v, text)) => {
-                if v != T::VERSION && self.has_events(s as u64, seq)? {
-                    return Err(Error(format!("{}: event {seq} is from before the upgrade from v{v}", T::ID)));
+                if v != k.version && self.has_events(s as u64, seq)? {
+                    return Err(Error(format!("{}: event {seq} is from before the upgrade from v{v}", k.id)));
                 }
-                (s as u64, decode(&text, v)?)
+                (s as u64, decode(k, &text, v)?)
             }
-            None => (0, T::default()),
+            None => (0, (k.default)()),
         };
         replay(&self.db.conn(), &mut st, from, seq, false)?;
         Ok(st)
     }
 
     fn has_events(&self, from: u64, to: u64) -> Result<bool, Error> {
+        let k = self.kind;
         Ok(self.db.conn().query_row(
             "SELECT EXISTS (SELECT 1 FROM log WHERE cell = ?1 AND seq > ?2 AND seq <= ?3)",
-            params![T::ID, from as i64, to as i64],
+            params![k.id, from as i64, to as i64],
             |r| r.get(0),
         )?)
     }
 
-    /// How long the method of event `seq` took, if it ran in this run
-    /// (one of the newest `TOOK`).
-    pub fn took(&self, seq: u64) -> Option<std::time::Duration> {
+    pub(crate) fn took(&self, seq: u64) -> Option<std::time::Duration> {
         self.took.iter().rev().find(|(s, _)| *s == seq).map(|(_, d)| *d)
     }
 
     /// The cell's log as time travel reads it ([`Steps`]).
     fn steps(&self) -> Result<Vec<(u64, Option<u64>)>, Error> {
+        let k = self.kind;
         let c = self.db.conn();
         let mut q = c.prepare("SELECT seq, method, args FROM log WHERE cell = ?1 ORDER BY seq")?;
         let rows =
-            q.query_map([T::ID], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+            q.query_map([k.id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
         let mut out = vec![];
         for r in rows {
             let (seq, method, args) = r?;
             // A `#[skip_travel]` method's event is no step of its own.
-            if untraveled::<T>(&method) {
+            if untraveled(k, &method) {
                 continue;
             }
             let to = (method == REWIND).then(|| serde_json::from_str::<Value>(&args).ok()?["to"].as_u64()).flatten();
@@ -2518,14 +2711,11 @@ impl<T: Cell> Store<T> {
         Ok(out)
     }
 
-    /// Where the cell is in its history ([`Position`]).
-    pub fn position(&self) -> Result<Position, Error> {
+    pub(crate) fn position(&self) -> Result<Position, Error> {
         Ok(Position::of(&self.steps()?, self.floor()?))
     }
 
-    /// Step through the history ([`Travel`]): returns the event the state is
-    /// right after now.
-    pub fn travel(&mut self, by: &By, t: Travel) -> Result<u64> {
+    pub(crate) fn travel(&mut self, by: &By, t: Travel) -> Result<u64> {
         if !TRAVEL.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(Rejected::new("time travel is off ([history] travel = false)"));
         }
@@ -2536,40 +2726,30 @@ impl<T: Cell> Store<T> {
         Ok(to)
     }
 
-    /// Go back to the state after event `seq`. This is a new event, so the
-    /// steps in between stay in the history (and can be returned to). Like
-    /// a boot, it brings back what was saved of that state, repaired.
-    pub fn rewind(&mut self, by: &By, seq: u64) -> Result {
+    pub(crate) fn rewind(&mut self, by: &By, seq: u64) -> Result {
         let st = self.state_at(seq).map_err(|e| Rejected::new(e.0))?;
         self.put(by, st, ("to", seq.into()))
     }
 
-    /// Replace the state with `state` (this version's JSON, as `aio
-    /// snapshot` writes it): a new event like a rewind, so the state before
-    /// it stays in the history. One that doesn't fit the type, or that the
-    /// cell's `check` refuses, changes nothing.
-    pub fn load(&mut self, by: &By, state: Value) -> Result {
-        let st: T = unshaped(state).map_err(|e| Rejected::new(e.0))?;
+    pub(crate) fn load(&mut self, by: &By, state: Value) -> Result {
+        let st = unshaped(self.kind, state).map_err(|e| Rejected::new(e.0))?;
         st.check()?;
         self.put(by, st, ("load", true.into()))
     }
 
     /// Commit `st` as a rewind event (`why` says which kind), as a boot
     /// brings it back: what is saved of it, repaired.
-    fn put(&mut self, by: &By, st: T, why: (&str, Value)) -> Result {
+    fn put(&mut self, by: &By, st: St, why: (&str, Value)) -> Result {
         self.flush()?;
-        let (saved, back) = match shaped(&st).map_err(|e| Rejected::new(e.0))? {
-            Some(v) => (v.clone(), unshaped(v).map_err(|e| Rejected::new(e.0))?),
-            None => (crate::json(&st)?, st),
+        let (saved, back) = match shaped(&*st).map_err(|e| Rejected::new(e.0))? {
+            Some(v) => (v.clone(), unshaped(self.kind, v).map_err(|e| Rejected::new(e.0))?),
+            None => (crate::kind::json(&*st)?, st),
         };
         let args = serde_json::json!({ why.0: why.1, "state": saved });
-        self.commit(by, REWIND, &args, &Asks::default(), self.now(), Arc::new(repaired(back)), None, &[])
+        self.commit(by, REWIND, &args, &Asks::default(), self.now(), repaired(back), None, &[])
     }
 
-    /// What this version saves of the state now, as a shape: each value
-    /// replaced by its JSON type (`ax migrations` compares a stored
-    /// snapshot against it).
-    pub fn shape(&self) -> Result<Value, Error> {
+    pub(crate) fn shape(&self) -> Result<Value, Error> {
         let v = match shaped(&*self.state)? {
             Some(v) => v,
             None => json(&*self.state)?,
@@ -2577,10 +2757,7 @@ impl<T: Cell> Store<T> {
         Ok(shape_of(&v))
     }
 
-    /// Keep the history `keep` long (`[history] keep`): the events older
-    /// are folded now, then every `SNAP_EVERY` commits. Returns how many
-    /// were folded now.
-    pub fn keep_history(&mut self, keep: std::time::Duration) -> Result<usize, Error> {
+    pub(crate) fn keep_history(&mut self, keep: std::time::Duration) -> Result<usize, Error> {
         self.keep = Some(i64::try_from(keep.as_millis()).unwrap_or(i64::MAX));
         self.fold_kept()
     }
@@ -2590,13 +2767,11 @@ impl<T: Cell> Store<T> {
         self.fold_before(self.now().saturating_sub(keep))
     }
 
-    /// Fold the events older than `before` (ms since the epoch) into a
-    /// snapshot: time travel then reaches back to that snapshot only.
-    /// Returns how many events were folded.
-    pub fn fold_before(&mut self, before: i64) -> Result<usize, Error> {
+    pub(crate) fn fold_before(&mut self, before: i64) -> Result<usize, Error> {
+        let k = self.kind;
         self.flush().map_err(|e| Error(e.why))?;
         let cut: Option<i64> =
-            self.db.conn().query_row("SELECT MAX(seq) FROM log WHERE cell = ?1 AND at < ?2", params![T::ID, before], |r| {
+            self.db.conn().query_row("SELECT MAX(seq) FROM log WHERE cell = ?1 AND at < ?2", params![k.id, before], |r| {
                 r.get(0)
             })?;
         let Some(cut) = cut else { return Ok(0) };
@@ -2605,7 +2780,7 @@ impl<T: Cell> Store<T> {
             .conn()
             .query_row(
                 "SELECT seq, v FROM snap WHERE cell = ?1 AND seq <= ?2 ORDER BY seq DESC LIMIT 1",
-                params![T::ID, cut],
+                params![k.id, cut],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
@@ -2614,7 +2789,7 @@ impl<T: Cell> Store<T> {
         let from = snap.map_or(self.floor()? as i64, |(s, _)| s);
         let older: bool = self.db.conn().query_row(
             "SELECT EXISTS (SELECT 1 FROM log WHERE cell = ?1 AND seq > ?2 AND seq <= ?3 AND v != ?4)",
-            params![T::ID, from, cut, T::VERSION],
+            params![k.id, from, cut, k.version],
             |r| r.get(0),
         )?;
         // A snapshot of another version (an upgrade, or a newer build's data
@@ -2623,9 +2798,9 @@ impl<T: Cell> Store<T> {
         // (that would drop the newer build's fields). Fold at the snapshot,
         // as it is, or not at all.
         let text = match snap {
-            Some((_, v)) if v != T::VERSION => None,
+            Some((_, v)) if v != k.version => None,
             _ if older => None,
-            _ => snapshot(&self.state_at(cut as u64)?, true)?,
+            _ => snapshot(&*self.state_at(cut as u64)?, true)?,
         };
         // What is saved of that state can't bring it back whole: fold at the
         // newest snapshot before it instead, which the events after it follow.
@@ -2639,22 +2814,22 @@ impl<T: Cell> Store<T> {
         if let Some(text) = text {
             tx.execute(
                 "INSERT OR REPLACE INTO snap (cell, seq, v, state) VALUES (?1, ?2, ?3, ?4)",
-                params![T::ID, cut, T::VERSION, text],
+                params![k.id, cut, k.version, text],
             )?;
         }
-        let n = tx.execute("DELETE FROM log WHERE cell = ?1 AND seq <= ?2", params![T::ID, cut])?;
-        tx.execute("DELETE FROM snap WHERE cell = ?1 AND seq < ?2", params![T::ID, cut])?;
+        let n = tx.execute("DELETE FROM log WHERE cell = ?1 AND seq <= ?2", params![k.id, cut])?;
+        tx.execute("DELETE FROM snap WHERE cell = ?1 AND seq < ?2", params![k.id, cut])?;
         // Call ids expire with the folded history, but never before a re-send
         // of them would be refused anyway (`Op::MAX_AGE_MS`).
         let oldest = self.now() - crate::cx::Op::MAX_AGE_MS;
         let old: Vec<String> = tx
             .prepare("SELECT op FROM ops WHERE cell = ?1 AND seq <= ?2")?
-            .query_map(params![T::ID, cut], |r| r.get(0))?
+            .query_map(params![k.id, cut], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         for op in old.iter().filter(|op| crate::cx::Op::parse(op).is_none_or(|o| o.ms() < oldest)) {
-            tx.execute("DELETE FROM ops WHERE cell = ?1 AND op = ?2", params![T::ID, op])?;
+            tx.execute("DELETE FROM ops WHERE cell = ?1 AND op = ?2", params![k.id, op])?;
         }
-        tx.execute("INSERT OR REPLACE INTO floor (cell, seq) VALUES (?1, ?2)", params![T::ID, cut])?;
+        tx.execute("INSERT OR REPLACE INTO floor (cell, seq) VALUES (?1, ?2)", params![k.id, cut])?;
         tx.commit()?;
         Ok(n)
     }
@@ -2766,15 +2941,46 @@ fn written(c: &Kept, w: Write<'_>) -> Result<(Vec<u64>, u64, Value)> {
     Ok((logged_seqs, seq, kept_saved))
 }
 
-impl<T: Cell> Drop for Store<T> {
-    fn drop(&mut self) {
-        self.close();
+/// A [`Store`], its cell's type erased: its [`Core`] (by `Deref`), or
+/// itself again (as `dyn Any`).
+pub(crate) trait AnyStore: std::any::Any + Send {
+    fn core(&self) -> &Core;
+    fn core_mut(&mut self) -> &mut Core;
+}
+
+impl<T: Cell> AnyStore for Store<T> {
+    fn core(&self) -> &Core {
+        &self.core
+    }
+
+    fn core_mut(&mut self) -> &mut Core {
+        &mut self.core
     }
 }
 
-/// Is `method` (a step's, `add.1` too) one of `T`'s `#[skip_travel]` methods?
-fn untraveled<T: Cell>(method: &str) -> bool {
-    T::UNTRAVELED.contains(&method.split('.').next().unwrap_or(method))
+impl std::ops::Deref for dyn AnyStore {
+    type Target = Core;
+
+    fn deref(&self) -> &Core {
+        self.core()
+    }
+}
+
+impl std::ops::DerefMut for dyn AnyStore {
+    fn deref_mut(&mut self) -> &mut Core {
+        self.core_mut()
+    }
+}
+
+impl<T: Cell> Drop for Store<T> {
+    fn drop(&mut self) {
+        self.core.close();
+    }
+}
+
+/// Is `method` (a step's, `add.1` too) one of cell `k`'s `#[skip_travel]` methods?
+fn untraveled(k: &Kind, method: &str) -> bool {
+    k.untraveled.contains(&method.split('.').next().unwrap_or(method))
 }
 
 /// How many characters of the state a panic's line shows.
@@ -2783,12 +2989,13 @@ const PANIC_STATE: usize = 2000;
 /// A method's panic, said: in a debug build with the state it ran on (aio's
 /// error box), as saved, every string masked, at most [`PANIC_STATE`]
 /// characters; a cell with `#[redact]` methods keeps its state to itself.
-pub(crate) fn panicked<T: Cell>(method: &str, why: &str, n: usize, state: &T) -> String {
-    let line = format!("[aio] {}.{method} panicked: {why} ({n} within a minute)", T::ID);
-    if !crate::DEV_BUILD || !T::REDACTED.is_empty() {
+pub(crate) fn panicked(method: &str, why: &str, n: usize, state: &dyn AnyCell) -> String {
+    let k = state.kind();
+    let line = format!("[aio] {}.{method} panicked: {why} ({n} within a minute)", k.id);
+    if !crate::DEV_BUILD || !k.redacted.is_empty() {
         return line;
     }
-    let Ok(v) = crate::json(state) else { return line };
+    let Ok(v) = crate::kind::json(state) else { return line };
     let shown = crate::report::masked(&v).to_string();
     let more = if shown.chars().count() > PANIC_STATE { "…" } else { "" };
     format!("{line}\n  the state it ran on: {}{more}", shown.chars().take(PANIC_STATE).collect::<String>())
@@ -3049,25 +3256,25 @@ mod tests {
         let mut s = Store::<Cursor>::memory();
         s.call(&By::Test, "add", serde_json::json!(["a"])).unwrap();
         held(&mut s, 3);
-        let w = s.due().expect("due").weigh();
+        let w = s.core.due().expect("due").weigh();
         assert!(w.alone && !w.same, "its last call alone makes it");
-        assert_eq!(s.flush_idle(Some(w)), None, "flushed");
+        assert_eq!(s.core.flush_idle(Some(w)), None, "flushed");
         let seq = s.seq();
         assert_eq!(s.state().at, 3);
         // Weighed, then another step came: the weighing is not used, the run is weighed again.
         held(&mut s, 2);
-        let w = s.due().expect("due").weigh();
+        let w = s.core.due().expect("due").weigh();
         s.call(&By::Test, "focus", serde_json::json!([9])).unwrap();
-        assert_eq!(s.flush_idle(Some(w)), None);
+        assert_eq!(s.core.flush_idle(Some(w)), None);
         assert_eq!((s.state().at, s.seq()), (9, seq + 1), "one event for the run, its last step's");
         // A run that came back where it began logs nothing.
         held(&mut s, 0);
         s.call(&By::Test, "focus", serde_json::json!([1])).unwrap();
         s.call(&By::Test, "focus", serde_json::json!([9])).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let w = s.due().expect("due").weigh();
+        let w = s.core.due().expect("due").weigh();
         assert!(w.same);
-        assert_eq!(s.flush_idle(Some(w)), None);
+        assert_eq!(s.core.flush_idle(Some(w)), None);
         assert_eq!(s.seq(), seq + 1);
     }
 }

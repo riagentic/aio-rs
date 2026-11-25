@@ -4,7 +4,10 @@
 //! `net`) and over the app's local door (`door`: frames on a private socket,
 //! in every build), so this user's tools reach any running app.
 use crate::patch;
-use crate::{By, Cell, Door, Handle, Rejected, Result};
+use crate::handle::Raw;
+#[cfg(feature = "server")]
+use crate::{Cell, Handle};
+use crate::{By, Rejected, Result};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -172,7 +175,7 @@ impl<U: Cell> Beside for Handle<U> {
     }
 
     fn vitals(&self) -> (usize, bool) {
-        (serde_json::to_vec(&*self.state()).map_or(0, |v| v.len()), self.enabled())
+        self.raw.vitals()
     }
 
     fn session(
@@ -186,7 +189,7 @@ impl<U: Cell> Beside for Handle<U> {
         hooks: Hooks,
         hello: Value,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>> {
-        Box::pin(session(self.clone(), w, limits, from, gate, signed, calls, hooks, Some(hello)))
+        Box::pin(session(self.raw.clone(), w, limits, from, gate, signed, calls, hooks, Some(hello)))
     }
 
     #[cfg(all(feature = "kit", feature = "server"))]
@@ -201,7 +204,7 @@ impl<U: Cell> Beside for Handle<U> {
 
     #[cfg(feature = "compat")]
     fn aio_cells(&self, seer: &crate::Caller) -> Value {
-        crate::compat::wire::cells::<U>(&View::of(self, seer).shown)
+        crate::compat::wire::cells::<U>(&View::of(&self.raw, seer).shown)
     }
 
     #[cfg(feature = "compat")]
@@ -211,7 +214,7 @@ impl<U: Cell> Beside for Handle<U> {
 
     #[cfg(feature = "compat")]
     fn aio_method(&self, cell: &str, method: &str) -> Option<String> {
-        crate::compat::data::method_of::<U>(cell, method)
+        crate::compat::data::method_of(<U as crate::kind::KindOf>::KIND, cell, method)
     }
 
     #[cfg(feature = "compat")]
@@ -228,7 +231,7 @@ impl<U: Cell> Beside for Handle<U> {
         method: &str,
         args: Value,
     ) -> crate::Result<(Option<Value>, crate::Answer)> {
-        gate.ask(&self.by(by.clone()), by, from, method, args, None, None)
+        gate.ask(&self.raw.by(by.clone()), by, from, method, args, None, None)
     }
 
     #[cfg(feature = "compat")]
@@ -689,9 +692,9 @@ impl Gate {
     /// A call by `viewer` through this link, `op` its synced id if any.
     /// Blocking: it may read the session.
     #[cfg_attr(not(all(feature = "compat", feature = "server")), allow(dead_code))]
-    pub(crate) fn call<T: Cell>(
+    pub(crate) fn call(
         &self,
-        h: &Handle<T>,
+        h: &Raw,
         viewer: &By,
         from: Option<&Arc<crate::Request>>,
         method: &str,
@@ -716,9 +719,9 @@ impl Gate {
 
     /// [`Self::call`], followed to its end: an async method's answer to come.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn ask<T: Cell>(
+    pub(crate) fn ask(
         &self,
-        h: &Handle<T>,
+        h: &Raw,
         viewer: &By,
         from: Option<&Arc<crate::Request>>,
         method: &str,
@@ -1015,17 +1018,17 @@ pub(crate) trait Linked: Send + Sync {
     fn operate_store(&self, by: &By, ask: &Value) -> std::result::Result<Value, String>;
 }
 
-impl<T: Cell> Linked for Handle<T> {
+impl Linked for Raw {
     fn id(&self) -> &'static str {
-        T::ID
+        self.kind().id
     }
 
     fn version(&self) -> u32 {
-        T::VERSION
+        self.kind().version
     }
 
     fn is_async(&self, method: &str) -> bool {
-        T::async_mode(method).is_some()
+        (self.kind().async_mode)(method).is_some()
     }
 
     fn quarantined(&self) -> Option<String> {
@@ -1033,24 +1036,24 @@ impl<T: Cell> Linked for Handle<T> {
     }
 
     fn closing(&self) -> bool {
-        Handle::closing(self)
+        Raw::closing(self)
     }
 
     fn events(&self) -> tokio::sync::broadcast::Receiver<(u64, crate::Event)> {
-        Handle::events(self)
+        Raw::events(self)
     }
 
     fn tells(&self) -> tokio::sync::broadcast::Receiver<crate::tell::Tell> {
-        Handle::tells(self)
+        Raw::tells(self)
     }
 
     fn shown(&self, viewer: &crate::Caller) -> (u64, Value) {
         let (seq, st) = self.snapshot();
-        (seq, crate::shown(&*st, viewer))
+        (seq, crate::kind::shown(&*st, viewer))
     }
 
     fn by(&self, by: By) -> Arc<dyn Linked> {
-        Arc::new(Handle::by(self, by))
+        Arc::new(Raw::by(self, by))
     }
 
     fn ask(
@@ -1067,7 +1070,7 @@ impl<T: Cell> Linked for Handle<T> {
     }
 
     fn travel(&self, by: &By, ask: Option<crate::TimeAsk>) -> Result<crate::Timeline> {
-        self.by(by.clone()).travel(ask)
+        Raw::by(self, by.clone()).travel(ask)
     }
 
     fn took(&self, seqs: &[u64]) -> Vec<(u64, Duration)> {
@@ -1080,7 +1083,7 @@ impl<T: Cell> Linked for Handle<T> {
 
     fn operate_store(&self, by: &By, ask: &Value) -> std::result::Result<Value, String> {
         match ask["t"].as_str() {
-            Some("fields") => Ok(fields::<T>()),
+            Some("fields") => Ok(fields(self.kind())),
             Some("load") => {
                 self.store(|s| s.load(by, ask["state"].clone())).map_err(|e| e.why)?;
                 Ok(self.snapshot().0.into())
@@ -1090,21 +1093,21 @@ impl<T: Cell> Linked for Handle<T> {
                 let cell = ask["cell"].as_str().unwrap_or_default();
                 self.store(|s| s.drop_cell(cell)).map(Value::Bool).map_err(|e| e.0)
             }
-            Some("peer") => Ok(peer::<T>(&self.state(), ask)),
+            Some("peer") => Ok(peer(&*self.state(), ask)),
             Some("at") => {
                 let at = ask["to"].as_u64().unwrap_or_default();
                 let st = self.store(|s| s.state_at(at)).map_err(|e| e.0)?;
-                serde_json::to_value(&st).map_err(|e| e.to_string())
+                st.to_json().map_err(|e| e.to_string())
             }
-            _ => self.store(|s| s.shape()).map(|shape| json!({ "v": T::VERSION, "shape": shape })).map_err(|e| e.0),
+            _ => self.store(|s| s.shape()).map(|shape| json!({ "v": self.kind().version, "shape": shape })).map_err(|e| e.0),
         }
     }
 }
 
 /// [`session_of`] on `h`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn session<T: Cell>(
-    h: Handle<T>,
+pub(crate) async fn session(
+    h: Raw,
     w: Sock,
     limits: Limits,
     from: String,
@@ -1526,12 +1529,13 @@ async fn linked(
 /// (aio's `peer().describe()`): each method, its signature, and the answer of
 /// its `#[client]` rule, asked with no arguments: one that reads them says
 /// it depends on them (pure).
-pub(crate) fn peer<T: Cell>(st: &T, ask: &Value) -> Value {
+pub(crate) fn peer(st: &dyn crate::kind::AnyCell, ask: &Value) -> Value {
+    let k = st.kind();
     let who = crate::Caller {
         by: By::User(ask["user"].as_str().unwrap_or("peer").into()),
         role: ask["role"].as_str().map(String::from),
     };
-    let methods: Vec<Value> = T::METHODS
+    let methods: Vec<Value> = k.methods
         .iter()
         .enumerate()
         .map(|(i, m)| {
@@ -1540,10 +1544,10 @@ pub(crate) fn peer<T: Cell>(st: &T, ask: &Value) -> Value {
                 Err(e) if e.code == Some(crate::Code::AccessDenied) => format!("no: {}", e.why),
                 Err(_) => "by its arguments (its allow rule reads them)".into(),
             };
-            json!({ "method": m, "sig": T::SIGNATURES.get(i), "client": T::CLIENT.contains(m), "may": may })
+            json!({ "method": m, "sig": k.signatures.get(i), "client": k.client.contains(m), "may": may })
         })
         .collect();
-    json!({ "cell": T::ID, "v": T::VERSION, "methods": methods })
+    json!({ "cell": k.id, "v": k.version, "methods": methods })
 }
 
 /// `ax events --json`'s live readings of `h` (an operator's `took`): the
@@ -1564,8 +1568,8 @@ fn took(h: &dyn Linked, ask: &Value) -> Value {
 /// What a cell saves and sends, field by field (aio's trojan `fields`): saved
 /// at all (`persist`), its `#[transient]` fields (kept, never saved) and its
 /// `#[server]` ones (saved, never sent to a client) (pure).
-pub(crate) fn fields<T: Cell>() -> Value {
-    json!({ "persist": T::PERSIST, "transient": T::TRANSIENT, "server": T::SERVER })
+pub(crate) fn fields(k: &crate::kind::Kind) -> Value {
+    json!({ "persist": k.persist, "transient": k.transient, "server": k.server })
 }
 
 /// A local door's operator message `ask` on `h`, by `by`: `load` a state,

@@ -2,6 +2,8 @@
 //! `server` feature).
 #[cfg(feature = "server")]
 use crate::sync::Remote;
+use crate::handle::Raw;
+use crate::kind::KindOf;
 use crate::{By, Cell, Door, Handle, Result, Status};
 use serde_json::Value;
 use std::sync::Arc;
@@ -33,28 +35,25 @@ impl<T: Cell> Clone for Source<T> {
 impl<T: Cell> Source<T> {
     /// The app's own store at `path`, its schedules running.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, crate::Error> {
-        Self::run(Handle::open(path)?)
+        Ok(Self::Local(Handle::of(run(Handle::<T>::open(path)?.raw))))
     }
 
     /// A ported app's store: aio app `app`'s `state.db` at `path`
     /// ([`crate::Store::open_aio`]), its schedules running.
     pub fn open_aio(path: impl AsRef<std::path::Path>, app: &str) -> Result<Self, crate::Error> {
-        Self::run(Handle::open_aio(path, app)?)
+        Ok(Self::Local(Handle::of(run(Handle::<T>::open_aio(path, app)?.raw))))
     }
 
-    fn run(h: Handle<T>) -> Result<Self, crate::Error> {
-        // Problem reports show the app's cells as they are. Kept apart from
-        // the store's lock: a report taken mid-call (a panic) never waits on it.
-        let latest = Arc::new(std::sync::Mutex::new(h.state()));
-        let l = latest.clone();
-        h.listen(move |s| *l.lock().unwrap_or_else(|e| e.into_inner()) = s.clone());
-        crate::report::watch(T::ID, T::REDACT || !T::REDACTED.is_empty(), move || {
-            crate::store::reported(&**latest.try_lock().ok()?)
-        });
-        let _in = crate::rt().enter();
-        drop(h.start());
-        crate::on_shutdown(h.clone());
-        Ok(Self::Local(h))
+    /// How [`boot`] opens cell `T`'s store, and serves it.
+    fn opener() -> Opener {
+        Opener {
+            kind: T::KIND,
+            memory: || Handle::<T>::memory().raw,
+            open: |path| Handle::<T>::open(path).map(|h| h.raw),
+            open_aio: |path, app| Handle::<T>::open_aio(path, app).map(|h| h.raw),
+            #[cfg(feature = "server")]
+            serve: |h, l, opts| Box::pin(crate::sync::serve_with(Handle::<T>::of(h), l, opts)),
+        }
     }
 
     /// A synced copy of the cell `addr` serves, as `user`.
@@ -167,17 +166,7 @@ impl<T: Cell> Source<T> {
         let Self::Local(h) = self else {
             return Err(std::io::Error::other("a synced copy can't serve"));
         };
-        let l = crate::rt()
-            .block_on(tokio::net::TcpListener::bind(listen))
-            .map_err(|e| std::io::Error::new(e.kind(), format!("{listen}: {e}")))?;
-        let port = l.local_addr()?.port();
-        let h = h.clone();
-        crate::rt().spawn(async move {
-            if let Err(e) = crate::sync::serve_with(h, l, opts).await {
-                eprintln!("[aio] sync server stopped: {e}");
-            }
-        });
-        Ok(port)
+        serve(h.raw.clone(), Self::opener().serve, listen, opts)
     }
 
     /// The source `aio.toml` asks for: the store in `dirs.data` (a ported
@@ -234,77 +223,7 @@ impl<T: Cell> Source<T> {
                 std::io::ErrorKind::Unsupported,
                 format!("{}: mode = \"client\" needs aio::Source::for_app, not for_server", T::ID),
             )),
-            mode => {
-                crate::store::ONLY_PERSIST.store(cfg.data.only_persist, std::sync::atomic::Ordering::Relaxed);
-                crate::store::TRAVEL.store(cfg.history.travel, std::sync::atomic::Ordering::Relaxed);
-                let args: Vec<String> = std::env::args().skip(1).collect();
-                let asked = crate::paths::Ask::parse(&args).is_ok_and(|a| a.no_persist);
-                if !cfg.data.persist || asked {
-                    let why = if asked { "--no-persist" } else { "[data] persist = false" };
-                    eprintln!("[aio] {}: {why}: the state lives in memory only, nothing is saved", T::ID);
-                    let s = Self::run(Handle::memory()).map_err(|e| std::io::Error::other(e.0))?;
-                    let door = http.clone();
-                    if matches!(mode, Mode::Standalone | Mode::ClientServer) {
-                        s.serve_window(cfg, dirs, &door);
-                    }
-                    if matches!(mode, Mode::ClientServer | Mode::Server) {
-                        s.serve_app(cfg, dirs, http)?;
-                    }
-                    // `[server] local_peers = false`: a release build opens no door, in memory too.
-                    if cfg.server.local_peers || crate::door::OPERATOR {
-                        s.serve_door(dirs, &door);
-                    }
-                    return Ok(s);
-                }
-                if let Some(app) = &dirs.port_of {
-                    #[cfg(feature = "compat")]
-                    crate::compat::scatter::adopt_here(app, dirs);
-                    #[cfg(not(feature = "compat"))]
-                    if std::path::Path::new("data.db").exists() {
-                        eprintln!("[aio] data: ./data.db may be {app}'s aio store from before its home: it is not moved in without aio-rs's feature `compat`");
-                    }
-                }
-                crate::compat::scatter::moved_here(&cfg.home.moved, dirs);
-                for p in crate::compat::data::retire(&dirs.data, &cfg.data.retire)? {
-                    eprintln!("[aio] retired {} (an old store, kept: delete it once nothing is missing)", p.display());
-                }
-                let s = match &dirs.port_of {
-                    Some(app) => Self::open_aio(&dirs.store, app),
-                    None => Self::open(&dirs.store),
-                }
-                .map_err(|e| std::io::Error::other(e.0))?;
-                // Phones always save hard: the OS may kill the app at any moment.
-                let durability = if cfg!(any(target_os = "android", target_os = "ios")) {
-                    crate::config::Durability::Full
-                } else {
-                    cfg.data.durability
-                };
-                if let Some(h) = s.local() {
-                    h.store(|st| st.set_durability(durability)).map_err(|e| std::io::Error::other(e.0))?;
-                    h.store(|st| st.set_pragmas(&cfg.data.pragmas)).map_err(|e| std::io::Error::other(e.0))?;
-                    h.store(|st| st.keep_history(cfg.history.keep)).map_err(|e| std::io::Error::other(e.0))?;
-                    h.store(|st| st.set_coalesce(cfg.data.coalesce)).map_err(|e| std::io::Error::other(e.why))?;
-                }
-                if let Some(every) = cfg.data.snapshot_every {
-                    crate::store::snapshot_every(&dirs.store, every);
-                }
-                if let Some(every) = cfg.data.backup_every {
-                    let home = crate::paths::parent(&dirs.data).join("backups");
-                    crate::backup::timed(&cfg.app.id, &dirs.store, &home, every, cfg.data.backup_keep);
-                }
-                let door = http.clone();
-                if matches!(mode, Mode::Standalone | Mode::ClientServer) {
-                    s.serve_window(cfg, dirs, &door);
-                }
-                if matches!(mode, Mode::ClientServer | Mode::Server) {
-                    s.serve_app(cfg, dirs, http)?;
-                }
-                // `[server] local_peers = false`: a release build opens no door.
-                if cfg.server.local_peers || crate::door::OPERATOR {
-                    s.serve_door(dirs, &door);
-                }
-                Ok(s)
-            }
+            mode => boot(&Self::opener(), cfg, dirs, http, mode).map(|h| Self::Local(Handle::of(h))),
         }
     }
 
@@ -410,205 +329,6 @@ impl<T: Cell> Source<T> {
         Err(crate::left_out("server", "client mode"))
     }
 
-    /// Client-server and server modes: serve the store as `[server]` says.
-    #[cfg(feature = "server")]
-    fn serve_app(&self, cfg: &crate::config::Config, dirs: &crate::paths::AppDirs, http: Http) -> std::io::Result<()> {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let ask = crate::paths::Ask::parse(&args).map_err(std::io::Error::other)?;
-        let decided = crate::config::listen(&cfg.server, &ask, &|k| std::env::var_os(k).map(Into::into)).map_err(std::io::Error::other)?;
-        let listen = decided.addr.as_str();
-        #[cfg(feature = "tls")]
-        let tls = {
-            let flag = |p: &Option<String>| p.as_deref().map(std::path::absolute).transpose();
-            let (cert, key) = match (flag(&ask.tls_cert)?, flag(&ask.tls_key)?) {
-                (Some(c), Some(k)) => (Some(c), Some(k)),
-                _ => (cfg.server.cert.clone(), cfg.server.key.clone()),
-            };
-            match (decided.tls, &cert, &key) {
-            (false, ..) => None,
-            (true, Some(cert), Some(key)) => Some(crate::tls::own(cert, key)?),
-                (true, ..) => Some(crate::tls::server(&crate::paths::tool_home().join("tls"), T::ID)?),
-            }
-        };
-        #[cfg(not(feature = "tls"))]
-        for (asked, what) in [
-            (decided.tls, "[server] tls"),
-            (cfg.server.pairing, "[server] pairing"),
-            (cfg.server.discover, "[server] discover"),
-        ] {
-            if asked {
-                return Err(crate::left_out("tls", what));
-            }
-        }
-        let mut http = http.configured(&cfg.server, &dirs.files()).assets(cfg.build.asset_files);
-        #[cfg(feature = "updates")]
-        {
-            http = crate::update::beside(http);
-        }
-        if let Some(why) = cfg.accounts.unverifiable(http.mail.is_some()) {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, why));
-        }
-        let auth_db = || crate::auth::Auth::open(dirs.data.join("auth.db"), cfg.accounts.policy()).map_err(std::io::Error::other);
-        // Sessions without accounts: a session is a user known by its token.
-        if cfg.accounts.sessions && !cfg.accounts.on {
-            let a = std::sync::Arc::new(auth_db()?);
-            crate::auth::serve(&a);
-            http.users = Some(crate::auth::Users::sessions(a, http.users.take()));
-        }
-        let opts = crate::sync::Options {
-            limits: cfg.server.limits,
-            token: crate::config::token(&dirs.data)?,
-            #[cfg(feature = "tls")]
-            pairing: cfg.server.pairing.then(crate::pairing::pairing),
-            #[cfg(feature = "tls")]
-            app: cfg.app.id.clone(),
-            #[cfg(feature = "tls")]
-            tls,
-            hosts: cfg.server.hosts.clone(),
-            http,
-            auth: match cfg.accounts.on {
-                true => Some(std::sync::Arc::new(auth_db()?)),
-                false => None,
-            },
-            strict_origin: cfg.server.strict_origin,
-            trust_proxy: cfg.server.trust_proxy.clone(),
-            security: cfg.server.security.clone(),
-            open: cfg.server.open,
-            page_log: cfg.server.page_log,
-        };
-        let opts_users = opts.http.users.is_some();
-        let host = listen.rsplit_once(':').map(|(h, _)| h.trim_matches(['[', ']']).to_string());
-        #[cfg(feature = "tls")]
-        let tls = opts.tls.is_some();
-        #[cfg(not(feature = "tls"))]
-        let tls = false;
-        let serving = crate::sync::Serving { port: 0, tls, host };
-        let port = self.serve(listen, opts)?;
-        let serving =
-            serde_json::to_string(&crate::sync::Serving { port, ..serving }).map_err(std::io::Error::other)?;
-        crate::paths::write_atomic(&dirs.data.join("serving.json"), serving.as_bytes(), false)?;
-        let bound = format!("{}:{port}", listen.rsplit_once(':').map_or(listen, |(h, _)| h));
-        let bound = crate::config::Listen { addr: bound, ..decided.clone() };
-        eprintln!("[aio] {}", crate::config::listen_says(&bound, T::ID));
-        if cfg.server.open {
-            eprintln!("[aio] WARN {}", crate::config::open_says(T::ID));
-        }
-        if bound.exposed {
-            let gate = match () {
-                _ if cfg.accounts.on => crate::config::Gate::Accounts,
-                _ if cfg.accounts.sessions => crate::config::Gate::Sessions,
-                _ if opts_users => crate::config::Gate::Users,
-                _ if cfg.server.open => crate::config::Gate::Open,
-                _ => crate::config::Gate::Key,
-            };
-            let lan = crate::config::lan_ipv4();
-            for line in crate::config::share_says(&bound, lan, gate, &dirs.data.join("sync.token"), cfg.server.pairing) {
-                eprintln!("[aio] {line}");
-            }
-        }
-        if let Some(line) = crate::config::firewall_says(std::env::consts::OS, bound.exposed) {
-            eprintln!("[aio] {line}");
-        }
-        #[cfg(feature = "tls")]
-        if cfg.server.discover {
-            let me = crate::discovery::Found {
-                name: cfg.app.id.clone(),
-                port,
-                title: Some(cfg.app.name.clone()),
-                needs_auth: !cfg.server.open,
-                tls: bound.tls,
-                host: None,
-            };
-            let udp = crate::discovery::port();
-            crate::rt().spawn(async move {
-                if let Err(e) = crate::discovery::respond(udp, vec![me]).await {
-                    eprintln!("[aio] discovery on UDP {udp} stopped: {e}");
-                }
-            });
-        }
-        Ok(())
-    }
-
-    /// Open the cell's local door ([`crate::door`]), so this user's tools
-    /// reach the running app (`ax state`, `ax call`) and other apps it as
-    /// a peer (`aio::peer`, `http`'s server functions too). A door that
-    /// can't open is said, never fatal: the app works without it.
-    fn serve_door(&self, dirs: &crate::paths::AppDirs, http: &Http) {
-        let Some(h) = self.local().cloned() else { return };
-        let _in = crate::rt().enter();
-        let addr = crate::door::at(&dirs.id, &dirs.data, T::ID);
-        let l = addr.as_ref().map_err(|e| std::io::Error::new(e.kind(), e.to_string())).and_then(|a| crate::ipc::Listener::bind(a));
-        // aio's tools see the app too (`am instances`, `am state`).
-        #[cfg(feature = "compat")]
-        if let (Ok(a), Ok(_)) = (&addr, &l) {
-            crate::compat::local::serve(&dirs.id, &dirs.data, dirs.profile.as_deref(), T::ID, a.clone());
-        }
-        #[cfg(feature = "server")]
-        let (calls, hooks) =
-            (crate::fns::Served { fns: std::sync::Arc::new(http.fns.clone()), ..crate::link::no_calls() }, http.door_hooks());
-        #[cfg(not(feature = "server"))]
-        let (calls, hooks, _) = (crate::link::no_calls(), crate::link::Hooks::default(), http);
-        match l {
-            Ok(l) => drop(crate::rt().spawn(async move {
-                let r = crate::door::serve_with(h, l, Default::default(), calls, crate::door::OPERATOR, hooks).await;
-                if let Err(e) = r {
-                    eprintln!("[aio] {}: the local door stopped: {e}", T::ID);
-                }
-            })),
-            Err(e) => eprintln!("[aio] {}: no local door for tools: {e}", T::ID),
-        }
-    }
-
-    /// The app's routes and files to its window, over a private socket
-    /// (`aio://app/<path>`, [`crate::http::serve_window`]): no TCP port, and
-    /// only the window aio-shell spawns is answered. An app that serves no
-    /// path opens none; a door that can't open is said, never fatal.
-    #[cfg(feature = "server")]
-    fn serve_window(&self, cfg: &crate::config::Config, dirs: &crate::paths::AppDirs, http: &Http) {
-        let http = http.clone().configured(&cfg.server, &dirs.files());
-        if self.local().is_none() || !http.serves() {
-            return;
-        }
-        let _in = crate::rt().enter();
-        let addr = crate::paths::sockets(&dirs.id, &dirs.data).map(|d| crate::ipc::addr(&d, "http"));
-        // Electron's Node connects to it as spelled.
-        let l = addr.and_then(|a| crate::ipc::fits(&a).and_then(|()| crate::ipc::Listener::bind(&a)).map(|l| (a, l)));
-        match l {
-            Ok((addr, l)) => {
-                let n = http.route_count();
-                eprintln!(
-                    "[aio] {}: {n} route(s) served to the window over its private socket (aio://app/<path>): no TCP \
-                     port; another process reaches them only with [server] listen",
-                    T::ID
-                );
-                crate::ipc::set_window_http(addr);
-                drop(crate::rt().spawn(async move {
-                    if let Err(e) = crate::http::serve_window(http, l).await {
-                        eprintln!("[aio] {}: the window's route door stopped: {e}", T::ID);
-                    }
-                }));
-            }
-            Err(e) => eprintln!("[aio] {}: the window gets no routes (aio://app/<path>): {e}", T::ID),
-        }
-    }
-
-    #[cfg(not(feature = "server"))]
-    fn serve_window(&self, _: &crate::config::Config, _: &crate::paths::AppDirs, _: &Http) {}
-
-    #[cfg(not(feature = "server"))]
-    fn serve_app(&self, _: &crate::config::Config, _: &crate::paths::AppDirs, _: Http) -> std::io::Result<()> {
-        Err(crate::left_out("server", "serving (client-server and server modes)"))
-    }
-
-    /// The cell's own handle, when it lives in this process.
-    fn local(&self) -> Option<&Handle<T>> {
-        match self {
-            Self::Local(h) => Some(h),
-            #[cfg(feature = "server")]
-            Self::Remote(_) => None,
-        }
-    }
-
     /// Who calls through this source.
     pub fn by(&self, by: By) -> Self {
         match self {
@@ -618,6 +338,333 @@ impl<T: Cell> Source<T> {
         }
     }
 }
+
+/// A local cell's type, as its erased boot needs it: its store opened
+/// (in memory, at a file, an aio app's), and served ([`crate::sync`]).
+struct Opener {
+    kind: &'static crate::kind::Kind,
+    memory: fn() -> Raw,
+    open: fn(&std::path::Path) -> Result<Raw, crate::Error>,
+    open_aio: fn(&std::path::Path, &str) -> Result<Raw, crate::Error>,
+    #[cfg(feature = "server")]
+    serve: Serve,
+}
+
+/// [`crate::sync::serve_with`] of the cell's typed handle.
+#[cfg(feature = "server")]
+type Serve = fn(
+    Raw,
+    tokio::net::TcpListener,
+    crate::sync::Options,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>>;
+
+/// A local cell running: problem reports show it, its schedules fire, the
+/// app's stop drains and closes it.
+fn run(h: Raw) -> Raw {
+    // Problem reports show the app's cells as they are. Kept apart from
+    // the store's lock: a report taken mid-call (a panic) never waits on it.
+    let latest = Arc::new(std::sync::Mutex::new(h.state()));
+    let l = latest.clone();
+    h.listen(Arc::new(move |s: &crate::kind::St| *l.lock().unwrap_or_else(|e| e.into_inner()) = s.clone()));
+    let k = h.kind();
+    crate::report::watch(k.id, k.redact || !k.redacted.is_empty(), move || {
+        crate::store::reported(&**latest.try_lock().ok()?)
+    });
+    let _in = crate::rt().enter();
+    drop(h.start());
+    crate::on_shutdown(h.clone());
+    h
+}
+
+/// Serve `h` to synced clients on `listen`, in the background; the port it
+/// got ([`Source::serve`]).
+#[cfg(feature = "server")]
+fn serve(h: Raw, serve: Serve, listen: &str, opts: crate::sync::Options) -> std::io::Result<u16> {
+    let l = crate::rt()
+        .block_on(tokio::net::TcpListener::bind(listen))
+        .map_err(|e| std::io::Error::new(e.kind(), format!("{listen}: {e}")))?;
+    let port = l.local_addr()?.port();
+    crate::rt().spawn(async move {
+        if let Err(e) = serve(h, l, opts).await {
+            eprintln!("[aio] sync server stopped: {e}");
+        }
+    });
+    Ok(port)
+}
+
+/// A local cell's boot ([`Source::for_app`] but client mode): its store
+/// opened as `aio.toml` says, served to its window, its clients and its
+/// door. Its type erased: made once, not once per cell.
+fn boot(
+    op: &Opener,
+    cfg: &crate::config::Config,
+    dirs: &crate::paths::AppDirs,
+    http: Http,
+    mode: crate::config::Mode,
+) -> std::io::Result<Raw> {
+    use crate::config::Mode;
+    crate::store::ONLY_PERSIST.store(cfg.data.only_persist, std::sync::atomic::Ordering::Relaxed);
+    crate::store::TRAVEL.store(cfg.history.travel, std::sync::atomic::Ordering::Relaxed);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let asked = crate::paths::Ask::parse(&args).is_ok_and(|a| a.no_persist);
+    if !cfg.data.persist || asked {
+        let why = if asked { "--no-persist" } else { "[data] persist = false" };
+        eprintln!("[aio] {}: {why}: the state lives in memory only, nothing is saved", op.kind.id);
+        let s = run((op.memory)());
+        let door = http.clone();
+        if matches!(mode, Mode::Standalone | Mode::ClientServer) {
+            serve_window(&s, cfg, dirs, &door);
+        }
+        if matches!(mode, Mode::ClientServer | Mode::Server) {
+            serve_app(&s, op, cfg, dirs, http)?;
+        }
+        // `[server] local_peers = false`: a release build opens no door, in memory too.
+        if cfg.server.local_peers || crate::door::OPERATOR {
+            serve_door(&s, dirs, &door);
+        }
+        return Ok(s);
+    }
+    if let Some(app) = &dirs.port_of {
+        #[cfg(feature = "compat")]
+        crate::compat::scatter::adopt_here(app, dirs);
+        #[cfg(not(feature = "compat"))]
+        if std::path::Path::new("data.db").exists() {
+            eprintln!("[aio] data: ./data.db may be {app}'s aio store from before its home: it is not moved in without aio-rs's feature `compat`");
+        }
+    }
+    crate::compat::scatter::moved_here(&cfg.home.moved, dirs);
+    for p in crate::compat::data::retire(&dirs.data, &cfg.data.retire)? {
+        eprintln!("[aio] retired {} (an old store, kept: delete it once nothing is missing)", p.display());
+    }
+    let s = match &dirs.port_of {
+        Some(app) => (op.open_aio)(&dirs.store, app),
+        None => (op.open)(&dirs.store),
+    }
+    .map(run)
+    .map_err(|e| std::io::Error::other(e.0))?;
+    // Phones always save hard: the OS may kill the app at any moment.
+    let durability = if cfg!(any(target_os = "android", target_os = "ios")) {
+        crate::config::Durability::Full
+    } else {
+        cfg.data.durability
+    };
+    s.store(|st| st.set_durability(durability)).map_err(|e| std::io::Error::other(e.0))?;
+    s.store(|st| st.set_pragmas(&cfg.data.pragmas)).map_err(|e| std::io::Error::other(e.0))?;
+    s.store(|st| st.keep_history(cfg.history.keep)).map_err(|e| std::io::Error::other(e.0))?;
+    s.store(|st| st.set_coalesce(cfg.data.coalesce)).map_err(|e| std::io::Error::other(e.why))?;
+    if let Some(every) = cfg.data.snapshot_every {
+        crate::store::snapshot_every(&dirs.store, every);
+    }
+    if let Some(every) = cfg.data.backup_every {
+        let home = crate::paths::parent(&dirs.data).join("backups");
+        crate::backup::timed(&cfg.app.id, &dirs.store, &home, every, cfg.data.backup_keep);
+    }
+    let door = http.clone();
+    if matches!(mode, Mode::Standalone | Mode::ClientServer) {
+        serve_window(&s, cfg, dirs, &door);
+    }
+    if matches!(mode, Mode::ClientServer | Mode::Server) {
+        serve_app(&s, op, cfg, dirs, http)?;
+    }
+    // `[server] local_peers = false`: a release build opens no door.
+    if cfg.server.local_peers || crate::door::OPERATOR {
+        serve_door(&s, dirs, &door);
+    }
+    Ok(s)
+}
+
+/// Client-server and server modes: serve the store as `[server]` says.
+#[cfg(feature = "server")]
+fn serve_app(h: &Raw, op: &Opener, cfg: &crate::config::Config, dirs: &crate::paths::AppDirs, http: Http) -> std::io::Result<()> {
+    let id = h.kind().id;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let ask = crate::paths::Ask::parse(&args).map_err(std::io::Error::other)?;
+    let decided = crate::config::listen(&cfg.server, &ask, &|k| std::env::var_os(k).map(Into::into)).map_err(std::io::Error::other)?;
+    let listen = decided.addr.as_str();
+    #[cfg(feature = "tls")]
+    let tls = {
+        let flag = |p: &Option<String>| p.as_deref().map(std::path::absolute).transpose();
+        let (cert, key) = match (flag(&ask.tls_cert)?, flag(&ask.tls_key)?) {
+            (Some(c), Some(k)) => (Some(c), Some(k)),
+            _ => (cfg.server.cert.clone(), cfg.server.key.clone()),
+        };
+        match (decided.tls, &cert, &key) {
+        (false, ..) => None,
+        (true, Some(cert), Some(key)) => Some(crate::tls::own(cert, key)?),
+            (true, ..) => Some(crate::tls::server(&crate::paths::tool_home().join("tls"), id)?),
+        }
+    };
+    #[cfg(not(feature = "tls"))]
+    for (asked, what) in [
+        (decided.tls, "[server] tls"),
+        (cfg.server.pairing, "[server] pairing"),
+        (cfg.server.discover, "[server] discover"),
+    ] {
+        if asked {
+            return Err(crate::left_out("tls", what));
+        }
+    }
+    let mut http = http.configured(&cfg.server, &dirs.files()).assets(cfg.build.asset_files);
+    #[cfg(feature = "updates")]
+    {
+        http = crate::update::beside(http);
+    }
+    if let Some(why) = cfg.accounts.unverifiable(http.mail.is_some()) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, why));
+    }
+    let auth_db = || crate::auth::Auth::open(dirs.data.join("auth.db"), cfg.accounts.policy()).map_err(std::io::Error::other);
+    // Sessions without accounts: a session is a user known by its token.
+    if cfg.accounts.sessions && !cfg.accounts.on {
+        let a = std::sync::Arc::new(auth_db()?);
+        crate::auth::serve(&a);
+        http.users = Some(crate::auth::Users::sessions(a, http.users.take()));
+    }
+    let opts = crate::sync::Options {
+        limits: cfg.server.limits,
+        token: crate::config::token(&dirs.data)?,
+        #[cfg(feature = "tls")]
+        pairing: cfg.server.pairing.then(crate::pairing::pairing),
+        #[cfg(feature = "tls")]
+        app: cfg.app.id.clone(),
+        #[cfg(feature = "tls")]
+        tls,
+        hosts: cfg.server.hosts.clone(),
+        http,
+        auth: match cfg.accounts.on {
+            true => Some(std::sync::Arc::new(auth_db()?)),
+            false => None,
+        },
+        strict_origin: cfg.server.strict_origin,
+        trust_proxy: cfg.server.trust_proxy.clone(),
+        security: cfg.server.security.clone(),
+        open: cfg.server.open,
+        page_log: cfg.server.page_log,
+    };
+    let opts_users = opts.http.users.is_some();
+    let host = listen.rsplit_once(':').map(|(h, _)| h.trim_matches(['[', ']']).to_string());
+    #[cfg(feature = "tls")]
+    let tls = opts.tls.is_some();
+    #[cfg(not(feature = "tls"))]
+    let tls = false;
+    let serving = crate::sync::Serving { port: 0, tls, host };
+    let port = serve(h.clone(), op.serve, listen, opts)?;
+    let serving =
+        serde_json::to_string(&crate::sync::Serving { port, ..serving }).map_err(std::io::Error::other)?;
+    crate::paths::write_atomic(&dirs.data.join("serving.json"), serving.as_bytes(), false)?;
+    let bound = format!("{}:{port}", listen.rsplit_once(':').map_or(listen, |(h, _)| h));
+    let bound = crate::config::Listen { addr: bound, ..decided.clone() };
+    eprintln!("[aio] {}", crate::config::listen_says(&bound, id));
+    if cfg.server.open {
+        eprintln!("[aio] WARN {}", crate::config::open_says(id));
+    }
+    if bound.exposed {
+        let gate = match () {
+            _ if cfg.accounts.on => crate::config::Gate::Accounts,
+            _ if cfg.accounts.sessions => crate::config::Gate::Sessions,
+            _ if opts_users => crate::config::Gate::Users,
+            _ if cfg.server.open => crate::config::Gate::Open,
+            _ => crate::config::Gate::Key,
+        };
+        let lan = crate::config::lan_ipv4();
+        for line in crate::config::share_says(&bound, lan, gate, &dirs.data.join("sync.token"), cfg.server.pairing) {
+            eprintln!("[aio] {line}");
+        }
+    }
+    if let Some(line) = crate::config::firewall_says(std::env::consts::OS, bound.exposed) {
+        eprintln!("[aio] {line}");
+    }
+    #[cfg(feature = "tls")]
+    if cfg.server.discover {
+        let me = crate::discovery::Found {
+            name: cfg.app.id.clone(),
+            port,
+            title: Some(cfg.app.name.clone()),
+            needs_auth: !cfg.server.open,
+            tls: bound.tls,
+            host: None,
+        };
+        let udp = crate::discovery::port();
+        crate::rt().spawn(async move {
+            if let Err(e) = crate::discovery::respond(udp, vec![me]).await {
+                eprintln!("[aio] discovery on UDP {udp} stopped: {e}");
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Open the cell's local door ([`crate::door`]), so this user's tools
+/// reach the running app (`ax state`, `ax call`) and other apps it as
+/// a peer (`aio::peer`, `http`'s server functions too). A door that
+/// can't open is said, never fatal: the app works without it.
+fn serve_door(h: &Raw, dirs: &crate::paths::AppDirs, http: &Http) {
+    let (h, id) = (h.clone(), h.kind().id);
+    let _in = crate::rt().enter();
+    let addr = crate::door::at(&dirs.id, &dirs.data, id);
+    let l = addr.as_ref().map_err(|e| std::io::Error::new(e.kind(), e.to_string())).and_then(|a| crate::ipc::Listener::bind(a));
+    // aio's tools see the app too (`am instances`, `am state`).
+    #[cfg(feature = "compat")]
+    if let (Ok(a), Ok(_)) = (&addr, &l) {
+        crate::compat::local::serve(&dirs.id, &dirs.data, dirs.profile.as_deref(), id, a.clone());
+    }
+    #[cfg(feature = "server")]
+    let (calls, hooks) =
+        (crate::fns::Served { fns: std::sync::Arc::new(http.fns.clone()), ..crate::link::no_calls() }, http.door_hooks());
+    #[cfg(not(feature = "server"))]
+    let (calls, hooks, _) = (crate::link::no_calls(), crate::link::Hooks::default(), http);
+    match l {
+        Ok(l) => drop(crate::rt().spawn(async move {
+            let r = crate::door::serve_with(h, l, Default::default(), calls, crate::door::OPERATOR, hooks).await;
+            if let Err(e) = r {
+                eprintln!("[aio] {}: the local door stopped: {e}", id);
+            }
+        })),
+        Err(e) => eprintln!("[aio] {}: no local door for tools: {e}", id),
+    }
+}
+
+/// The app's routes and files to its window, over a private socket
+/// (`aio://app/<path>`, [`crate::http::serve_window`]): no TCP port, and
+/// only the window aio-shell spawns is answered. An app that serves no
+/// path opens none; a door that can't open is said, never fatal.
+#[cfg(feature = "server")]
+fn serve_window(h: &Raw, cfg: &crate::config::Config, dirs: &crate::paths::AppDirs, http: &Http) {
+    let id = h.kind().id;
+    let http = http.clone().configured(&cfg.server, &dirs.files());
+    if !http.serves() {
+        return;
+    }
+    let _in = crate::rt().enter();
+    let addr = crate::paths::sockets(&dirs.id, &dirs.data).map(|d| crate::ipc::addr(&d, "http"));
+    // Electron's Node connects to it as spelled.
+    let l = addr.and_then(|a| crate::ipc::fits(&a).and_then(|()| crate::ipc::Listener::bind(&a)).map(|l| (a, l)));
+    match l {
+        Ok((addr, l)) => {
+            let n = http.route_count();
+            eprintln!(
+                "[aio] {}: {n} route(s) served to the window over its private socket (aio://app/<path>): no TCP \
+                 port; another process reaches them only with [server] listen",
+                id
+            );
+            crate::ipc::set_window_http(addr);
+            drop(crate::rt().spawn(async move {
+                if let Err(e) = crate::http::serve_window(http, l).await {
+                    eprintln!("[aio] {}: the window's route door stopped: {e}", id);
+                }
+            }));
+        }
+        Err(e) => eprintln!("[aio] {}: the window gets no routes (aio://app/<path>): {e}", id),
+    }
+}
+
+#[cfg(not(feature = "server"))]
+fn serve_window(_: &Raw, _: &crate::config::Config, _: &crate::paths::AppDirs, _: &Http) {}
+
+#[cfg(not(feature = "server"))]
+fn serve_app(_: &Raw, _: &Opener, _: &crate::config::Config, _: &crate::paths::AppDirs, _: Http) -> std::io::Result<()> {
+    Err(crate::left_out("server", "serving (client-server and server modes)"))
+}
+
 
 impl<T: Cell> Door<T> for Source<T> {
     fn call(&self, method: &str, args: Value) -> Result<Value> {

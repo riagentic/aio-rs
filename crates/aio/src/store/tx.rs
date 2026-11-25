@@ -17,11 +17,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Weak;
 
 /// A transaction in flight: one async call's state between its parts.
-pub(super) struct Tx<T> {
+pub(super) struct Tx {
     /// What its reads started from: the committed state at the call, or at its last publish.
-    base: Arc<T>,
-    /// `base` with its own writes.
-    work: T,
+    base: St,
+    /// `base` with its own writes (nothing else holds it).
+    work: St,
     /// The call is gone when nothing holds its reply (its await aborted or cut off).
     reply: Weak<Slot>,
     by: By,
@@ -47,28 +47,23 @@ pub(super) struct Parked {
 }
 
 /// The cell's transactions in flight, by call, and its serialized queue.
-pub(super) struct Txs<T> {
-    open: HashMap<usize, Tx<T>>,
+#[derive(Default)]
+pub(super) struct Txs {
+    open: HashMap<usize, Tx>,
     /// The serialized call whose turn it is.
     turn: Option<usize>,
     parked: VecDeque<Parked>,
 }
 
-impl<T> Default for Txs<T> {
-    fn default() -> Self {
-        Self { open: HashMap::new(), turn: None, parked: VecDeque::new() }
-    }
-}
-
 /// `TX_CONFLICT`'s words for `path`, aio's.
-fn conflict<T: Cell>(method: &str, path: &str, warn: bool) -> String {
+fn conflict(k: &Kind, method: &str, path: &str, warn: bool) -> String {
     let then = match warn {
         true => "committed anyway (transaction(conflict = \"warn\"))",
         false => "nothing it wrote committed. Read cx.live_state() to work from the state now, call it again, or set #[cell(transaction(conflict = \"warn\"))] to commit anyway",
     };
     format!(
         "[{}] {method}(): {path} was changed by another call while this transaction awaited, and its reads are of the state when it was called: committing would overwrite that change with a value computed from stale state; {then}",
-        T::ID
+        k.id
     )
 }
 
@@ -121,29 +116,11 @@ fn overlaps(a: &[crate::patch::Step], b: &[crate::patch::Step]) -> bool {
     a.iter().zip(b).all(|(x, y)| x == y)
 }
 
-/// A part of a transaction ([`Store::tx_call`]).
-type Call<T> = fn(&mut Store<T>, crate::Transaction, &By, &str, Value, Cx, Reply, Option<&str>) -> Result<Value>;
-
-/// The transaction code of cell `T`, made only for a `#[cell(transaction)]`
-/// cell: every other cell's build holds none of it.
-pub(crate) struct On<T>(std::marker::PhantomData<T>);
-
-impl<T: Cell> On<T> {
-    pub(super) const CALL: Option<Call<T>> = match T::TRANSACTION {
-        Some(_) => Some(Store::<T>::tx_call),
-        None => None,
-    };
-    pub(crate) const SWEEP: Option<fn(&mut Store<T>) -> bool> = match T::TRANSACTION {
-        Some(_) => Some(Store::<T>::tx_sweep),
-        None => None,
-    };
-}
-
-impl<T: Cell> Store<T> {
+impl Core {
     /// A part of a `#[cell(transaction)]` cell's async call (`method`,
     /// `method.N`) whose end goes to `reply` (see the module).
     #[allow(clippy::too_many_arguments)]
-    fn tx_call(
+    pub(crate) fn tx_call(
         &mut self,
         cfg: crate::Transaction,
         by: &By,
@@ -164,7 +141,7 @@ impl<T: Cell> Store<T> {
                 }
                 Tx {
                     base: self.state.clone(),
-                    work: (*self.state).clone(),
+                    work: self.state.dup(),
                     reply: reply.watch(),
                     by: by.clone(),
                     method: method.into(),
@@ -177,7 +154,7 @@ impl<T: Cell> Store<T> {
             }
             Some(_) => match self.txs.open.remove(&id) {
                 Some(tx) => tx,
-                None => crate::reject!("{}.{method}: its transaction is gone", T::ID),
+                None => crate::reject!("{}.{method}: its transaction is gone", self.kind.id),
             },
         };
         if cfg.serialize {
@@ -194,7 +171,7 @@ impl<T: Cell> Store<T> {
     fn tx_part(
         &mut self,
         cfg: crate::Transaction,
-        mut tx: Tx<T>,
+        mut tx: Tx,
         method: &str,
         args: Value,
         cx: Cx,
@@ -202,13 +179,13 @@ impl<T: Cell> Store<T> {
         id: usize,
     ) -> Result<Value> {
         let cx = cx.with_live(self.state.clone());
-        let out = match apply_guarded(&mut tx.work, &cx, method, args) {
+        let out = match apply_guarded(own(&mut tx.work), &cx, method, args) {
             Err(Applied::Panicked(why)) => {
                 let now = std::time::Instant::now();
                 self.panics.retain(|t| now.duration_since(*t) < PANIC_WINDOW);
                 self.panics.push(now);
                 eprintln!("{}", super::panicked(method, &why, self.panics.len(), &*self.state));
-                return Err(Rejected::coded(crate::Code::ReduceError, format!("{}.{method} panicked: {why}", T::ID)));
+                return Err(Rejected::coded(crate::Code::ReduceError, format!("{}.{method} panicked: {why}", self.kind.id)));
             }
             Err(Applied::Refused(e)) => return Err(e),
             Ok(out) => out,
@@ -234,34 +211,38 @@ impl<T: Cell> Store<T> {
     /// Commit what `tx` wrote onto the state now, with what it asked for,
     /// as one event of its method (the state it left, its call's
     /// arguments); its reads go on from there.
-    fn tx_commit(&mut self, cfg: crate::Transaction, tx: &mut Tx<T>, at: i64) -> Result {
+    fn tx_commit(&mut self, cfg: crate::Transaction, tx: &mut Tx, at: i64) -> Result {
+        let k = self.kind;
         let live = self.state.clone();
         let next = match Arc::ptr_eq(&tx.base, &live) {
-            true => tx.work.clone(),
+            true => tx.work.dup(),
             false => {
                 // Fields it only assigned (blind writes) are put back as
                 // they were for the check, and its own go on after it.
-                let unread = T::blind(&tx.method);
-                let blind = unread & tx.work.changed_fields(&tx.base);
-                let unblind = |s: &T, mask| {
-                    let mut s = s.clone();
-                    s.take_fields(&tx.base, mask);
+                let unread = (k.blind)(&tx.method);
+                let blind = unread & tx.work.changed_fields(&*tx.base);
+                let unblind = |s: &St, mask| {
+                    let mut s = s.dup();
+                    own(&mut s).take_fields(&*tx.base, mask);
                     s
                 };
-                let (base, work, mut now) =
-                    (crate::json(&*tx.base)?, crate::json(&unblind(&tx.work, blind))?, crate::json(&*live)?);
+                let (base, work, mut now) = (
+                    crate::kind::json(&*tx.base)?,
+                    crate::kind::json(&*unblind(&tx.work, blind))?,
+                    crate::kind::json(&*live)?,
+                );
                 let (pushes, mine): (Vec<_>, Vec<_>) =
                     crate::patch::diff_whole(&base, &work).into_iter().partition(|m| pushed(&base, m).is_some());
                 let theirs = match unread {
                     0 => crate::patch::diff_whole(&base, &now),
-                    _ => crate::patch::diff_whole(&base, &crate::json(&unblind(&live, unread))?),
+                    _ => crate::patch::diff_whole(&base, &crate::kind::json(&*unblind(&live, unread))?),
                 };
                 let clash = match cfg.serialize {
                     true => theirs.first().filter(|_| !mine.is_empty() || !pushes.is_empty() || blind != 0),
                     false => theirs.iter().find(|t| mine.iter().any(|m| overlaps(path_of(m), path_of(t)))),
                 };
                 if let Some(c) = clash {
-                    let msg = conflict::<T>(&tx.method, &dotted(path_of(c)), cfg.warn);
+                    let msg = conflict(k, &tx.method, &dotted(path_of(c)), cfg.warn);
                     if !cfg.warn {
                         return Err(Rejected::coded(crate::Code::TxConflict, msg));
                     }
@@ -269,7 +250,7 @@ impl<T: Cell> Store<T> {
                     crate::report::problem("tx:conflict", &msg);
                 }
                 let unfit = |e: String| {
-                    Rejected::new(format!("{}.{}: what it wrote no longer fits the state: {e}", T::ID, tx.method))
+                    Rejected::new(format!("{}.{}: what it wrote no longer fits the state: {e}", k.id, tx.method))
                 };
                 crate::patch::apply(&mut now, &mine).map_err(unfit)?;
                 for p in &pushes {
@@ -279,25 +260,24 @@ impl<T: Cell> Store<T> {
                         None => return Err(unfit(format!("{} is no longer a list", dotted(path)))),
                     }
                 }
-                let mut next: T = serde_json::from_value(now)
-                    .map_err(|e| Rejected::new(format!("{}.{}: what it wrote no longer fits: {e}", T::ID, tx.method)))?;
-                next.take_fields(&tx.work, blind);
+                let mut next = (k.from_json)(now)
+                    .map_err(|e| Rejected::new(format!("{}.{}: what it wrote no longer fits: {e}", k.id, tx.method)))?;
+                own(&mut next).take_fields(&*tx.work, blind);
                 next
             }
         };
         next.check()?;
         self.flush()?;
         let asks = Asks { plans: std::mem::take(&mut tx.plans), op: tx.op.take(), ..Asks::default() };
-        let next = Arc::new(next);
         // A transaction that changed nothing and set no schedule logs nothing.
-        if *next != *live || !asks.plans.is_empty() || asks.op.is_some() {
-            let mut kept = crate::json(&*next)?;
-            unsaved_out::<T>(&mut kept);
+        if !next.same(&*live) || !asks.plans.is_empty() || asks.op.is_some() {
+            let mut kept = crate::kind::json(&*next)?;
+            unsaved_out(k, &mut kept);
             let args = serde_json::json!({ TX: kept, "args": tx.args });
             self.commit(&tx.by, &tx.method, &args, &asks, at, next.clone(), None, &[])?;
         }
         self.effects.append(&mut tx.effects);
-        tx.work = (*next).clone();
+        tx.work = next.dup();
         tx.base = next;
         Ok(())
     }
@@ -315,7 +295,7 @@ impl<T: Cell> Store<T> {
     /// Calls whose replies nobody holds (their await aborted or cut off)
     /// dropped, with what they wrote; then the next serialized call's turn.
     /// Whether anything changed (effects may wait to be started).
-    fn tx_sweep(&mut self) -> bool {
+    pub(crate) fn tx_sweep(&mut self) -> bool {
         let gone: Vec<usize> = self.txs.open.iter().filter(|(_, t)| t.reply.strong_count() == 0).map(|(i, _)| *i).collect();
         let freed = self.txs.turn.is_some_and(|t| !self.txs.open.contains_key(&t) || gone.contains(&t));
         gone.iter().for_each(|i| _ = self.txs.open.remove(i));

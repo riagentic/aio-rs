@@ -225,7 +225,8 @@ impl<T: Cell> Handle<T> {
             let flagged = T::SKIP_IF_RUNNING.contains(&m)
                 || (d.key.strip_prefix('@') == Some(m)
                     && T::SCHEDULES.iter().any(|s| s.skip_if_running && s.method == m));
-            let skips = flagged && lock(&self.inner.running).keys().any(|k| crate::answer::aborts::<T>(m, k));
+            let skips = flagged
+                && lock(&self.inner.running).keys().any(|k| crate::answer::aborts(T::async_mode(m).is_some(), m, k));
             if skips {
                 continue;
             }
@@ -252,7 +253,7 @@ impl<T: Cell> Handle<T> {
             return Ok((v.clone(), crate::Answer::ready(Ok(v))));
         };
         let (reply, answer) = crate::Reply::new(method);
-        let key = crate::answer::key_of::<T>(method, &args, None);
+        let key = crate::answer::key_of(T::TTL, T::async_mode(method), method, &args, None);
         if let Some(shared) = self.inner.inflight.enter(mode, key, &reply) {
             return Ok((Value::Null, shared));
         }
@@ -340,7 +341,7 @@ impl<T: Cell> Handle<T> {
         let running = lock(&self.inner.running);
         running
             .iter()
-            .filter(|(k, _)| crate::answer::aborts::<T>(key, k))
+            .filter(|(k, _)| crate::answer::aborts(T::async_mode(key).is_some(), key, k))
             .flat_map(|(_, rs)| rs)
             .for_each(|(_, a)| a.abort());
     }

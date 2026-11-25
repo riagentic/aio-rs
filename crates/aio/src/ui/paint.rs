@@ -61,7 +61,7 @@ impl Seed {
         let (copy, json) = match kept.filter(|(c, _)| c.snapshot().0 == 0) {
             Some(k) => k,
             None => {
-                let shown = crate::shown(&*st, seer);
+                let shown = crate::kind::shown(&*st, seer);
                 let Ok(t) = crate::copy_of::<T>(shown.clone()) else { return self };
                 let copy = Arc::new(crate::Handle::new(crate::Store::with(t)));
                 // Inert data: `<` written as an escape, so no text in it ends the script.

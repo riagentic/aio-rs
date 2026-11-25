@@ -300,7 +300,7 @@ async fn catch_up<T: Cell>(
     pushes: &mut crate::budgets::Pushes,
     full_percent: u32,
 ) -> Result<(), String> {
-    let now = View::of(h, viewer);
+    let now = View::of(&h.raw, viewer);
     let before = (!subs.paths.is_empty()).then(|| subs.of(others.all(cells::<T>(&view.shown))));
     let mut ops = crate::patch::diff(&cells::<T>(&view.shown), &cells::<T>(&now.shown));
     *view = View { size: view.size, ..now };
@@ -375,7 +375,7 @@ pub async fn session<T: Cell>(
     };
     let mut seer = crate::Caller { by: viewer.clone(), role: role(&gate).await.map_err(|e| e.to_string())? };
     let mut events = h.events();
-    let mut view = View::of(&h, &seer);
+    let mut view = View::of(&h.raw, &seer);
     let mut others = Others::new(beside.iter().filter(|c| c.id() != T::ID).cloned().collect(), &seer);
     let mut watching = tokio::task::JoinSet::new();
     let mut moved = others.watch(&mut watching);
@@ -430,7 +430,7 @@ pub async fn session<T: Cell>(
                 // A new role sees another view: sent whole.
                 if now != seer.role {
                     seer.role = now;
-                    view = View::of(&h, &seer);
+                    view = View::of(&h.raw, &seer);
                     others.reseen(&seer);
                     send_ax(&mut w, &state(&view, &others, &subs)).await?;
                 }
@@ -565,7 +565,7 @@ pub async fn session<T: Cell>(
                         }
                     }
                     "sync-req" => {
-                        passed.get_or_insert_with(|| h.aio_sync().ops.subscribe());
+                        passed.get_or_insert_with(|| h.raw.aio_sync().ops.subscribe());
                         let frames = super::crdt::answer(&h, &gate, &seer, req.as_ref(), link, d).await?;
                         while events.try_recv().is_ok() {}
                         catch_up(&mut w, &mut view, &mut others, &h, &seer, &subs, &mut pushes, limits.full_state_percent).await?;
@@ -578,7 +578,7 @@ pub async fn session<T: Cell>(
                         let kind = d["type"].as_str().unwrap_or_default();
                         // The app cell's method, or another cell's (`None`: the app cell).
                         let method = kind.split_once(':').and_then(|(c, m)| {
-                            super::data::method_of::<T>(c, m).map(|m| (None, m)).or_else(|| {
+                            super::data::method_of(<T as crate::kind::KindOf>::KIND, c, m).map(|m| (None, m)).or_else(|| {
                                 others.cells.iter().enumerate().find_map(|(i, o)| Some((Some(i), o.aio_method(c, m)?)))
                             })
                         });
@@ -595,7 +595,7 @@ pub async fn session<T: Cell>(
                                 let args = d["payload"]["args"].clone();
                                 let args = if args.is_null() { json!([]) } else { args };
                                 let r = tokio::task::spawn_blocking(move || match other {
-                                    None => gate.ask(&hh, &by, req.as_ref(), &m, args, None, None),
+                                    None => gate.ask(&hh.raw, &by, req.as_ref(), &m, args, None, None),
                                     Some(o) => o.ask(&gate, &by, req.as_ref(), &m, args),
                                 });
                                 r.await.map_err(|e| e.to_string())?

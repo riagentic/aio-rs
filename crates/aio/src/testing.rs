@@ -153,7 +153,7 @@ pub fn totp_code(secret: &str, at: i64) -> String {
 }
 
 /// A cell's name for people: its type's.
-fn name<T>() -> &'static str {
+pub(crate) fn name<T>() -> &'static str {
     std::any::type_name::<T>().rsplit("::").next().unwrap_or("cell")
 }
 
@@ -182,8 +182,8 @@ pub enum AskedFor {
 }
 
 impl AskedFor {
-    pub(crate) fn effect<T>(key: String, mode: crate::Mode, timeout: Option<Duration>) -> Self {
-        Self::Effect(HeldEffect { cell: name::<T>(), key, mode, timeout })
+    pub(crate) fn effect(cell: &'static str, key: String, mode: crate::Mode, timeout: Option<Duration>) -> Self {
+        Self::Effect(HeldEffect { cell, key, mode, timeout })
     }
 
     pub fn is_effect(&self) -> bool {
@@ -218,37 +218,37 @@ trait Booted {
 
 impl<T: Cell> Booted for Handle<T> {
     fn held(&self) -> Vec<String> {
-        Handle::held(self).into_iter().map(|k| format!("{}.{k}", name::<T>())).collect()
+        self.raw.held().into_iter().map(|k| format!("{}.{k}", name::<T>())).collect()
     }
 
     fn held_effects(&self) -> Vec<HeldEffect> {
         let cell = name::<T>();
-        Handle::held_effects(self)
+        self.raw.held_effects()
             .into_iter()
             .map(|(key, mode, timeout)| HeldEffect { cell, key, mode, timeout })
             .collect()
     }
 
     fn start_held(&self) -> usize {
-        Handle::start_held(self)
+        self.raw.start_held()
     }
 
     fn running(&self) -> Vec<String> {
-        Handle::running(self).into_iter().map(|k| format!("{}.{k}", name::<T>())).collect()
+        self.raw.running().into_iter().map(|k| format!("{}.{k}", name::<T>())).collect()
     }
 
     fn fire_due(&self, now: i64) {
-        self.store(|s| s.fire_due_but(now, |d| self.skips(d)))
+        self.store(|s| s.core.fire_due_but(now, |d| self.raw.skips(d)))
             .unwrap_or_else(|e| panic!("{}: schedules: {e}", name::<T>()));
-        self.fire_foreign();
+        self.raw.fire_foreign();
     }
 
     fn failed(&self) -> Vec<String> {
-        self.take_failed().into_iter().map(|f| format!("{}.{f}", name::<T>())).collect()
+        self.raw.take_failed().into_iter().map(|f| format!("{}.{f}", name::<T>())).collect()
     }
 
     fn last(&self) -> (u64, Vec<AskedFor>) {
-        self.last_held()
+        self.raw.last_held()
     }
 }
 
@@ -393,20 +393,20 @@ impl TestCells {
     #[track_caller]
     pub fn reset<T: Cell>(&mut self, h: &Handle<T>, seed: Value) {
         let st = serde_json::to_value(seeded::<T>(seed)).expect("the state serializes");
-        _ = h.live(false);
-        h.drop_held();
+        _ = h.raw.live(false);
+        h.raw.drop_held();
         if let Err(e) = h.store(|s| s.load(&By::Test, st)) {
             panic!("reset {}: {e}", name::<T>());
         }
-        _ = h.live(true);
+        _ = h.raw.live(true);
     }
 
     fn boot<T: Cell>(&mut self, mut store: Store<T>) -> Handle<T> {
-        store.set_clock(self.clock.clone());
+        store.core.set_clock(self.clock.clone());
         let h = Handle::new(store).by(By::Test);
-        h.hold();
-        _ = h.live(true);
-        h.join(&self.dir);
+        h.raw.hold();
+        _ = h.raw.live(true);
+        h.raw.join(&self.dir);
         self.cells.push(Box::new(h.clone()));
         h
     }
@@ -621,11 +621,11 @@ pub struct AsClient<T: Cell> {
 #[cfg(feature = "server")]
 impl<T: Cell> Door<T> for AsClient<T> {
     fn call(&self, method: &str, args: Value) -> crate::Result<Value> {
-        self.h.call_by(&self.who, None, method, args, None).map(Option::unwrap_or_default)
+        self.h.raw.call_by(&self.who, None, method, args, None).map(Option::unwrap_or_default)
     }
 
     fn ask(&self, method: &str, args: Value) -> crate::Result<crate::Answer> {
-        self.h.ask_by(Some(&self.who), None, method, args, None, None).map(|(_, a)| a)
+        self.h.raw.ask_by(Some(&self.who), None, method, args, None, None).map(|(_, a)| a)
     }
 
     fn read<R>(&self, f: impl FnOnce(&T) -> R) -> R {

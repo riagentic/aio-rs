@@ -312,10 +312,11 @@ impl Diagnostic {
 type Handed = Option<(&'static str, Option<Value>)>;
 thread_local!(static STATE: std::cell::RefCell<Handed> = const { std::cell::RefCell::new(None) });
 
-/// [`problem`] of cell `T`, which and its state `st` going with the diagnostic.
-pub(crate) fn problem_in<T: crate::Cell>(kind: &str, message: &str, st: &T) {
-    let v = screened(T::REDACT || !T::REDACTED.is_empty(), || crate::store::reported(st));
-    STATE.set(Some((T::ID, v)));
+/// [`problem`] of the cell whose state `st` is, which and its state going with the diagnostic.
+pub(crate) fn problem_in(kind: &str, message: &str, st: &dyn crate::kind::AnyCell) {
+    let k = st.kind();
+    let v = screened(k.redact || !k.redacted.is_empty(), || crate::store::reported(st));
+    STATE.set(Some((k.id, v)));
     problem(kind, message);
     STATE.set(None);
 }

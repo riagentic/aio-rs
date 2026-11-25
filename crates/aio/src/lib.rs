@@ -47,6 +47,7 @@ native! {
     #[cfg(feature = "server")]
     pub mod gate;
     mod handle;
+    mod kind;
     pub mod health;
     #[cfg(feature = "server")]
     pub mod http;
@@ -817,28 +818,34 @@ pub fn visible_by_default(f: impl Fn(&str, Value, &Caller) -> Value + Send + Syn
     *VISIBLE.write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
 }
 
-/// Is there a [`visible_by_default`] for cells without their own `visible`?
-pub(crate) fn screened<T: CellData>() -> bool {
-    T::SCREENED || VISIBLE.read().unwrap_or_else(|e| e.into_inner()).is_some()
+/// Is a cell screened: by its own `visible` (`own`), or the app's [`visible_by_default`]?
+pub(crate) fn screened_as(own: bool) -> bool {
+    own || VISIBLE.read().unwrap_or_else(|e| e.into_inner()).is_some()
 }
 
-/// What `viewer` may see of `st`: its own `visible`, else the app's
-/// [`visible_by_default`].
-pub(crate) fn shown<T: CellData>(st: &T, viewer: &Caller) -> Value {
-    let view = st.project(viewer);
-    let Some(f) = VISIBLE.read().unwrap_or_else(|e| e.into_inner()).clone().filter(|_| !T::SCREENED) else {
+/// What `viewer` may see of cell `id`'s `view` (its `project`ion): its own
+/// `visible` (`screened`), else the app's [`visible_by_default`]; `blank`
+/// its default state.
+pub(crate) fn shown_as(
+    id: &str,
+    screened: bool,
+    view: Value,
+    blank: impl FnOnce() -> serde_json::Result<Value>,
+    viewer: &Caller,
+) -> Value {
+    let Some(f) = VISIBLE.read().unwrap_or_else(|e| e.into_inner()).clone().filter(|_| !screened) else {
         return view;
     };
     let keys: Vec<String> = view.as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
-    let shown = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(T::ID, view, viewer)));
+    let shown = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(id, view, viewer)));
     let mut shown = shown.unwrap_or_else(|_| {
-        eprintln!("[aio] the visible_by_default hook panicked on {}: its default state is shown", T::ID);
+        eprintln!("[aio] the visible_by_default hook panicked on {id}: its default state is shown");
         Value::Null
     });
     if !shown.is_object() {
         shown = Value::Object(Default::default());
     }
-    let blank = serde_json::to_value(T::default()).unwrap_or(Value::Null);
+    let blank = blank().unwrap_or(Value::Null);
     if let Some(m) = shown.as_object_mut() {
         for k in keys {
             if !m.contains_key(&k) {
@@ -1400,7 +1407,7 @@ fn checkpoints() -> &'static std::sync::Mutex<Vec<Checkpoint>> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn on_shutdown<T: Cell>(h: Handle<T>) {
+pub(crate) fn on_shutdown(h: crate::handle::Raw) {
     let c = h.clone();
     checkpoints().lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(move || c.checkpoint()));
     closers().lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(move |budget| {

@@ -43,16 +43,16 @@ impl<T: Cell> Part for Handle<T> {
     }
 
     fn fire(&self) {
-        Handle::fire(self);
+        self.raw.fire();
     }
 
     fn join(&self, dir: &crate::handle::Dir) {
-        Handle::join(self, dir);
+        self.raw.join(dir);
     }
 
     fn start(&self) -> Result {
-        let r = self.live(true);
-        drop(Handle::start(self));
+        let r = self.raw.live(true);
+        drop(self.raw.start());
         r
     }
 
@@ -65,11 +65,11 @@ impl<T: Cell> Part for Handle<T> {
     }
 
     fn switch(&self, on: bool) {
-        Handle::switch(self, on);
+        self.raw.switch(on);
     }
 
     fn trip_after(&self, max: u32, window: Option<Duration>) {
-        Handle::trip_after(self, max, window);
+        self.raw.trip_after(max, window);
     }
 
     fn shutdown(&self, budget: Duration) -> Pin<Box<dyn Future<Output = Drained> + Send>> {
@@ -84,8 +84,8 @@ impl<T: Cell> Part for Handle<T> {
             id: T::ID,
             status: if enabled { own() } else { Some("disabled".into()) },
             enabled,
-            failures: self.failures(),
-            last_call: self.last_call(),
+            failures: self.raw.failures(),
+            last_call: self.raw.last_call(),
         }
     }
 }

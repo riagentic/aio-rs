@@ -34,7 +34,7 @@ impl<T: Cell> From<Source<T>> for JsCell {
                 Box::pin(async move {
                     let (limits, calls) = (Default::default(), crate::link::no_calls());
                     let r = crate::link::session(
-                        h,
+                        h.raw,
                         sock,
                         limits,
                         "window".into(),
