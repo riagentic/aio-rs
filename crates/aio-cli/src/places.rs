@@ -364,7 +364,7 @@ mod tests {
         assert_eq!(rows[2]["instance"], "agent1");
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3, "{out}");
-        let home = t.path().join("apps/mail");
+        let home = t.path().join("apps").join("mail");
         assert_eq!(rows[0]["bytes"].as_u64(), Some(size(&home)));
         assert!(lines[0].contains(&format!("  {:>9}  {}", human(size(&home)), home.display())), "{out}");
         assert!(lines[0].starts_with("mail   running") && lines[1].starts_with("notes  -"), "{out}");

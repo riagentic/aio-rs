@@ -118,31 +118,29 @@ pub fn show(store: &Path, plan: &[(Part, Option<String>)], now: SystemTime) -> S
     out.join("\n")
 }
 
-/// Remove what the plan names, each only while no cargo builds in it (its
-/// locks taken first; held while it is moved aside, then deleted). What was
-/// removed and what wasn't, said.
+/// Remove what the plan names, each only while no cargo builds in it: its
+/// locks taken first and held while what they guard goes, then the locks
+/// (a file held open is deleted on Windows too: std opens it shareable),
+/// then the empty folder. What was removed and what wasn't, said.
 pub fn apply(plan: &[(Part, Option<String>)]) -> (Vec<String>, Vec<String>) {
+    let is_lock = |p: &Path| p.is_file() && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(".cargo"));
+    let remove = |p: &Path| match std::fs::symlink_metadata(p)?.is_dir() {
+        true => std::fs::remove_dir_all(p),
+        false => std::fs::remove_file(p),
+    };
     let (mut done, mut failed) = (vec![], vec![]);
     for (p, _) in plan.iter().filter(|(_, w)| w.is_some()) {
-        let locks: Vec<std::fs::File> = std::fs::read_dir(&p.path)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(".cargo") && e.path().is_file())
-            .filter_map(|e| std::fs::OpenOptions::new().read(true).write(true).open(e.path()).ok())
-            .collect();
-        if locks.iter().any(|f| f.try_lock().is_err()) {
+        let Ok(entries) = std::fs::read_dir(&p.path) else { continue };
+        let (lock, rest): (Vec<PathBuf>, Vec<PathBuf>) = entries.flatten().map(|e| e.path()).partition(|e| is_lock(e));
+        let held: Vec<std::fs::File> =
+            lock.iter().filter_map(|l| std::fs::OpenOptions::new().read(true).write(true).open(l).ok()).collect();
+        if held.iter().any(|f| f.try_lock().is_err()) {
             failed.push(format!("{}: a build is running in it", p.name));
             continue;
         }
-        let aside = p.path.with_file_name(format!(
-            ".pruning-{}-{}",
-            p.path.file_name().unwrap_or_default().to_string_lossy(),
-            std::process::id()
-        ));
-        let r = std::fs::rename(&p.path, &aside);
-        drop(locks);
-        match r.and_then(|()| std::fs::remove_dir_all(&aside)) {
+        let gone = rest.iter().chain(&lock).try_for_each(|e| remove(e));
+        drop(held);
+        match gone.and_then(|()| std::fs::remove_dir(&p.path)) {
             Ok(()) => done.push(format!("{} ({})", p.name, human(p.bytes))),
             Err(e) => failed.push(format!("{}: {e}", p.name)),
         }
@@ -374,11 +372,5 @@ mod tests {
         assert_eq!(done.len(), 2, "{done:?}");
         assert!(a.join("deps/libx.rlib").exists() && !b.exists() && !c.exists());
         assert!(s.join("1.98.0/aio/hotpatch/x").exists(), "ax's own folder is no profile");
-        assert!(
-            !std::fs::read_dir(s.join("1.98.0"))
-                .unwrap()
-                .flatten()
-                .any(|e| e.file_name().to_string_lossy().starts_with(".pruning"))
-        );
     }
 }
