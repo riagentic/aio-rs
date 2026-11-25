@@ -2028,9 +2028,10 @@ impl Core {
         let t3 = std::time::Instant::now();
         let mut asks = cx.into_asks();
         asks.op = op.map(String::from);
-        let quiet = asks.effects.is_empty() && asks.plans.is_empty() && asks.inputs == Default::default();
+        // In this order, a cell that coalesces nothing pays for none of it.
         let coalesced = k.coalesced.contains(&method) || (k.coalesce && !(k.redacts)(method));
-        if coalesced && fired.is_none() && asks.op.is_none() && quiet && !self.coalesce.is_zero() {
+        let quiet = || asks.effects.is_empty() && asks.plans.is_empty() && asks.inputs == Default::default();
+        if coalesced && fired.is_none() && asks.op.is_none() && !self.coalesce.is_zero() && quiet() {
             self.hold(by, method, args, at, next)?;
             let p = crate::perf::Phases { clone: t1 - t0, apply: t2 - t1, check: t3 - t2, commit: t3.elapsed() };
             crate::perf::method(k.id, method, p);
