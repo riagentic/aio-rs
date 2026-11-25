@@ -51,7 +51,7 @@ impl<T: Cell> From<Source<T>> for JsCell {
             }),
             #[cfg(feature = "server")]
             Source::Remote(r) => Arc::new(move |sock, hello| {
-                let link = r.link_now();
+                let link = r.raw.link_now();
                 Box::pin(async move {
                     match link {
                         Some(l) => crate::sync::relay(l, sock, hello).await,
