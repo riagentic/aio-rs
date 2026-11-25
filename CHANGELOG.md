@@ -371,6 +371,12 @@ version may break things.
 
 ### Changed
 
+- Internal: a synced copy's client (`Remote<T>`) is compiled once too, a
+  typed shell over one type-erased client; its replay of waiting calls
+  stays typed. No API change. With `aio/server` (a client-server app), the
+  10-cell sample's crates build in 3.16 s (was 3.99 s) and its release
+  binary is 7.47 MB (was 7.98 MB); the template: 2.20 s (was 2.46 s). A
+  predicted call: 9.08 µs (was 9.21 µs).
 - Internal: the runtime compiles its store, handle, sync server and boot
   once, not once per cell. `Store<T>`, `Handle<T>` and `Source<T>` are thin
   typed shells over one type-erased core (the state behind a trait
@@ -579,6 +585,11 @@ version may break things.
 
 ### Fixed
 
+- A state slow to copy is copied ahead (on a thread of its own) only
+  while copies stay slow: 3 of the last 8 at 250 µs or more, and no more
+  once 8 in a row were fast. One copy of 250 µs turned it on for good: on
+  a busy machine a single preempted copy did, and every later call then
+  handed its copy to that thread and woke it, 5-40% on a call's cost.
 - A dev build no longer says, in every new app, that a view's body
   "reads all of" its cell once, at the `client!` line: that was Redux
   DevTools' own read of the cell as it mounts. A view's own whole read is
