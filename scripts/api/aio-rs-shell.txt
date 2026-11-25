@@ -120,6 +120,7 @@ aio_shell::page::caret: async fn caret(selector: &str) -> Option<usize>
 aio_shell::page::close: fn close()
 aio_shell::page::copy: async fn copy(text: &str) -> bool
 aio_shell::page::hide: fn hide()
+aio_shell::page::insert_text: async fn insert_text(selector: &str, text: &str) -> Result<(), aio::ui::prelude::EvalError>
 aio_shell::page::maximize: fn maximize()
 aio_shell::page::minimize: fn minimize()
 aio_shell::page::pick: async fn pick(p: &Pick) -> io::Result<Option<String>>
@@ -128,7 +129,9 @@ aio_shell::page::print: fn print()
 aio_shell::page::reveal: fn reveal(selector: &str, center: bool)
 aio_shell::page::reveal_id: fn reveal_id(id: &str, center: bool)
 aio_shell::page::save: async fn save(s: &Save) -> io::Result<Option<String>>
+aio_shell::page::selection: async fn selection(selector: &str) -> Result<aio::ui::prelude::TextSelection, aio::ui::prelude::EvalError>
 aio_shell::page::set_scroll: fn set_scroll(selector: &str, y: f64)
+aio_shell::page::set_selection: async fn set_selection(selector: &str, s: aio::ui::prelude::TextSelection) -> Result<(), aio::ui::prelude::EvalError>
 aio_shell::page::show: fn show()
 aio_shell::run: fn run(app: fn() -> aio::ui::View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::Result<()>
 aio_shell::serve: fn serve(dirs: &aio::paths::AppDirs) -> std::io::Result<()>

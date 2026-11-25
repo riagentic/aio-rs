@@ -537,6 +537,68 @@ fn a_mounted_handle_reads_its_box_and_moves_focus() {
     assert_eq!(ui.focused().as_deref(), Some("field"));
 }
 
+fn selecting() -> View {
+    let field = signal(|| None::<std::rc::Rc<MountedData>>);
+    let said = signal(String::new);
+    let typed = signal(String::new);
+    let read = move || async move {
+        match field.get().unwrap().selection().await {
+            Ok(s) => said.set(format!("{}..{} {}", s.start, s.end, s.backward)),
+            Err(e) => said.set(e),
+        }
+    };
+    rsx! {
+        textarea { "data-t": "area", value: "aé😀\nxyz", oninput: move |e| typed.set(e.value()),
+            onmounted: move |e| *field.write() = Some(e.data()) }
+        p { "data-t": "said", "{said}" }
+        p { "data-t": "typed", "{typed}" }
+        button { "data-t": "read", onclick: move |_| read(), "read" }
+        button { "data-t": "pick", onclick: move |_| async move {
+            field.get().unwrap().set_selection(TextSelection { start: 1, end: 7, backward: true }).await.expect("set");
+            read().await;
+        }, "pick" }
+        button { "data-t": "put", onclick: move |_| async move {
+            let f = field.get().unwrap();
+            f.set_focus(true).await.expect("focus");
+            f.insert_text("→").await.expect("put");
+            read().await;
+        }, "put" }
+        button { "data-t": "end", onclick: move |_| async move {
+            let f = field.get().unwrap();
+            f.set_selection(TextSelection::caret(99)).await.expect("set");
+            f.insert_text("!").await.expect("put");
+            read().await;
+        }, "end" }
+        input { "data-t": "box", r#type: "checkbox", onmounted: move |e| async move {
+            if let Err(e) = e.data().selection().await { typed.set(e) }
+        } }
+    }
+}
+
+#[test]
+fn a_text_fields_selection_is_read_and_set_in_bytes_and_text_put_in_is_undoable() {
+    let mut ui = TestUi::new(selecting);
+    assert!(ui.text("typed").contains("not a text field"), "{}", ui.text("typed"));
+    ui.click("pick");
+    assert_eq!(ui.text("said"), "1..7 true", "é😀: bytes 1 to 7");
+    let page = ui.eval("(() => { const t = document.querySelector('[data-t=area]'); return [t.selectionStart, t.selectionEnd, t.selectionDirection]; })()");
+    assert_eq!(page, json!([1, 4, "backward"]), "the page's UTF-16 units");
+    ui.click("put");
+    assert_eq!((ui.value("area"), ui.text("said")), ("a→\nxyz".into(), "4..4 false".into()), "the caret after it");
+    assert_eq!(ui.text("typed"), "a→\nxyz", "the field's input told the view");
+    assert_eq!(ui.focused().as_deref(), Some("area"));
+    ui.eval("document.execCommand('undo')");
+    ui.settle();
+    assert_eq!((ui.value("area"), ui.text("typed")), ("aé😀\nxyz".into(), "aé😀\nxyz".into()), "undone, as typing is");
+    ui.click("end");
+    assert_eq!(
+        (ui.value("area"), ui.text("typed")),
+        ("aé😀\nxyz!".into(), "aé😀\nxyz!".into()),
+        "without focus: put in, and told"
+    );
+    assert_eq!(ui.text("said"), "12..12 false", "a byte past the end is the end");
+}
+
 fn palette() -> View {
     rsx! {
         p { style: "color: #000", "fine" }

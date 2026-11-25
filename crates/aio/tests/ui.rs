@@ -704,6 +704,53 @@ fn the_page_keeps_the_keys_an_element_names_and_the_view_still_hears_them() {
     assert_eq!(ui.count("[data-t=far]:focus"), 1, "outside the box Tab is the browser's");
 }
 
+/// A field that keeps its own Tab: the view puts two spaces in its place.
+#[component]
+fn Indenting(t: String) -> View {
+    let el = signal(|| None::<std::rc::Rc<MountedData>>);
+    rsx! {
+        textarea { "data-t": t, "aria-label": "Code", "data-aio-prevent": "Tab",
+            onmounted: move |e| *el.write() = Some(e.data()),
+            onkeydown: move |e| async move {
+                if e.key() == Key::Tab {
+                    e.prevent_default();
+                    if let Some(f) = el.get() { f.insert_text("  ").await.expect("put") }
+                }
+            },
+        }
+    }
+}
+
+/// Two such fields, the second the last control of a modal dialog.
+fn indenting() -> View {
+    rsx! {
+        Indenting { t: "src" }
+        button { "data-t": "next", "Next" }
+        div { role: "dialog", "aria-modal": "true", "aria-label": "Edit",
+            button { "data-t": "first", "First" }
+            Indenting { t: "last" }
+        }
+    }
+}
+
+#[test]
+fn a_field_keeps_the_keys_it_names_itself_and_the_view_handles_them() {
+    use aio::ui::prelude::{Key, Modifiers};
+    let mut ui = TestUi::new(indenting);
+    ui.type_text("src", "a");
+    ui.press_key(Key::Tab, Modifiers::empty());
+    assert_eq!((ui.focused().as_deref(), ui.value("src")), (Some("src"), "a  ".to_string()), "Tab stayed in the field");
+    ui.type_text("last", "b");
+    ui.press_key(Key::Tab, Modifiers::empty());
+    assert_eq!(
+        (ui.focused().as_deref(), ui.value("last")),
+        (Some("last"), "b  ".to_string()),
+        "a dialog's Tab didn't take it"
+    );
+    ui.press_key(Key::Enter, Modifiers::empty());
+    assert_eq!(ui.value("last"), "b  \n", "the keys it doesn't name are its own");
+}
+
 #[test]
 fn the_row_with_the_cursor_is_scrolled_into_view_without_a_script_from_the_app() {
     let mut ui = TestUi::new(keyed);
@@ -913,4 +960,14 @@ fn a_scoped_rule_styles_its_class_only_and_is_put_in_the_page_once() {
     let rules = ui.eval("document.querySelector('style[data-aio-css]').sheet.cssRules.length");
     assert_eq!(rules.as_u64(), Some(1), "two uses, one rule");
     assert!(ui.run(aio::ui::collect_css).starts_with(".aio-"));
+}
+
+/// A constant `value` shows in a textarea and picks a select's option: its
+/// attribute alone shows nothing there, so it is set as the property.
+#[test]
+fn a_textareas_and_a_selects_constant_value_shows() {
+    let ui = TestUi::new(
+        || rsx! { textarea { "data-t": "t", "aria-label": "t", value: "hi" } select { "data-t": "s", "aria-label": "s", value: "b", option { value: "a", "a" } option { value: "b", "b" } } },
+    );
+    assert_eq!((ui.value("t"), ui.value("s")), ("hi".to_string(), "b".to_string()));
 }

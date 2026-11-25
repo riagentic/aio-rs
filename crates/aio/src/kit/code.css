@@ -1,0 +1,45 @@
+/* CodeArea: the textarea over its highlighted copy, in one scroller (the
+   box). Both take the box's font, line height and tab size; the textarea
+   sits over the text column, as tall and wide as the copy (never scrolling
+   itself: a line of room below and one scroller, nothing to keep in step).
+   Line numbers are a CSS counter, so a row keeps its node as lines above
+   it come and go. Code reads left to right whatever the page's direction. */
+.aio-code {
+  position: relative; overflow: auto; direction: ltr; text-align: left;
+  font-family: var(--aio-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace);
+  font-size: .9em; line-height: 1.5; color: var(--aio-ui-ink, CanvasText); background: var(--aio-ui-bg, Canvas);
+  border: 1px solid var(--aio-ui-line, GrayText); border-radius: var(--aio-ui-radius, 4px);
+  --aio-code-gutter: calc(var(--aio-code-digits) * 1ch + 2ch);
+}
+.aio-code:focus-within { outline: 2px solid var(--aio-ui-accent, Highlight); outline-offset: 1px; }
+.aio-code__doc { position: relative; box-sizing: border-box; min-inline-size: 100%; inline-size: max-content; padding-block: .25em 1.75em; counter-reset: aio-line; }
+.aio-code--wrap .aio-code__doc { inline-size: auto; }
+.aio-code__line { display: flex; counter-increment: aio-line; }
+.aio-code__line::before {
+  content: counter(aio-line); flex: none; box-sizing: border-box; inline-size: var(--aio-code-gutter);
+  padding-inline: 1ch; border-inline-start: 3px solid transparent; text-align: right; color: var(--aio-ui-ink-soft, GrayText); user-select: none;
+}
+.aio-code__text { flex: 1; min-inline-size: 0; white-space: pre; }
+.aio-code__in {
+  position: absolute; z-index: 1; inset-block: 0; inset-inline: var(--aio-code-gutter) 0; box-sizing: border-box;
+  inline-size: auto; block-size: auto; min-block-size: 0;
+  margin: 0; padding: .25em 0 0; border: 0; border-radius: 0; outline: 0; box-shadow: none; resize: none; overflow: hidden;
+  background: transparent; color: transparent; caret-color: var(--aio-ui-ink, CanvasText);
+  font: inherit; letter-spacing: inherit; line-height: inherit; tab-size: inherit; white-space: pre;
+}
+.aio-code--wrap .aio-code__text, .aio-code--wrap .aio-code__in { white-space: break-spaces; overflow-wrap: anywhere; }
+.aio-code__in::selection { color: transparent; background: color-mix(in srgb, var(--aio-ui-accent, Highlight) 35%, transparent); }
+.aio-code__in::placeholder { color: var(--aio-ui-ink-soft, GrayText); }
+.aio-code__in[data-ime] { color: var(--aio-ui-ink, CanvasText); }
+.aio-code__in[data-ime] ~ .aio-code__lines .aio-code__text { visibility: hidden; }
+/* Marks: a tint and the number's bar, whose style tells them apart too. */
+.aio-code__line.error { background: color-mix(in srgb, var(--aio-ui-danger, #d3364a) 14%, transparent); }
+.aio-code__line.error::before { border-inline-start-color: var(--aio-ui-danger, #d3364a); }
+.aio-code__line.warning { background: color-mix(in srgb, #d99117 16%, transparent); }
+.aio-code__line.warning::before { border-inline-start: 3px dashed #d99117; }
+.aio-code__line.current { background: color-mix(in srgb, var(--aio-ui-accent, Highlight) 12%, transparent); }
+.aio-code__line.current::before { border-inline-start-color: var(--aio-ui-accent, Highlight); color: var(--aio-ui-ink, CanvasText); font-weight: 700; }
+@media (forced-colors: active) {
+  .aio-code__in::selection { background: Highlight; }
+  .aio-code__line.error::before, .aio-code__line.warning::before, .aio-code__line.current::before { border-inline-start-color: CanvasText; }
+}
