@@ -15,7 +15,7 @@ tokens: put the theme on the page first
 
 | Group | Components and hooks |
 |---|---|
-| Form | `Button`, `Field`, `Input`, `Textarea`, `Select`, `Checkbox`, `RadioGroup`, `Switch`, `use_form`, `use_async_rule`, `move_item` |
+| Form | `Button`, `Field`, `Input`, `Textarea`, `CodeArea`, `Select`, `Checkbox`, `RadioGroup`, `Switch`, `use_form`, `use_async_rule`, `move_item` |
 | Overlay | `Modal`, `Confirm`, `ConfirmButton`, `ToastHost` + `toast(..)`, `Tooltip`, `Menu`, `Portal` / `PortalHost` |
 | Layout | `Card`, `Stack`, `Row`, `Tabs`, `NavList`, `Table`, `Pagination`, `Breadcrumb`, `Direction` |
 | Status | `Spinner`, `Progress`, `Skeleton`, `Alert`, `EmptyState`, `ConnectionStatus`, `Avatar` |
@@ -122,6 +122,73 @@ assert_eq!(ui.text("out"), "1 de M true false");
 - `aio::ui::btn("primary")` and `aio::ui::input_cls(extra, invalid)` give
   the same classes to a plain element.
 - Forms with rules, touched fields and async checks: [forms](forms.md).
+
+## Code
+
+`CodeArea` is a code editor's light core for notes, dev tools, config
+editors and learning apps: monospaced text, line numbers, the app's
+highlighting and line marks, Tab that indents. The real control is a
+`textarea`; a highlighted copy of its text lies under it, in one scroller.
+The kit has no grammars: the app gives each line's runs of `(class,
+text)`, from its own highlighter or none.
+
+```rust
+use aio::kit::{CodeArea, Field};
+use aio::ui::prelude::*;
+
+/// Runs of `(class, text)` per line: here `let` is a keyword.
+fn highlight(code: &str) -> Vec<Vec<(String, String)>> {
+    let run = |w: &str| (if w.trim() == "let" { "kw" } else { "" }.to_string(), w.to_string());
+    code.split('\n').map(|l| l.split_inclusive(' ').map(run).collect()).collect()
+}
+
+#[component]
+fn Lesson() -> View {
+    let code = signal(|| "let a = 1\nlet b = a +".to_string());
+    let runs = signal(|| 0);
+    rsx! {
+        style { ".kw {{ color: #a626a4; font-weight: 600 }} .lesson {{ height: 12em }}" }
+        Field { label: "Your code",
+            CodeArea { "data-t": "code", class: "lesson", value: code.get(), oninput: move |v| code.set(v),
+                spans: highlight(&code.get()),
+                // Line 2 (from 0: 1) has an error; line 1 runs now.
+                marks: vec![(1, "error".to_string()), (0, "current".to_string())],
+                tab_size: 2,
+                onkeydown: move |e: KeyboardEvent| if e.key() == Key::Enter && e.modifiers().ctrl() { runs += 1 },
+            }
+        }
+        p { "data-t": "runs", "{runs}" }
+    }
+}
+
+# fn main() {
+let mut ui = aio::testing::TestUi::new(Lesson);
+ui.type_text("code", " 1");
+ui.press("code", "ctrl+Enter");
+assert_eq!((ui.value("code"), ui.text("runs")), ("let a = 1\nlet b = a + 1".into(), "1".into()));
+ui.press("code", "Tab"); // stays in the field
+assert_eq!(ui.value("code"), "let a = 1\nlet b = a + 1 ");
+# }
+```
+
+| Prop | Does |
+|---|---|
+| `value`, `oninput(String)` | the text, controlled as `Textarea`'s |
+| `spans: Vec<Vec<(String, String)>>` | per line, its runs of `(class, text)`; a line whose runs don't spell it (highlighting not caught up yet) shows plain, so the copy never strays from the text |
+| `marks: Vec<(usize, String)>` | `(line, class)`, lines from 0: the class goes on the line's row, number and text; `error` (a solid bar), `warning` (a dashed one) and `current` (a bold number) have a look, any other is the app's (`.heat-3 { background: .. }`) |
+| `tab_size` (4) | Tab puts spaces to the next stop, or indents each line of a selection; Shift+Tab outdents; Escape, then Tab, leaves the field |
+| `wrap` | long lines wrap (off: the box scrolls sideways) |
+| `onkeydown` | the field's keys (Ctrl+Enter to run) |
+| `onmounted` | the textarea's `MountedData`: its `selection()`, `set_selection(s)`, `insert_text(text)` ([views](views.md#a-text-fields-selection)) |
+| `class`, `style` | size the box (it scrolls inside); every other attribute (`id`, `aria-label`, `readonly`, `placeholder`, `"data-t"`) goes on the textarea |
+
+- Tab is done in the page, through the browser's own typing: never late,
+  and Ctrl+Z takes it back. An IME's composition shows as typed and the
+  copy under it hides until it ends.
+- Its sheet and script come with it: an app without a `CodeArea` carries
+  neither.
+- Not an editor clone: no grammars, no multiple carets, no folding. A
+  full editor (CodeMirror, Monaco) runs as an [island](islands.md).
 
 ## Tabs, menus and navigation
 

@@ -16,6 +16,7 @@
 mod back;
 mod browser;
 mod change;
+mod code;
 #[cfg(not(target_arch = "wasm32"))]
 mod connect;
 mod controls;
@@ -52,6 +53,7 @@ mod zoom;
 pub use back::use_back_button;
 pub use browser::{Browser, Go, Guest, GuestEvent, GuestInput, HostKey, WEBVIEW_METHODS, go, run_js, webview};
 pub use change::{use_on_change, use_on_change_now};
+pub use code::{CodeArea, CodeAreaProps};
 #[cfg(not(target_arch = "wasm32"))]
 pub use connect::{ConnectPage, use_connect_page};
 pub use controls::*;

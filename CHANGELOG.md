@@ -75,6 +75,16 @@ version may break things.
 
 ### Added
 
+- `aio::kit::CodeArea`: a code editor's light core (notes, dev tools,
+  config editors, learning apps): a real `textarea` over a highlighted
+  copy of its text in one scroller, line numbers, the app's highlighting
+  (`spans`: runs of `(class, text)` per line; the kit has no grammars),
+  line marks (`(line, class)`; `error`, `warning`, `current` have a
+  look), `tab_size` (Tab indents to the next stop or every selected line,
+  Shift+Tab outdents, in the page and undoable; Escape, then Tab, leaves),
+  `wrap`, `onkeydown` (Ctrl+Enter), `onmounted`. IME-safe; labelled by a
+  `Field`. Its sheet and script come with it: an app without one carries
+  neither ([kit](docs/ui/kit.md#code)).
 - A text field's selection, written as well as read: `MountedData::
   selection()`, `set_selection(TextSelection)` and `insert_text(text)`
   (the browser's own typing: `input` fires, Ctrl+Z undoes it), in bytes
