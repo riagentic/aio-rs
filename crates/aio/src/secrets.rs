@@ -8,21 +8,24 @@
 //! | Linux | by the Secret Service (GNOME Keyring, KWallet, KeePassXC) over D-Bus, through libsecret loaded at run time |
 //! | Windows | in `data/secrets/`, each sealed by DPAPI for this user |
 //! | Android | in `data/secrets/`, each sealed (AES-GCM) by a key the Keystore keeps and never hands out |
-//! | the web | nowhere: refused |
+//! | the web | in the page's `localStorage`, each sealed (AES-GCM) by a key the app's passkey derives (WebAuthn's PRF) as the user verifies it |
 //! | the test world | in the sandbox, plain: never the OS's store |
 //!
 //! Each home of the app has its own (a profile, a dev build, `--home`): a
 //! throwaway run never sees the real ones. Every call waits on the OS,
-//! which may ask the user (a locked keyring, a fingerprint), so each is
-//! `async` and runs off the caller's thread.
+//! which may ask the user (a locked keyring, a fingerprint, the passkey),
+//! so each is `async` and runs off the caller's thread.
 //!
 //! Errors say what happened by their kind:
-//! - `Unsupported`: no store here (the web, Linux with no Secret Service
-//!   running, a fingerprint asked for off Android or with none enrolled):
-//!   do without it (ask the user each time);
-//! - `PermissionDenied`: the user said no;
+//! - `Unsupported`: no store here (Linux with no Secret Service running, a
+//!   browser or passkey without PRF, a page not on https, a fingerprint
+//!   asked for off Android and the web or with none enrolled): do without
+//!   it (ask the user each time);
+//! - `PermissionDenied`: the user said no (or, on the web, the passkey
+//!   wasn't there to ask);
 //! - `InvalidData`: the secret can't be opened here any more (another
-//!   user's or machine's, a fingerprint enrolled since): set it again;
+//!   user's or machine's, a fingerprint enrolled since, a passkey made
+//!   since): set it again;
 //! - `InvalidInput`: a name that isn't 1 to 64 of `a-z`, `0-9`, `-`, `_`.
 use std::io;
 
@@ -55,26 +58,43 @@ impl Drop for Secret {
 
 /// Keep `value` as secret `name`, replacing the one of that name.
 pub async fn set(name: &str, value: &[u8]) -> io::Result<()> {
-    let v = Secret(value.to_vec());
-    run(name, move |s, n| s.put(n, &v, false)).await
+    #[cfg(target_arch = "wasm32")]
+    return web::put(name, value).await;
+    #[cfg(not(target_arch = "wasm32"))]
+    put(name, value, false).await
 }
 
 /// [`set`], opened again only after the user's fingerprint or face: each
-/// [`get`] of it asks, and so does this. Android only (its Keystore);
-/// elsewhere, and with no fingerprint or face enrolled, `Unsupported`.
+/// [`get`] of it asks, and so does this. Android (its Keystore) and the web
+/// (where every secret's passkey verifies the user); elsewhere, and with no
+/// fingerprint or face enrolled, `Unsupported`.
 pub async fn set_biometric(name: &str, value: &[u8]) -> io::Result<()> {
-    let v = Secret(value.to_vec());
-    run(name, move |s, n| s.put(n, &v, true)).await
+    #[cfg(target_arch = "wasm32")]
+    return web::put(name, value).await;
+    #[cfg(not(target_arch = "wasm32"))]
+    put(name, value, true).await
 }
 
 /// Secret `name`, if one is kept.
 pub async fn get(name: &str) -> io::Result<Option<Secret>> {
+    #[cfg(target_arch = "wasm32")]
+    return web::get(name).await;
+    #[cfg(not(target_arch = "wasm32"))]
     run(name, |s, n| s.get(n)).await
 }
 
 /// Forget secret `name` (none kept: nothing to do).
 pub async fn delete(name: &str) -> io::Result<()> {
+    #[cfg(target_arch = "wasm32")]
+    return web::delete(name).await;
+    #[cfg(not(target_arch = "wasm32"))]
     run(name, |s, n| s.delete(n)).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn put(name: &str, value: &[u8], biometric: bool) -> io::Result<()> {
+    let v = Secret(value.to_vec());
+    run(name, move |s, n| s.put(n, &v, biometric)).await
 }
 
 /// Is `name` one a secret may have on every OS (a file name on Windows
@@ -94,33 +114,16 @@ fn unsupported(why: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, why.into())
 }
 
-/// No fingerprint here (off Android).
+/// No fingerprint here (off Android and the web).
 #[cfg_attr(any(target_os = "android", target_arch = "wasm32"), allow(dead_code))]
 fn no_biometric() -> io::Error {
-    unsupported("a fingerprint or face guards a secret on Android only: here use secrets::set")
+    unsupported("a fingerprint or face guards a secret on Android and the web only: here use secrets::set")
 }
 
-#[cfg(target_arch = "wasm32")]
-async fn run<T>(name: &str, _: impl FnOnce(&Store, &str) -> io::Result<T>) -> io::Result<T> {
-    check(name)?;
-    Err(unsupported("the web has no OS secret store (a page's storage is any script's on it): ask the user each time"))
-}
-
-#[cfg(target_arch = "wasm32")]
-struct Store;
-
-#[cfg(target_arch = "wasm32")]
-impl Store {
-    fn put(&self, _: &str, _: &[u8], _: bool) -> io::Result<()> {
-        unreachable!("the web refuses first")
-    }
-    fn get(&self, _: &str) -> io::Result<Option<Secret>> {
-        unreachable!("the web refuses first")
-    }
-    fn delete(&self, _: &str) -> io::Result<()> {
-        unreachable!("the web refuses first")
-    }
-}
+#[cfg(any(target_arch = "wasm32", test))]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+#[path = "secrets/web.rs"]
+mod web;
 
 #[cfg(target_vendor = "apple")]
 #[path = "secrets/apple.rs"]
