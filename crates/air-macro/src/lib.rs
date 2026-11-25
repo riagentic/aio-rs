@@ -682,7 +682,8 @@ pub(crate) enum Node {
     Text(String),
     /// A `"…{x}…"` text: `format!`'s literal and arguments, and the names it reads.
     Fmt(TokenStream, Vec<String>),
-    Expr(TokenStream),
+    /// A `{ … }` hole: its expression, and where its braces are.
+    Expr(TokenStream, Span),
     El {
         tag: String,
         /// Where its tag is written (`ax lint`'s line).
@@ -805,7 +806,7 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
         && g.delimiter() == Delimiter::Brace
     {
         *i += 1;
-        return Ok(Node::Expr(g.stream()));
+        return Ok(Node::Expr(g.stream(), g.span()));
     }
     if is_ident(t, "for") {
         let at = t.span();
@@ -1839,7 +1840,7 @@ fn node_captures(nodes: &[Node], out: &mut Vec<String>) {
         match n {
             Node::Text(_) => {}
             Node::Fmt(_, r) => out.extend(r.iter().cloned()),
-            Node::Expr(e) => captures(e, out),
+            Node::Expr(e, _) => captures(e, out),
             Node::El { attrs, spreads, children, key, .. } => {
                 for (_, v) in attrs {
                     match v {
@@ -1922,7 +1923,7 @@ fn let_bound(cond: &TokenStream) -> Vec<String> {
 
 /// Is `n` a placeholder in its template (an anchor its content goes before)?
 fn anchored(n: &Node) -> bool {
-    matches!(n, Node::Expr(_) | Node::Comp { .. } | Node::For { .. } | Node::If { .. } | Node::Match { .. })
+    matches!(n, Node::Expr(..) | Node::Comp { .. } | Node::For { .. } | Node::If { .. } | Node::Match { .. })
         || remounted(n).is_some()
 }
 
@@ -2029,6 +2030,7 @@ impl Tpl {
                                 let (head, set) = attr_fn();
                                 hole_fn(
                                     e,
+                                    at_expr(e),
                                     head,
                                     |v| quote!(#set(air::IntoAttr::into_attr(#v))),
                                     |e| quote!(air::__rt::attr(#id, #k, #e);),
@@ -2045,12 +2047,14 @@ impl Tpl {
                                     let data = Ident::new(data, Span::call_site());
                                     // A closure gets its parameter's type from a direct bound.
                                     let closure = is_closure(e);
+                                    // Said at the handler: a borrow it can't keep is its.
+                                    let sp = at_expr(e);
                                     let h = if closure {
-                                        quote!(air::__rt::handler_fn::<air::__rt::#data, _, _>(::std::boxed::Box::new(#e)))
+                                        quote_spanned!(sp=> air::__rt::handler_fn::<air::__rt::#data, _, _>(::std::boxed::Box::new(#e)))
                                     } else {
-                                        quote!(air::__rt::handler::<air::__rt::#data, _>(#e))
+                                        quote_spanned!(sp=> air::__rt::handler::<air::__rt::#data, _>(#e))
                                     };
-                                    quote!(air::__rt::on(#id, #dom, { #c #h });)
+                                    quote_spanned!(sp=> air::__rt::on(#id, #dom, { #c #h });)
                                 }
                             }
                             _ => continue,
@@ -2091,12 +2095,16 @@ impl Tpl {
                             { #ck ::std::boxed::Box::new(move || (#key).to_owned()) },
                             { #cr ::std::boxed::Box::new(move || #view) });)
                     }
-                    Node::Expr(e) => hole_fn(
-                        e,
-                        quote!(move ||),
-                        |v| quote!(air::IntoChild::into_child(#v)),
-                        |e| quote!(air::__rt::child(#id, #e);),
-                    ),
+                    Node::Expr(e, braces) => {
+                        let sp = Span::call_site().located_at(*braces);
+                        hole_fn(
+                            e,
+                            sp,
+                            quote_spanned!(sp=> move ||),
+                            |v| quote_spanned!(sp=> air::IntoChild::into_child(#v)),
+                            |e| quote_spanned!(sp=> air::__rt::child(#id, #e);),
+                        )
+                    }
                     Node::Comp { path, key, .. } => {
                         let mut r = vec![];
                         node_captures(std::slice::from_ref(n), &mut r);
@@ -2196,12 +2204,19 @@ fn attr_fn() -> (TokenStream, TokenStream) {
     (quote!(move |#s: &mut air::__rt::AttrSlot|), quote!(#s.set))
 }
 
+/// Where the expression `e` is written (its first token), resolved as the
+/// macro's own code: the code made for its hole is said there.
+fn at_expr(e: &TokenStream) -> Span {
+    e.clone().into_iter().next().map_or(Span::call_site(), |t| Span::call_site().located_at(t.span()))
+}
+
 /// A hole's closure (`head`, then `into` of the value): the names it reads
 /// are cloned in, and again per run (as a component's props), so `{match
 /// who { .. }}` or `{note.map(..)}` may take them by value; a single name's
 /// type decides whether it follows anything (a signal does).
 fn hole_fn(
     e: &TokenStream,
+    sp: Span,
     head: TokenStream,
     into: impl Fn(TokenStream) -> TokenStream,
     call: impl Fn(TokenStream) -> TokenStream,
@@ -2212,11 +2227,13 @@ fn hole_fn(
         && i.to_string().starts_with(|c: char| c.is_uppercase())
     {
         let v = into(quote!(::std::clone::Clone::clone(&#i)));
-        return call(quote!(::std::boxed::Box::new(#head #v)));
+        return call(quote_spanned!(sp=> ::std::boxed::Box::new(#head #v)));
     }
     if let [TokenTree::Ident(i)] = v.as_slice() {
         let v = into(quote!(::std::clone::Clone::clone(&#i)));
-        return call(quote!({ let #i = ::std::clone::Clone::clone(&#i); ::std::boxed::Box::new(#head #v) }));
+        return call(
+            quote_spanned!(sp=> { let #i = ::std::clone::Clone::clone(&#i); ::std::boxed::Box::new(#head #v) }),
+        );
     }
     let mut r = vec![];
     captures(e, &mut r);
@@ -2224,8 +2241,9 @@ fn hole_fn(
     // The per-run clones outlive `into`: `{t(&x)}` may borrow them. A lone
     // expression is `into`'s argument, so what it makes lives as long
     // (`{t(&sig.get())}`); a block's tail drops its temporaries at its end.
-    let v = into(if v.iter().any(|t| is_punct(Some(t), ';')) { quote!({ #e }) } else { e.clone() });
-    call(quote!({ #c ::std::boxed::Box::new(#head { #c #v }) }))
+    // Its own code is said where the hole is: a borrow error points there, not at the whole `rsx!`.
+    let v = into(if v.iter().any(|t| is_punct(Some(t), ';')) { quote_spanned!(sp=> { #e }) } else { e.clone() });
+    call(quote_spanned!(sp=> { #c ::std::boxed::Box::new(#head { #c #v }) }))
 }
 
 /// `Row { a: x, "data-t": t, ..more, children… }`'s props:
@@ -2467,6 +2485,27 @@ mod tests {
             })
         }
         find(expand(src.parse().unwrap(), None))
+    }
+
+    /// Where `expand(src)`'s first `name` is (line, column).
+    fn made_at(src: &str, name: &str) -> Option<(usize, usize)> {
+        fn find(ts: TokenStream, name: &str) -> Option<(usize, usize)> {
+            ts.into_iter().find_map(|t| match t {
+                TokenTree::Ident(i) if i == name => Some((i.span().start().line, i.span().start().column)),
+                TokenTree::Group(g) => find(g.stream(), name),
+                _ => None,
+            })
+        }
+        find(expand(src.parse().unwrap(), None), name)
+    }
+
+    /// A borrow error in a hole (a temporary a view keeps, a local a
+    /// handler borrows) is said at the hole, not over the whole `rsx!`.
+    #[test]
+    fn the_code_made_for_a_hole_is_said_where_the_hole_is() {
+        assert_eq!(made_at("div {\n  {a.b().map(f)}\n}", "into_child"), Some((2, 2)), "a child hole: its braces");
+        assert_eq!(made_at("p {\n  title: t.get().x,\n}", "Box"), Some((2, 9)), "an attribute's value");
+        assert_eq!(made_at("button {\n  onclick: move |_| f(&x),\n}", "handler_fn"), Some((2, 11)), "a handler");
     }
 
     #[test]

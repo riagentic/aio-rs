@@ -801,6 +801,16 @@ Routes are [routing](routing.md); styles and dark mode are
   (`TestUi`, `TestPage`) fails, naming the component and the `for`'s
   `file:line:col`; a window draws every row, the second keyed by its
   repeat, and says it once (`ui:duplicate-key` in the log). Key by an id.
+- A borrow in a hole: a hole's view outlives the body that made it, so
+  what it holds must be owned. rustc says `E0716` (a temporary dropped
+  while borrowed) or `E0597` (a local that doesn't live long enough) at
+  the hole. Clone or own the value first:
+
+  | Shape | Fix |
+  |---|---|
+  | `{match &rep.get().error { Some(e) => rsx! { p { "{e}" } }, None => rsx! {} }}` | `{match rep.get().error { Some(e) => …, None => … }}`: match the owned value |
+  | `{rep.get().probes.get(i).map(\|p\| rsx! { span { "{p}" } })}` | `{rep.get().probes.get(i).cloned().map(\|p\| …)}`, or `let p = …;` before `rsx!` |
+  | `let r = &name;` … `onclick: move \|_\| f(r.clone())` | `onclick: move \|_\| f(name.clone())`: a hole clones the names it reads; a reference to a local can't go with it |
 - A 0.1 app's renderer left in (its paths, its dependency, a page
   script's `send`): `ax lint` refuses them, and the migration guide's
   section 8, [0.1 → 0.2](../migration/README.md), has the names.

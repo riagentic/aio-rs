@@ -343,6 +343,11 @@ version may break things.
   `file:line:col`. A test (`TestUi`, `TestPage`) fails with that message
   in every build (before: in a debug build only). A server render draws
   every row too.
+- A borrow error in an `rsx!` hole (`E0716` for a temporary a view keeps,
+  `E0597` for a local a handler borrows) is said at the hole, not over
+  the whole `rsx!`: the code the macro makes for a hole carries its
+  place. The views guide's Common mistakes shows the three shapes and
+  their fix.
 - A `TestUi` step waits for the files its event reads: a form's submit
   read its files as the event went out, and a click that submitted it
   could end before they were read (the submit unheard on a loaded
