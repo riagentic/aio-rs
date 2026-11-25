@@ -129,7 +129,9 @@ rt.block_on(async {
   delete the file. A saved copy that can't be read (torn by a disk fault,
   edited by hand) is moved aside (`copy.unreadable-<ms>`, in a page
   `<key>.corrupt`, then `-2`…) and said (`sync:unreadable-copy`), never
-  saved over. A saved copy keeps who it is: the `user` it was opened as
+  saved over. A file that can't be read now (held by another program,
+  refused, a disk error) is not damaged: it is tried again for a moment,
+  then the open fails with an error naming it, and it stays as it is. A saved copy keeps who it is: the `user` it was opened as
   and the user the server last said it is. Opened as another user (or
   the server now says another), it is never shown and its calls are
   never sent as this one: with calls waiting it is kept beside its file

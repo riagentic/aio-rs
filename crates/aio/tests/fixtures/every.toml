@@ -150,9 +150,9 @@ scheme = "light"
 hue = 200
 neutral = "soft"
 [vitals.loop]
-degraded = 10
+degraded = "10ms"
 warning = 20
-frozen = 30
+frozen = "30ms"
 
 [dev]
 watch = ["src/ui", "assets"]

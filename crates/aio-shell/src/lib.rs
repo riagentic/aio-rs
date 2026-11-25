@@ -165,6 +165,7 @@ mod presplash;
 pub mod prune;
 #[doc(hidden)]
 pub mod runtime;
+mod schemes;
 #[doc(hidden)]
 pub mod splash;
 mod stderr;
@@ -689,9 +690,10 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         // since `start`; ax's own window has no `start`).
         instance::open_door(&dirs.id, &dirs.data);
         // `ax surface`, `trigger`, `shot` and `eval` reach the window here:
-        // `ax dev`'s builds only (aio-shell's `dev`: tooling; aio's control
-        // API was dev-only); elsewhere no DevTools protocol (AIORT_CDP is ignored).
-        if cfg!(feature = "dev") {
+        // the builds of `ax start` and `ax dev` only (aio-shell's `door`; aio's
+        // control API was dev-only), in the user's own private sockets dir; a
+        // release build opens none.
+        if cfg!(feature = "door") {
             let ui = aio::ipc::Listener::bind(&aio::ipc::addr(&socks, inspect::DOOR))?;
             tokio::spawn(inspect::serve(ui, inspect::hub().clone(), ctl.clone()));
         }
@@ -1906,7 +1908,8 @@ mod tests {
                 "frames 0,1,1".to_string(),
             ]
         );
-        let t = aio::vitals::Tier { degraded: 10, warning: 20, frozen: 30 };
+        let ms = std::time::Duration::from_millis;
+        let t = aio::vitals::Tier { degraded: ms(10), warning: ms(20), frozen: ms(30) };
         let own = aio::vitals::Vitals { hints: false, render: t, ..v };
         let said = run(&own, "frame(25);").unwrap();
         assert_eq!(said[0], "W [vitals] render warning: an update took 25 ms to paint");

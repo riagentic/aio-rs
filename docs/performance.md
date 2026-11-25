@@ -708,5 +708,5 @@ assert_eq!(costs(&tree, "Label"), (1, 0), "a field it doesn't read costs it noth
 
 `cargo doc -p aio-rs --no-deps --all-features --open`: `aio::perf`
 (`Budgets`, `Phases`, `QUIET`), `aio::budgets`, `aio::vitals`,
-`aio::cost`, `aio::Cache`, `aio::Ver`, `aio::testing::TestUi`
+`aio::Cache`, `aio::Ver`, `aio::testing::TestUi`
 (`components`, `wire_bytes`), `aio::kit::VirtualList`.

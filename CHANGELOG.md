@@ -101,6 +101,25 @@ version may break things.
   and unplug at will (`plug`, `Plugged::unplug`, `send`, `transfers`).
   The app's code under test uses `aio::hw` unchanged; in the test world
   `aio::hw` never reaches the machine's devices.
+- `aio::client!` also makes `prelude`, a module with its items (`part`,
+  `Ui` that `act!` calls through, the cell's reader, `use_live`…) and the
+  view API: another module of the crate (a page) needs one line,
+  `use crate::prelude::*;`, where each page module failed with dozens of
+  `cannot find function part` / `cannot find type Ui` errors until it
+  found `use crate::*;`. `ax dev` and `ax lint` add that line to those
+  errors as the fix, `ax create`'s template draws its buttons from a
+  second module that uses it, and `ax add cell`'s file says it
+  ([views](docs/ui/views.md#what-client-makes)).
+- `ax lint` warns of a literal `data-t` equal to the id of a kit `Tab`
+  the same component makes (`Tab::new("gpu", …)` beside a
+  `Select { "data-t": "gpu" }`): a tab's id is its handle, so `ax trigger`
+  and tests met two elements by one name, though `data-t` was written once.
+- The guide says how to read a field that isn't `Copy` from a client's
+  state (`todo().title.clone()`; why no getter is made) and how to keep
+  app-lifetime state that isn't saved: a `Global` filled by
+  `spawn_forever` + `off_thread`, read by a test with `ui.read(&GLOBAL)`
+  ([views](docs/ui/views.md#app-lifetime-state-that-isnt-saved)); `ax
+  agent ui` says both.
 - `aio::kit::NavList` and `NavItem`: a sidebar's rail of pages, the
   current one `aria-current="page"` (marked by a bar and weight, not
   colour alone), one tab stop with ↑/↓, Home and End moving focus and
@@ -229,13 +248,58 @@ version may break things.
   ([relay](docs/examples/relay.md)).
 - `Source::for_server_with(cfg, dirs, http)`: `for_server` serving the
   app's own routes too, without the sync client `for_app_with` holds.
+- `ax expect-ui <app> <path> eq|contains <text>` and `present|absent
+  [--wait s]`: what the running window shows asserted, and waited for, in
+  `TestUi`'s words (`until_text`, `until_contains`), as `ax expect` does
+  for a cell's state; exit 1 with what it shows. A result only a view
+  holds (a `Global`) can be awaited without a sleep.
+- `ax wait <app> --idle [--for ms] [--wait s]`: until the app has nothing
+  in flight (an effect, a `blocking` or `off_thread` job, a commit its
+  views aren't told of) and its window has been still for `--for` ms (no
+  DOM change, no animation that ends running); exit 1 naming what is
+  busy. `aio::effect::busy()` says what the app is still doing, and the
+  window's door answers it (`Aio.busy`).
+- aio-shell's `door` feature: the window's `ui` door alone (`dev` has it).
+- A text in `rsx!` takes `format!`'s arguments after it:
+  `span { "By threads ({} per SM)", g.threads_sm }`, as many as its
+  `{}`s take (`{0}`, `{:.*}`, `{:1$}` counted as `format!` does), then
+  named ones (`w = 2`); a `{x}` beside them still reads `x`. A value
+  after a text with no `{}` says to put it in the string
+  (`"{g.threads_sm}"`), where it said `expected a { … } block`.
+- `air::Root::faults()`: what views did wrong that drawing went past (a
+  list's repeated key), taken; `TestPage` and `TestUi` fail on them.
 
 ### Changed
 
 - ax reads and writes objects with object 0.39 (from 0.37): one hashbrown
   in the workspace, a crate fewer in ax's graph.
+- **Breaking:** a module named `prelude` beside an `aio::client!(..)`
+  call collides with the one it makes now: rename yours, or move the
+  `client!` into a module of its own
+  ([migration](docs/migration/0.4-to-0.5.md#views)).
+- `ax lint`'s view checks (hooks, signal guards, `rsx!` markup) run only
+  on crates that can hold views: those depending on aio-rs or air, by
+  their own dependency, through `[workspace.dependencies]` or through a
+  path crate that does. A library of the app with neither (a parser, an
+  emulator) was told its token cursor's `self.peek()` was a signal
+  borrowed across a `while let`. The guard finding says why it took the
+  value for a signal, and how to mark one that isn't
+  ([lint](docs/testing/lint.md#what-it-checks)).
+- `ax agent`'s brief is checked against the guide: every example its UI
+  section shows in backticks is in docs/agents.md's compiled doctest, and
+  every one it refuses in a `compile_fail` block of it.
 - `Tabs` that don't fit wrap to another row, where a scrollbar showed
   under them; `scroll: true` keeps the old row.
+- `ax start` builds the app with the window's door (aio-shell's `door`;
+  local, in the user's private sockets folder): `ax shot`, `ax eval`, `ax
+  surface`, `ax trigger` work on an app it started, as on `ax dev`'s,
+  with no `--cdp` (said "start it with --cdp" of a dev build that had a
+  window). An app on an aio-rs without the feature builds as before; a
+  release build still opens no door, and the message says what to run:
+  `ax restart <app>` in its workspace.
+- A handle two showing elements share is refused naming the path of
+  handles that names each alone (`<button> "Fleet" at side/fleet`), in
+  `TestUi`, `ax trigger` and `ax expect-ui` alike.
 - **Breaking: ax's plumbing is out of the API**: `aio_shell`'s `runtime`,
   `splash`, `place`, `prune`, `pidlock`, `macmove`, `oneclick`, `fuses`,
   `swap`, `switches`, `inspect` and `delta`, `html_open`, every
@@ -248,6 +312,9 @@ version may break things.
   `machine_errors`, `machine_ends`, `async_mode` and `redacts`. Code that
   named one still compiles; it may break in any release: ask for what it
   needs in an issue.
+- **Breaking: `aio::auth::budget` is gone from the API** (the login
+  doors' per-address budgets: the server's own), and `aio::cost` (what
+  `ax cost` reads) is `#[doc(hidden)]`.
 - **Breaking: every time in `aio.toml` is a span**, one parser
   (`aio::config::span_ms`) for all of them and for `#[every]`, `#[ttl]`
   and `#[long]`, with `ms` as a unit now (`"250ms"`): `[data] coalesce`,
@@ -262,6 +329,11 @@ version may break things.
   `Duration::from_millis(n)` where a number was. A span under a second is
   refused where a second was the least before (`[history] keep`,
   `[data] backup_every`, `[updates] every`…).
+- **Breaking: `[vitals]` times are spans too** (`frozen = "2s"`; a number
+  is ms, as before): `render`, `transport` and `loop`. `[vitals.queue]`
+  stays a count of effects waiting, its own type now: `aio::vitals::Tier`'s
+  fields are `Duration`s (`grade` still takes ms), `Vitals::queue` is an
+  `aio::vitals::Counts`.
 - **Breaking: `TestCells` takes `Duration`s**, as `TestUi` does:
   `advance(d)`, `settle_for(d)` and `budget::<C>(method, d)` (were ms):
   `t.advance(Duration::from_secs(60))`. A step back is `rewind(d)`
@@ -313,8 +385,9 @@ version may break things.
   kit's sheet: a page without it no longer warns that `aio-browser` is
   unstyled. Any rule of the app's wins over it, as before.
 - **Breaking: `TestUi` refuses a `data-t` handle two showing elements
-  share**, naming both (`2 elements have data-t="fleet" (<button> "Fleet"
-  in data-t="side", <table> "gpu 1")`), where it read the first: name one
+  share**, naming both and the path that names each (`2 elements have
+  data-t="fleet": <button> "Fleet" at side/fleet, <table> "gpu 1" (no
+  path of handles names it)`), where it read the first: name one
   inside another (`side/fleet`) or give each its own. A hidden one doesn't
   count while one shows; `count`, `present` and `handles` are as before.
 - In the test world, `aio::process::Command` refuses a program that
@@ -374,9 +447,59 @@ version may break things.
 
 ### Fixed
 
+- Two rows of a `for` with one key no longer panic the window dead (in
+  every build, with no place of the app's): the window draws every row,
+  the second keyed by its repeat, and says once, through the log and
+  the problem bus (`ui:duplicate-key`), the component and the `for`'s
+  `file:line:col`. A test (`TestUi`, `TestPage`) fails with that message
+  in every build (before: in a debug build only). A server render draws
+  every row too.
+- A borrow error in an `rsx!` hole (`E0716` for a temporary a view keeps,
+  `E0597` for a local a handler borrows) is said at the hole, not over
+  the whole `rsx!`: the code the macro makes for a hole carries its
+  place. The views guide's Common mistakes shows the three shapes and
+  their fix.
+- A saved copy that couldn't be read for a moment (Windows' sharing
+  violation while another program held it, a refused permission, a disk
+  error) was taken as damaged: moved aside as `copy.unreadable-<ms>` and
+  the copy started over, the calls made offline in it no longer shown or
+  sent. Only damaged content is moved aside now; a file that can't be
+  read is tried again for 315 ms, then the open fails naming it, and the
+  file stays as it was.
+- A scheme an update added to `[app] schemes` was never registered on
+  Linux and Windows (only an install registers, and an update swaps the
+  program in place): its links didn't open the app. An installed app now
+  sets what differs at each start, in the background: its menu entry's
+  `MimeType` and `xdg-mime` handlers (Linux), a handler that is missing or
+  this app's at another path (Windows; another app's stays).
+- `ax agent` said views have no `if let` or `match` nodes, so agents
+  wrote `{x.map(|e| rsx! {..})}` holes instead; both are markup, and the
+  brief shows them. Its other stale lines too: `{xs.map(|x| rsx! {..})}`
+  given as keyed rows (it doesn't compile, and such a hole keys nothing),
+  a prop following state only as a `Signal`, `Part` or `Prop` (plain
+  props follow since this release), `h.done(x)` as an effect's answer
+  (a method call is), `cx.at` and `cx.backoff`'s arguments, a `VList`
+  (`VirtualList`), `use_css!(false, ..)` for the template's
+  `aio::ui::scheme()`, `ax setup` fetching dx, a pipe getting JSON from
+  every verb, the `cli` mode, the `secrets` and `updates` features,
+  `#[cell(id)]`, `Code` in `aio::prelude`, `TestCells::advance` taking a
+  `Duration`, and `TestUi` refusing a handle two elements share.
+- `ax lint` took any argument-less `.peek()` for a signal's guard (aio-rs
+  0.1's Dioxus signals; air's have none), and `self.read()` (the type's
+  own method) too.
+- `ax lint`'s fix for a `for` over a block was a `{items.iter().map(..)}`
+  hole, which doesn't compile; it says to key a row component now.
+  docs/testing/lint.md listed the finding as a warning: it is an error.
 - With `theme = "full"` the look's button reached the kit's quiet ones:
   a `Menu`'s items were centred and shadowed, tabs had a shadow, rounded
   corners and a press nudge. They start from `.aio-plain` now.
+- `ax logs --text` (and `--quiet`) were refused (`no flag --text`): the
+  verb read its flags again past the gate every verb shares; `ax help
+  <verb> --json` read `--json` as a verb. A test runs each verb's parser
+  with `--json` and `--text`; `ax help dev` says that its flags after
+  `<app>`, `--json` too, go to the app.
+- `ax expect … --wait -1` (or `inf`, `1e30`) panicked; it is bad usage
+  now (exit 2).
 - A `TestUi` step waits for the files its event reads: a form's submit
   read its files as the event went out, and a click that submitted it
   could end before they were read (the submit unheard on a loaded

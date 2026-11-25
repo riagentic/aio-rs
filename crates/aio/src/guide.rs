@@ -10,6 +10,8 @@ macro_rules! pages {
 
 pages! {
     Readme = "../README.md",
+    #[cfg(feature = "kit")]
+    Agents = "agents.md",
     Quickstart = "basics/quickstart.md",
     #[cfg(feature = "kit")]
     Tutorial = "basics/tutorial.md",

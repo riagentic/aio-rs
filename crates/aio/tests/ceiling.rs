@@ -154,3 +154,53 @@ async fn blocking_work_runs_off_the_runtime_and_stops_when_cancelled() {
     }
     panic!("the abandoned work was never told to stop");
 }
+
+#[cell]
+pub struct Import {
+    pub done: bool,
+}
+
+static LET_GO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[methods]
+impl Import {
+    pub fn begin(&mut self, cx: &Cx) {
+        cx.run(Effect::new("load", |h: Handle<Import>| async move {
+            while !LET_GO.load(SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            _ = h.loaded();
+        }));
+    }
+
+    pub fn loaded(&mut self) {
+        self.done = true;
+    }
+}
+
+/// `ax wait --idle`'s question: an effect running, and a blocking job, are
+/// named until they end.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_the_app_still_does_is_named_until_it_ends() {
+    let busy = |w: &str| aio::effect::busy().iter().any(|b| b == w);
+    let h = Handle::<Import>::memory();
+    h.begin().unwrap();
+    assert!(busy("effect import.load"), "{:?}", aio::effect::busy());
+    let job = tokio::spawn(aio::effect::blocking("scan", |_| {
+        while !LET_GO.load(SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }));
+    while !busy("blocking scan") {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    LET_GO.store(true, SeqCst);
+    job.await.unwrap().unwrap();
+    for _ in 0..500 {
+        if h.state().done && !busy("effect import.load") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(h.state().done && !busy("effect import.load") && !busy("blocking scan"), "{:?}", aio::effect::busy());
+}

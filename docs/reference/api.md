@@ -174,7 +174,7 @@ In `aio`: `aio::boot` (the boot report), `aio::paths` (where files are),
 | `aio::testing::{expect, seeded, totp_code, fails, exclusive}` | helpers; `exclusive()`: the test world to one test at a time |
 | `aio::log`, `trace!` … `error!` | the app's log (`logs/app.log`, `error.log`, `warning.log`) |
 | `aio::report`, `aio::feedback` | problem reports; a "Report a problem" UI |
-| `aio::health`, `aio::vitals`, `aio::perf`, `aio::budgets`, `aio::cost` | health, vitals, perf budgets, size budgets, what moves on links |
+| `aio::health`, `aio::vitals`, `aio::perf`, `aio::budgets` | health, vitals, perf budgets, size budgets (what moves on links: `ax cost`) |
 | `aio::video` | frames into a video (`ax test --video`, `ax shot --video`) |
 | `aio::cli` | an app's own command line: `args`, `Spec`, prompts, tables, progress ([CLI apps](../clients/cli-apps.md)) |
 | `aio::fmt` | sizes, durations, counts as people read them |

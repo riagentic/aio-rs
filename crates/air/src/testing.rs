@@ -103,9 +103,13 @@ impl TestPage {
     }
 
     /// Run the ready tasks and apply the edits waiting, until none is left.
+    /// A view's error no boundary caught, or a fault drawing went past (a
+    /// list's repeated key, [`Root::faults`]), fails.
     pub fn flush(&mut self) {
         let uncaught = self.settle();
         assert!(uncaught.is_empty(), "a view failed and no ErrorBoundary is above it: {}", uncaught.join("; "));
+        let faults = self.root.faults();
+        assert!(faults.is_empty(), "{}", faults.join("; "));
     }
 
     /// [`Self::flush`]; the errors no boundary caught.

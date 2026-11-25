@@ -29,8 +29,9 @@ editing (this, then aio-rs's docs/README.md) · check → run → test · clean 
 2. NEVER take over the human's screen. Windows an agent opens go on a nested
    display (Xvfb/Xephyr), never the human's; ax build --smoke runs headless.
 3. NEVER script around ax. Assert: ax expect. Watch: ax state --watch (one
-   line per change, pushed). Every verb takes --json (a pipe gets it; --text
-   not) and exits 0 ok, 1 failed, 2 bad usage. New cell: ax add <app> cell <n>.
+   line per change, pushed). Every verb takes --json (a pipe gets it, but
+   for the document verbs: dev, lint, agent, logs, help…; --text not) and
+   exits 0 ok, 1 failed, 2 bad usage. New cell: ax add <app> cell <n>.
 4. LEARN BEFORE EDITING. aio-rs is Rust (views: aio::ui), not aio's TypeScript: guessed code
    compiles to the wrong thing or not at all. Read this, then the guide (docs/README.md
    in aio-rs: every part with examples that compile; a port from aio:
@@ -89,7 +90,12 @@ reproduce as a red test → fix → green; never widen a type or swallow an erro
 3. ax events <app> [cell] (what ran, with which args, by whom).
 4. ax state <app> <cell> [path] / ax expect (what the running app holds).
 5. ax call <app> <cell> <method> [arg…] (act as a user would, --as <user>).
-6. Reproduce as a red test, fix, green.
+6. The window, as a person (ax start's or ax dev's build: no flag): ax surface
+   <app> (what shows, named as TestUi names it) · ax trigger <app> <path> click
+   · ax expect-ui <app> <path> eq|contains <text> [--wait s] (TestUi's
+   until_text, until_contains; present, absent) · ax wait <app> --idle
+   (nothing in flight, the window still) · ax shot <app>. No sleep.
+7. Reproduce as a red test, fix, green.
 NO: widen a type, delete an assertion, swallow an error, sleep-and-retry, pkill.",
     },
     Section {
@@ -113,13 +119,13 @@ ax lint before every commit",
         min: "a lib crate (cells, views) + a bin crate (main) + aio.toml ([app] id, never
 changed) · cargo check → ax dev <app> → tests",
         body: "- First, once per machine: ax setup (checks Rust and the C toolchain, fetches
-  the runtime and dx; each missing piece is said with the command that gets
+  the shared runtime and wasm-bindgen; each missing piece is said with the command that gets
   it; exit 1 until all are there; --check only looks).
 - An app is a workspace member: a lib crate with its cells and views (tests use
   it), and a small bin crate whose main boots it. aio.toml at the app's root
   is its one config ([app] id: its data's home, never changed once it ran;
   ax create sets it to the name, or --id, and refuses an installed app's;
-  name, mode = standalone | client-server | client | server, version = \"M.m\":
+  name, mode = standalone | client-server | client | server | cli, version = \"M.m\":
   builds are M.m.<git commit count>, -dirty.<hash> while uncommitted).
 - A big app keeps its views by area in page crates (ax add <app> page <n>):
   ax dev recompiles the edited crate alone (~0.5 s; one crate of 70 000
@@ -133,7 +139,8 @@ changed) · cargo check → ax dev <app> → tests",
   (title, lang and dir from [app]).
 - aio-rs's features: none = the core (cells, log, replay, the local door for
   ax call/state); kit (the UI kit, client!, router!), net (sync, its server,
-  TLS, pairing, sign-in), or one part: outbound, server, tls, oidc, br, imbl.
+  TLS, pairing, sign-in), or one part: outbound, server, tls, oidc, br, imbl,
+  secrets (the OS's secret store), updates.
   Keep the template's set: each other set is one more build of aio.
 - The tests get aio::testing (TestCells, TestUi with kit) from the
   [dev-dependencies] line with features = [\"testing\"]: the app's own builds
@@ -146,10 +153,11 @@ changed) · cargo check → ax dev <app> → tests",
         slug: "cell",
         title: "CELL: flags, methods, effects, schedules",
         deep: false,
-        min: "#[cell(persist, coalesce, shared, version, migrate, restore, save, visible, machine)] ·
+        min: "#[cell(id, persist, coalesce, shared, version, migrate, restore, save, visible, machine)] ·
 fields #[transient] #[server] · methods #[client(role, allow, predict)] #[derived]
 #[invariant] #[every]/#[cron] #[ttl] #[long] #[redact] #[coalesce] · cx.run(Effect) cx.after/every/at",
-        body: "- #[cell(...)]: persist (saved, an event per call), coalesce (every plain
+        body: "- #[cell(...)]: id = \"…\" (the data's identity: never change it; else the
+  struct's name in snake case), persist (saved, an event per call), coalesce (every plain
   call shown at once and written within 100 ms, aio's debounced writes: the
   default for an app's cell), shared (synced to clients),
   version + migrate = f (old data up), restore = f (repair on boot), save = f
@@ -175,10 +183,11 @@ fields #[transient] #[server] · methods #[client(role, allow, predict)] #[deriv
   100 ms after it began (aio's persistDebounceMs), at a call that can't wait
   or at close. Big state: fields in Arc or aio::imbl, so a call's copy is cheap.
 - cx: cx.now(), cx.id(), cx.rand() (recorded, so replay is exact), cx.by();
-  cx.run(Effect::new(\"key\", |h| async move { .. h.done(x) })) does the I/O
-  after the commit and hands the result back as a call (Mode Queue | Newest |
-  First, .timeout(d)); cx.after/every/at/backoff(key, ms, method, args) and
-  cx.cancel(key) schedule calls, saved, surviving a restart.",
+  cx.run(Effect::new(\"key\", |h| async move { let r = io.await; _ = h.fetched(r); }))
+  does the I/O after the commit and hands the result back as a call (Mode
+  Queue | Newest | First, .timeout(d)); cx.after/every(key, ms, method, args),
+  cx.at(key, ms since the epoch, ..), cx.backoff(key, attempt, Backoff, ..)
+  and cx.cancel(key) schedule calls, saved, surviving a restart.",
     },
     Section {
         slug: "ui",
@@ -187,39 +196,70 @@ fields #[transient] #[server] · methods #[client(role, allow, predict)] #[deriv
         min: "use aio::ui::prelude::*; (the whole view API) · aio::client!(Cell, cell) → part(|c| &c.field)
 a handle (.get(), \"{n}\") whose holes run again only when that field changes · a body runs
 once: state shows through holes ({x.get()}, \"{n}\") · act!(method(args)) calls · use_live()
-once at the root · data-t on what tests drive",
-        body: "- use aio::ui::prelude::*; is the whole view API: rsx!, #[component], View,
+once at the root · another module: use crate::prelude::*; · data-t on what tests drive",
+        body: "(Every example in backticks here compiles, or fails to as said: docs/agents.md,
+\"The brief's view examples\", a doctest.)
+- `use aio::ui::prelude::*;` is the whole view API: rsx!, #[component], View,
   signal(|| v) (a Copy Signal: .get(), .set(v) tells only on a change,
-  .update(|v| ..), .read(), .write(), \"{s}\"), memo, effect, watch(deps, f),
-  once(|| ..), on_cleanup, provide/context, task/spawn, resource, Global,
-  ErrorBoundary, Suspense, eval (page scripts talk to `aio`). Call signal,
-  memo, effect, once.. at a view's top level. Name no renderer crate (ax lint
+  .update(|v| ..), .read(), .write(), \"{s}\"), memo, effect (its handle:
+  aio::ui::Effect), watch(deps, f), once(|| ..), on_cleanup, provide/context,
+  task/spawn, spawn_forever, resource, Global, ErrorBoundary, Suspense, eval
+  (page scripts talk to aio), KeyCode (a key's place; Code is a refusal's).
+  Call signal, memo, effect, once.. at a view's top level (ax lint refuses
+  one in a branch, a loop or a closure). Name no renderer crate (ax lint
   refuses aio-rs 0.1's): air is the renderer behind aio::ui. A body runs once;
   a text, attribute or {child} that reads state is a hole that runs again when
-  it changes (a value read in the body is read once). Rows in a for need
-  key: on their first node; no if let / match nodes (a bool, or {match ..}).
-  A component's prop follows its caller's state only as a Signal, Part or
-  Prop<T>.
+  it changes (a value read in the body is read once). A component's plain
+  props follow its caller's state too: when what they read changes and they
+  differ, its body runs again with its state kept.
+- Markup: `if on.get() { p { \"on\" } } else { p { \"off\" } }`, a value that
+  may be absent `if let Some(n) = note.get() { p { \"{n}\" } }`, a match
+  `match page.get() { Page::Home => p { \"home\" }, Page::Item(id) => p { \"{id}\" } }`
+  (a branch is made again only when what it binds changes), a list
+  `for t in items.get() { li { key: \"{t.id}\", \"{t.title}\" } }` (rows Clone +
+  PartialEq), its rows by a component `for t in items.get() { Row { key: \"{t.id}\", item: t } }`.
+- NO, a compile error: a row with no key `for n in 0..3 { li { \"{n}\" } }`;
+  a while or a loop `while n > 0 { p { \"{n}\" } }`; a row that is a block
+  (its key keys nothing) `for t in items.get() { { let id = t.id; rsx! { li { key: \"{id}\" } } } }`:
+  work a row's values out in its component; a field that isn't Copy moved
+  out of the state `let title = todo().title;` (E0507).
 - aio::client!(Todo, todo) makes SOURCE/HANDLE, part(|t| &t.items) (a handle:
   .get()/.with(|v| ..); a hole reading it runs again only when that top-level
   field changes: aio's signal per cell; pick the field, then index it), todo()
-  (the whole state: a hole reading it runs on every commit, so handlers only), use_status(), use_pending(method), and the
-  Ui door: act!(add(title)) calls a method from a handler (a refusal is
-  logged and gives None); a view's call shows at once, commits from
-  effects and schedules at most once per 150 ms. use_live() once in the root.
+  (the whole state, an Arc: a hole reading it runs on every commit, so
+  handlers only; a field that isn't Copy is cloned out: `todo().title.clone()`),
+  use_status(), use_pending(Some(\"add\")), and the Ui door: `act!(add(title))`
+  calls a method from a handler (a refusal is logged and gives None); a view's
+  call shows at once, commits from effects and schedules at most once per
+  150 ms. use_live() once in the root. All of these are made where client!
+  is called; another module (a page) takes them and the view API with
+  `use crate::prelude::*;` (client! makes that prelude; without it: cannot
+  find function part, cannot find type Ui).
+- App-lifetime state that isn't saved (a run's report, a scan's result): a
+  `static REPORT: Global<Option<u64>> = Global::new(|| None);` any view shows,
+  filled by work that outlives the view that started it:
+  `spawn_forever(async move { REPORT.set(aio::effect::off_thread(\"sum\", sum, 1000).await.ok()); })`
+  (off_thread: CPU work on a worker thread, a Web Worker in a browser). A test
+  reads it: `ui.read(&REPORT)`. State a restart must keep: a cell; one view's
+  only: a signal; a value a view needs while it shows: a resource.
 - aio's caches: #[derived(reads = [..])] (memoLast), aio::Cache (keyed caches
   on a source: Ver::of(&state) or part(..).ver()), rows as props (Prop<T>:
   a row's holes run only when its own props change), kit::VirtualList for long lists.
 - Views are rsx! over real HTML and CSS; aio::kit has the
-  components (Button, Field, Modal, VList…). Styles: style { {aio::use_css!(
-  false, &aio::kit::theme_css(hue); \"assets/style.css\")} }: false is the
-  light theme (true dark), the kit's theme comes first (the kit's classes,
-  aio::ui::btn included, are unstyled without it), then the app's files; a
-  saved edit shows at once under ax dev, no compile. Never keep CSS or
+  components (Button, Field, Modal, Tabs, VirtualList…). Styles: style {
+  {aio::use_css!(aio::ui::scheme(), &aio::kit::theme_css(aio::hue!());
+  \"assets/style.css\")} }: scheme() is light or dark as [ui] scheme says (the
+  OS's by default; false/true fix one), the kit's theme comes first (the kit's
+  classes, aio::ui::btn included, are unstyled without it), then the app's
+  files; a saved edit shows at once under ax dev, no compile. The theme's
+  page shell is opt-in: main { class: \"container\", .. }. Never keep CSS or
   anything an edit should change in once(..): its value is made once, so a
   hot-patched edit never shows.
 - data-t=\"name\" is an element's handle for tests and agents; without one, an
-  element is named from its label and role (SaveButton, EmailInput).
+  element is named from its label and role (SaveButton, EmailInput). A kit
+  Tab's id is its handle too. A handle two showing elements share is
+  refused (naming both): give each its own, or name it inside another
+  (outer/t); ax lint warns of both.
 - TestUi::new(App): click(t), type_text(t, s), paste(t, s) (all in one
   paste), until_text(t, s) / until_contains(t, part) (t may appear later),
   expect_cell (headless, real layout); failures() takes the refusals a
@@ -253,11 +293,10 @@ once at the root · data-t on what tests drive",
   Ctrl or ⌘ on macOS; a character or a DOM key name: Enter, esc, space,
   ArrowUp/up, F1…): \"mod+k\", \"ctrl+shift+s\". TestUi press(t, \"ctrl+n\")
   and ax trigger <app> window press ctrl+n take the same words.
-- key: counts on a for body's first node only, never inside a block (a
-  for over { let …; rsx! { … } } keys nothing: every row is rebuilt when
-  the list shifts; yield it instead: {xs.iter().map(|x| rsx! { Row { key:
-  \"{x.id}\", … } })}); ax lint warns otherwise. To remount one element on
-  a new key, a one-item for.
+- key: counts on a for row's first node only (a key on a later node
+  remakes that node when it changes; ax lint warns). A {xs.map(..)} hole
+  keys nothing: every row is made again when it changes; a for keeps them.
+  To remount one element on a new key, a one-item for.
 - The app's dirs from anywhere: aio::paths::app_dirs() (the booted ones;
   in a test, the test world's own).",
     },
@@ -304,8 +343,8 @@ files (read <target>/doc/aio/; never --open) · aio::prelude for the app's daily
         body: "- cargo doc -p aio-rs --no-deps documents every export from the code itself, so
   it can't drift: it ends with Generated <target>/doc/aio/index.html, files
   to read (never --open: that is a browser on the person's screen).
-  use aio::prelude::* brings cell, methods, data, Cx, Effect, Handle, By,
-  Caller, Rejected, Result, ensure!/reject!.
+  use aio::prelude::* brings cell, methods, data, Cx, Effect, Mode, Handle,
+  By, Caller, Rejected, Code, Result, ensure!/reject!.
 - A plugin is a crate whose fn returns an aio::plugin::Plugin (its cells,
   routes, server fns, hooks); aio::plugin::compose(cells, http, vec![..])
   adds them under the app's: the app wins, a collision refuses the boot.
@@ -317,8 +356,9 @@ files (read <target>/doc/aio/; never --open) · aio::prelude for the app's daily
   Http::server_fn(F, Access, |req, args| ..)) all see it.
 - Refusals are aio::Rejected { why, code } (reject!/ensure!/Rejected::new
   make one): the why names the cause and the fix; code is aio::Code
-  (AccessDenied, ActionRefused, ConnectionLost) for aio-rs's own, None for the
-  app's. Match on the code, never on the words.",
+  (AccessDenied, ActionRefused, ConnectionLost, EffectTimeout…;
+  #[non_exhaustive]) for aio-rs's own, None for the app's. Match on the
+  code, never on the words.",
     },
     Section {
         slug: "cli",
@@ -351,8 +391,9 @@ at run time · a refusal nobody took · sleeping in a test instead of TestCells:
   include_str!/include_bytes!.
 - TestCells/TestUi fail at the end on refusals nobody took: take the
   expected ones with failures().
-- Waiting in real time in a cell test: TestCells::advance(d) moves the
-  schedule and the effects' clock; settle() runs effects to their end.
+- Waiting in real time in a cell test: TestCells::advance(Duration) moves
+  the schedule and the effects' clock (rewind(d) steps it back); settle()
+  runs effects to their end.
 - Calling a method from a view without act!/Ui: the view isn't told.
 - A signal read in an if let / while let / match scrutinee
   (X.read_untracked()…, X.read()) stays borrowed in its block: a write to
@@ -489,6 +530,42 @@ mod tests {
             list.lines().next().unwrap().starts_with("  rules ") && list.contains("  cli       deep  CLI"),
             "{list}"
         );
+    }
+
+    /// The UI section's examples (its `code` spans) are the guide's
+    /// compiled ones: each in docs/agents.md's Rust blocks, a doctest of
+    /// aio, so it builds; a NO bullet's in its compile_fail blocks, so it
+    /// doesn't. Whitespace aside: the brief wraps its lines.
+    #[test]
+    fn every_view_example_the_brief_shows_compiles_and_each_refused_one_fails() {
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        let (mut builds, mut fails, mut open) = (String::new(), String::new(), None);
+        for line in include_str!("../../../docs/agents.md").lines() {
+            if let Some(info) = line.strip_prefix("```") {
+                open = if open.is_some() { None } else { Some(info) };
+                continue;
+            }
+            match open {
+                Some(i) if i.contains("compile_fail") => fails.push_str(&squash(line)),
+                Some(i) if i.starts_with("rust") => builds.push_str(&squash(line)),
+                _ => {}
+            }
+        }
+        let ui = SECTIONS.iter().find(|s| s.slug == "ui").unwrap().body;
+        let (mut shown, mut refused) = (0, 0);
+        for bullet in ui.split("\n- ") {
+            let spans: Vec<&str> = bullet.split('`').skip(1).step_by(2).collect();
+            assert_eq!(bullet.matches('`').count() % 2, 0, "an unclosed ` in: {bullet}");
+            let no = bullet.starts_with("NO");
+            for code in spans {
+                let (blocks, what) = if no { (&fails, "a compile_fail block") } else { (&builds, "a compiled block") };
+                assert!(blocks.contains(&squash(code)), "the brief shows `{code}`, in no {what} of docs/agents.md");
+                *(if no { &mut refused } else { &mut shown }) += 1;
+            }
+        }
+        assert!(shown >= 10 && refused >= 4, "{shown} examples, {refused} refused");
+        // The rules 0.4.2's brief had wrong: markup it said didn't exist.
+        assert!(!ui.contains("no if let") && ui.contains("`if let Some(n)") && ui.contains("`match page.get()"));
     }
 
     #[test]

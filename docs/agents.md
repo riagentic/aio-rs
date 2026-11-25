@@ -62,3 +62,148 @@ rm -rf /tmp/try-notes
 The same `AIORT_DATA` on every verb reaches the same copy; its data, logs
 and cache stay in that folder (only its sockets live under
 `$XDG_RUNTIME_DIR/aio-rt`, else the temp dir).
+
+## The brief's view examples
+
+Every example `ax agent ui` shows in backticks is in a block below: the
+first compiles and runs (a doctest of aio-rs), each after it fails to
+compile, as the brief's "NO" says. A test of `ax` checks that each of the
+brief's examples is here, so the brief can't show code that doesn't build.
+
+```rust
+use aio::ui::prelude::*;
+
+#[aio::data]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Item {
+    pub id: u32,
+    pub title: String,
+}
+
+#[aio::cell(id = "todo")]
+pub struct Todo {
+    pub items: Vec<Item>,
+    pub title: String,
+}
+
+#[aio::methods]
+impl Todo {
+    pub fn add(&mut self, title: String) {
+        self.items.push(Item { id: self.items.len() as u32, title });
+    }
+}
+
+aio::client!(Todo, todo);
+
+#[derive(Clone, PartialEq)]
+pub enum Page {
+    Home,
+    Item(u32),
+}
+
+/// The last run's sum: shown by every view, never saved.
+static REPORT: Global<Option<u64>> = Global::new(|| None);
+
+fn sum(n: u64) -> u64 {
+    (1..=n).sum()
+}
+
+mod page {
+    use super::{Item, Page, REPORT, sum};
+    use crate::prelude::*;
+
+    #[component]
+    pub fn App() -> View {
+        use_live();
+        let on = signal(|| true);
+        let note = signal(|| Some("a note".to_string()));
+        let page = signal(|| Page::Item(7));
+        let items = part(|t| &t.items);
+        rsx! {
+            button { "data-t": "add",
+                onclick: move |_| {
+                    let title = todo().title.clone() + "milk";
+                    _ = act!(add(title));
+                },
+                "Add"
+            }
+            button { "data-t": "run",
+                onclick: move |_| _ = spawn_forever(async move { REPORT.set(aio::effect::off_thread("sum", sum, 1000).await.ok()); }),
+                "Run"
+            }
+            div { "data-t": "on", if on.get() { p { "on" } } else { p { "off" } } }
+            div { "data-t": "note", if let Some(n) = note.get() { p { "{n}" } } }
+            div { "data-t": "page", match page.get() { Page::Home => p { "home" }, Page::Item(id) => p { "{id}" } } }
+            ul { "data-t": "rows", for t in items.get() { li { key: "{t.id}", "{t.title}" } } }
+            ul { "data-t": "rows-by-component", for t in items.get() { Row { key: "{t.id}", item: t } } }
+            p { "data-t": "report", "{REPORT.get().unwrap_or_default()}" }
+        }
+    }
+
+    #[component]
+    fn Row(item: Item) -> View {
+        rsx! { li { "{item.id}: {item.title}" } }
+    }
+}
+
+# fn main() {
+let mut ui = aio::testing::TestUi::new(page::App);
+assert_eq!((ui.text("on"), ui.text("note"), ui.text("page")), ("on".into(), "a note".into(), "7".into()));
+ui.click("add");
+assert_eq!((ui.text("rows"), ui.text("rows-by-component")), ("milk".into(), "0: milk".into()));
+ui.click("run");
+ui.until_text("report", "500500");
+assert_eq!(ui.read(&REPORT), Some(500500));
+# }
+```
+
+A `for` row with no `key:`:
+
+```rust,compile_fail
+use aio::ui::prelude::*;
+fn rows() -> View {
+    rsx! { ul { for n in 0..3 { li { "{n}" } } } }
+}
+```
+
+A `while` (or a `loop`):
+
+```rust,compile_fail
+use aio::ui::prelude::*;
+fn count(mut n: u32) -> View {
+    rsx! { while n > 0 { p { "{n}" } } }
+}
+```
+
+A row that is a block: the key inside it keys nothing.
+
+```rust,compile_fail
+use aio::ui::prelude::*;
+#[derive(Clone, PartialEq)]
+struct Item {
+    id: u32,
+}
+fn rows(items: Signal<Vec<Item>>) -> View {
+    rsx! { ul { for t in items.get() { { let id = t.id; rsx! { li { key: "{id}" } } } } } }
+}
+```
+
+A field that isn't `Copy`, moved out of the state (an `Arc`): clone it.
+
+```rust,compile_fail,E0507
+#[aio::cell(id = "todo")]
+pub struct Todo {
+    pub title: String,
+}
+
+#[aio::methods]
+impl Todo {}
+
+aio::client!(Todo, todo);
+
+fn title() -> String {
+    let title = todo().title;
+    title
+}
+# fn main() {}
+```

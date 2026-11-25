@@ -142,26 +142,10 @@ pub fn since(raw: &str, now: i64) -> Option<i64> {
     jiff::tz::TimeZone::system().to_timestamp(t).ok().map(|t| t.as_millisecond())
 }
 
-/// The flags `ax logs` takes, parsed; unknown ones are refused (else a
-/// mistyped `--levle` would read as "nothing happened").
+/// The flags `ax logs` takes, parsed: as the verb table's gate passed them
+/// (an unknown one, a mistyped `--levle`, refused there, as for every verb).
 pub fn filter(args: &[&str], now: i64) -> Result<Filter, String> {
     let value = |f: &str| args.iter().position(|a| *a == f).map(|i| args.get(i + 1).copied());
-    let known = [
-        "--last",
-        "--level",
-        "--tag",
-        "--since",
-        "--client",
-        "--follow",
-        "-f",
-        "--json",
-        "--home",
-        "--profile",
-        "--instance",
-    ];
-    if let Some(bad) = args.iter().find(|a| a.starts_with('-') && !known.contains(a)) {
-        return Err(format!("ax logs: no flag {bad} (flags: {})", known.join(" ")));
-    }
     let mut f = Filter { client: args.contains(&"--client"), ..Filter::default() };
     if let Some(v) = value("--level") {
         let v = v.ok_or("--level needs a level")?;
@@ -435,7 +419,7 @@ mod tests {
             (f.level, f.tag.as_deref(), f.since, f.client),
             (Some(Level::Warn), Some("net"), Some(999_100_000), true)
         );
-        assert!(filter(&["--levle", "warn"], 0).unwrap_err().contains("no flag --levle"));
+        assert!(filter(&["--json", "--text", "--quiet"], 0).is_ok(), "every verb's own flags (gated before)");
         assert!(filter(&["--level", "loud"], 0).unwrap_err().contains("not a level"));
         assert!(filter(&["--since", "15"], 0).unwrap_err().contains("add a unit: 15m"));
         assert!(filter(&["--since"], 0).is_err());

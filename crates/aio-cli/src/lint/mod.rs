@@ -172,6 +172,7 @@ pub fn lint(dir: &Path) -> Report {
     // The first test line naming aio::testing, and whether a manifest gives the tests its feature.
     let (mut kit_used, mut manifests): (Option<(String, usize)>, Vec<String>) = (None, Vec::new());
     let mut styles = Vec::new();
+    let mut ui = HashMap::new();
     for path in paths {
         let rel = path.strip_prefix(dir).unwrap_or(&path).to_string_lossy().replace('\\', "/");
         let name = rel.rsplit('/').next().unwrap_or_default().to_string();
@@ -202,7 +203,8 @@ pub fn lint(dir: &Path) -> Report {
             if kit_used.is_none() && (is_test_path(&rel) || text.contains("#[cfg(test)]")) {
                 kit_used = text.lines().position(|l| l.contains("aio::testing")).map(|i| (rel.clone(), i + 1));
             }
-            rust::file(&rel, &text, is_test_path(&rel), &mut facts);
+            let views = ui_file(&path, &rel, &mut ui);
+            rust::file(&rel, &text, is_test_path(&rel), views, &mut facts);
         } else if !is_test_path(&rel) {
             secrets::text(&rel, &text, &mut facts.issues);
             if ext == "css" {
@@ -310,7 +312,7 @@ pub fn changed(files: &[PathBuf], root: &Path) -> Vec<String> {
             continue;
         }
         let mut facts = rust::Facts::default();
-        rust::file(&rel, &text, false, &mut facts);
+        rust::file(&rel, &text, false, ui_file(path, &rel, &mut HashMap::new()), &mut facts);
         let lines: Vec<&str> = text.lines().collect();
         for i in facts.issues.iter().filter(|i| i.severity != Severity::Hint && i.area != "scan") {
             if i.line.is_some_and(|l| suppressed(&lines, l - 1, i.area)) {
@@ -341,21 +343,78 @@ pub fn gives_testing<S: AsRef<str>>(manifests: &[S]) -> bool {
         .filter(|(k, v)| aio(k, v))
         .collect();
     workspace.iter().any(|(_, v)| testing(v))
-        || tables.iter().flat_map(deps).any(|(k, v)| {
+        || tables.iter().flat_map(|t| deps(t, &["dependencies", "dev-dependencies"])).any(|(k, v)| {
             let inherits = v.get("workspace").and_then(|w| w.as_bool()) == Some(true);
             testing(v) && if inherits { workspace.iter().any(|(w, _)| *w == k) } else { aio(k, v) }
         })
 }
 
-/// A manifest's dependencies and dev-dependencies: its own, and each
-/// `[target.'cfg(…)'.…]`'s. Pure.
-fn deps(t: &toml::Table) -> impl Iterator<Item = (&String, &toml::Value)> {
+/// A manifest's dependencies of these `sections` (`dependencies`,
+/// `dev-dependencies`): its own, and each `[target.'cfg(…)'.…]`'s. Pure.
+fn deps<'a>(t: &'a toml::Table, sections: &'a [&str]) -> impl Iterator<Item = (&'a String, &'a toml::Value)> {
     let targets = t.get("target").and_then(|t| t.as_table()).into_iter().flat_map(|t| t.values());
     std::iter::once(t)
         .chain(targets.filter_map(|t| t.as_table()))
-        .flat_map(|t| ["dependencies", "dev-dependencies"].map(|s| t.get(s).and_then(|d| d.as_table())))
+        .flat_map(|t| sections.iter().map(|s| t.get(*s).and_then(|d| d.as_table())))
         .flatten()
         .flatten()
+}
+
+/// The packages whose crates bring views (`aio::ui`, air's signals).
+const VIEW_PACKAGES: [&str; 2] = ["aio-rs", "aio-rs-air"];
+
+/// May the `.rs` file at `path` (`rel` in the project) hold views, so the
+/// view checks (hooks, signal guards, `rsx!` markup) run on it? Yes when its
+/// crate (the nearest Cargo.toml above it) does ([`ui_crate`]), or no
+/// manifest is found. A file-level gate would miss real views: a page module
+/// may name no aio path at all (`use crate::prelude::*;`).
+fn ui_file(path: &Path, rel: &str, seen: &mut HashMap<(PathBuf, bool), bool>) -> bool {
+    // An example builds with the crate's dev-dependencies too.
+    let example = rel.split('/').any(|p| p == "examples");
+    match path.ancestors().skip(1).find(|d| d.join("Cargo.toml").is_file()) {
+        Some(dir) => ui_crate(dir, example, seen),
+        None => true,
+    }
+}
+
+/// Does the crate at `dir` depend on aio-rs or air: by its own dependency
+/// (renamed or not), through `[workspace.dependencies]`, or through a path
+/// dependency that does (a crate of the app re-exporting the views)?
+/// `dev`: its dev-dependencies count too. A manifest that can't be read, or
+/// names no package: yes, so no view goes unchecked.
+fn ui_crate(dir: &Path, dev: bool, seen: &mut HashMap<(PathBuf, bool), bool>) -> bool {
+    let key = (dir.to_path_buf(), dev);
+    if let Some(ui) = seen.get(&key) {
+        return *ui;
+    }
+    // A cycle of path dependencies adds nothing.
+    seen.insert(key.clone(), false);
+    let read = |d: &Path| std::fs::read_to_string(d.join("Cargo.toml")).ok()?.parse::<toml::Table>().ok();
+    let ui = match read(dir) {
+        Some(t) if t.contains_key("package") => {
+            let ws = dir.ancestors().find_map(|d| {
+                let w = read(d)?.remove("workspace")?;
+                Some((d.to_path_buf(), w.get("dependencies").and_then(|d| d.as_table()).cloned().unwrap_or_default()))
+            });
+            let sections: &[&str] = if dev { &["dependencies", "dev-dependencies"] } else { &["dependencies"] };
+            deps(&t, sections).any(|(name, v)| {
+                let (base, spec) = match v.get("workspace").and_then(|w| w.as_bool()) {
+                    Some(true) => match &ws {
+                        Some((root, w)) => (root.as_path(), w.get(name)),
+                        None => return false,
+                    },
+                    _ => (dir, Some(v)),
+                };
+                let Some(spec) = spec else { return false };
+                let package = spec.get("package").and_then(|p| p.as_str()).unwrap_or(name);
+                VIEW_PACKAGES.contains(&package)
+                    || spec.get("path").and_then(|p| p.as_str()).is_some_and(|p| ui_crate(&base.join(p), false, seen))
+            })
+        }
+        _ => true,
+    };
+    seen.insert(key, ui);
+    ui
 }
 
 /// The checks that need every file: duplicate cell ids, untested cells.
@@ -432,7 +491,9 @@ pub fn clippy_issues(stdout: &str, root: &Path, dir: &Path) -> Vec<Issue> {
             message: m["message"].as_str().unwrap_or_default().to_string(),
             file: Some(rel.to_string_lossy().replace('\\', "/")),
             line: span["line_start"].as_u64().map(|l| l as usize),
-            fix: (!code.is_empty()).then(|| format!("see {code}")),
+            fix: crate::dev::hint(m["message"].as_str().unwrap_or_default())
+                .map(String::from)
+                .or_else(|| (!code.is_empty()).then(|| format!("see {code}"))),
             fixable: machine.then_some("--safe-fix"),
         };
         if !out.contains(&issue) {
@@ -604,7 +665,12 @@ pub fn test_shape(i: &Issue) -> bool {
     i.area == "migrate" && i.message.contains("TestUi")
 }
 
-pub fn main(args: &[String]) -> ExitCode {
+/// `--from`'s value, the switches and the dir of an `ax lint` line.
+type Words<'a> = (Option<&'a str>, Vec<&'a str>, Vec<&'a str>);
+
+/// `ax lint`'s words read (pure): `--from`'s value, the switches, the dir
+/// (at most one); `Err`: what is wrong with them.
+pub fn read_args(args: &[String]) -> Result<Words<'_>, String> {
     // `--from v` (or `--from=v`) takes a value; the rest are switches or the dir.
     let mut from = None;
     let mut rest: Vec<&str> = vec![];
@@ -624,9 +690,19 @@ pub fn main(args: &[String]) -> ExitCode {
             .iter()
             .map(|f| format!("unknown flag {f}"))
             .chain((pos.len() > 1).then(|| "one dir at most".into()));
-        eprintln!("ax lint: {}\n\n{USAGE}", what.collect::<Vec<_>>().join(", "));
-        return ExitCode::from(2);
+        return Err(what.collect::<Vec<_>>().join(", "));
     }
+    Ok((from, flags, pos))
+}
+
+pub fn main(args: &[String]) -> ExitCode {
+    let (from, flags, pos) = match read_args(args) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("ax lint: {e}\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
     let has = |f: &str| flags.contains(&f);
     if has("--help") || has("-h") {
         println!("{USAGE}");
