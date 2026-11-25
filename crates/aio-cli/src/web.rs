@@ -135,12 +135,25 @@ pub fn held(js: &str) -> Result<String, String> {
 /// the console sent on ([`CONSOLE`]) where something takes it (`logged`:
 /// a dev build, or an app with a server and `[server] page_log`) (pure).
 pub fn page_js(dev: bool, logged: bool) -> String {
-    use aio::page::{DIALOG, DRAG, ENTER, FOCUS, KEYS, OVERLAY, SWAP, WHEEL};
+    use aio::page::{DIALOG, DRAG, ENTER, FOCUS, KEYS, OVERLAY, PREVENT, REVEAL, SWAP, WHEEL};
     // `;` after each piece: an `(() => …)()` piece followed by another
     // would otherwise call its result
     let pieces: &[&str] = match dev {
-        true => &[OVERLAY, KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, SWAP, aio_shell::splash::PAGE_JS, RELOAD],
-        false => &[KEYS, WHEEL, FOCUS, DRAG, DIALOG, ENTER, SWAP, aio_shell::splash::PAGE_JS],
+        true => &[
+            OVERLAY,
+            KEYS,
+            REVEAL,
+            WHEEL,
+            FOCUS,
+            DRAG,
+            DIALOG,
+            PREVENT,
+            ENTER,
+            SWAP,
+            aio_shell::splash::PAGE_JS,
+            RELOAD,
+        ],
+        false => &[KEYS, REVEAL, WHEEL, FOCUS, DRAG, DIALOG, PREVENT, ENTER, SWAP, aio_shell::splash::PAGE_JS],
     };
     // The console to `ax dev`'s log, or in a release to the app server's (`[server] page_log`).
     let console = CONSOLE.replace("ENDPOINT", if dev { "/aio-dev/log" } else { "/__aio/log" });
@@ -1369,6 +1382,12 @@ mod tests {
         assert!(index_html("t", &app("dir = \"auto\""), "", "", names).contains(r#"<html lang="en" dir="auto">"#));
         // The window's page scripts; a dev build's shows its errors on the page, a release's doesn't.
         assert!(page_js(false, true).contains("aria-modal") && page_js(false, true).contains("autofocus"));
+        // Keys an element keeps and the row a list reveals, as in a window.
+        for dev in [false, true] {
+            assert!(
+                page_js(dev, false).contains(aio::page::PREVENT) && page_js(dev, false).contains(aio::page::REVEAL)
+            );
+        }
         assert!(!page_js(false, true).contains("__aioDiag") && page_js(true, true).contains("window.__aioDiag = add"));
         assert!(!page_js(false, true).contains("/aio-dev/build") && page_js(true, true).contains("/aio-dev/build"));
         // no piece runs into the next: `})()\n(() =>` calls the first's result

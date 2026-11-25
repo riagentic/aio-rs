@@ -346,6 +346,10 @@ version may break things.
 
 ### Fixed
 
+- The web build's page kept no key an element names in
+  `data-aio-prevent` (arrows scrolled the page, Tab left a list) and
+  scrolled no `data-aio-reveal` row into view: its page scripts left both
+  out. They are the window's now.
 - With `theme = "full"` the look's button reached the kit's quiet ones:
   a `Menu`'s items were centred and shadowed, tabs had a shadow, rounded
   corners and a press nudge. They start from `.aio-plain` now.
