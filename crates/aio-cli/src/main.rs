@@ -678,8 +678,9 @@ fn asks_dev(args: &[String]) -> bool {
 
 /// The binary `ax start` runs for `t` with `args`: built now in its
 /// workspace, else the installed one (its bin link). Built as the release
-/// build runs (no operator door, no DevTools port, hardened), but with
-/// `--cdp`: asking for DevTools is asking for ax dev's tooling.
+/// build runs (no operator door, no DevTools port, hardened) but for the
+/// window's `ui` door, which ax shot, eval and trigger reach; with `--cdp`:
+/// asking for DevTools is asking for ax dev's tooling.
 fn app_bin(t: &Target, args: &[String]) -> Result<PathBuf, String> {
     match &t.pkg {
         Some(pkg) => dev::build(pkg, Some(&t.plan.logs), asks_dev(args))

@@ -382,7 +382,8 @@ ax dev notes -- --verbose                 # an arg for the app itself
 ```
 
 A failed build's errors are in the app's `logs/build.log`. `ax shot`, `ax eval`,
-`ax surface` and `ax trigger` reach a dev build without `--cdp`.
+`ax surface`, `ax trigger`, `ax expect-ui` and `ax wait` reach a build of `ax dev`
+or `ax start` without `--cdp`.
 [Develop](../build/README.md#develop-ax-dev).
 
 ### `ax test`
@@ -476,8 +477,10 @@ process group: a Ctrl-C there doesn't reach it), and waits until it is
 up: its lock held, its `health.json` written by this start, and, for a
 window app, its window ready. In a workspace it is built first, to run as
 the release build does (none of `ax dev`'s tooling: no operator door, no
-DevTools port, the process hardened; `--cdp` asks for that tooling);
-elsewhere the installed one runs.
+DevTools port, the process hardened; `--cdp` asks for that tooling) but
+for the window's own door, local and the user's only, so `ax shot`, `ax
+eval`, `ax trigger`, `ax expect-ui` and `ax wait` reach it with no flag;
+elsewhere the installed one runs (a release build: no door).
 
 | Flag | Does |
 |---|---|

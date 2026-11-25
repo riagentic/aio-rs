@@ -341,7 +341,7 @@ the links open to its cell",
         "shot <app> [file] [--cdp port] [--window n] [--check base] [--update base] [--threshold n] [--max-diff r] [--selector css] [--full] [--size WxH] [--video file] [--duration s] [--markers]",
         "a PNG of the app's window (default <id>-<time>.png; --json: {file,
 bytes, width, height}), over the DevTools
-protocol (a dev build's own door: no flag; --cdp port, else AIORT_CDP,
+protocol (the own door of ax start's and ax dev's builds: no flag; --cdp port, else AIORT_CDP,
 else the port a launch with --cdp opened, when there is one);
 --check: exit 1 unless it looks like base (a channel may move --threshold,
 default 2; a share --max-diff of pixels may differ, default 0);

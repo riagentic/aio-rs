@@ -1,7 +1,8 @@
 //! The window's DevTools protocol over the app's private `ui` door, so
 //! `ax surface`, `trigger`, `shot` and `eval` reach a window launched with
-//! no flag (aio needed none) and no port is ever opened. A dev build's only,
-//! as aio's control API was: a release build opens none. Each connection
+//! no flag (aio needed none) and no port is ever opened. A build of `ax
+//! start` or `ax dev` only (aio-shell's `door`), as aio's control API was:
+//! a release build opens none. Each connection
 //! speaks CDP's own messages, one JSON per line: `{id, method, params}` in,
 //! `{id, result}` or `{id, error: {message}}` and events `{method, params}`
 //! out. Electron's main process runs them through `webContents.debugger`

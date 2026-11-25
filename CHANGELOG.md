@@ -196,6 +196,13 @@ version may break things.
 
 ### Changed
 
+- `ax start` builds the app with the window's door (aio-shell's `door`;
+  local, in the user's private sockets folder): `ax shot`, `ax eval`, `ax
+  surface`, `ax trigger` work on an app it started, as on `ax dev`'s,
+  with no `--cdp` (said "start it with --cdp" of a dev build that had a
+  window). An app on an aio-rs without the feature builds as before; a
+  release build still opens no door, and the message says what to run:
+  `ax restart <app>` in its workspace.
 - **Breaking: ax's plumbing is out of the API**: `aio_shell`'s `runtime`,
   `splash`, `place`, `prune`, `pidlock`, `macmove`, `oneclick`, `fuses`,
   `swap`, `switches`, `inspect` and `delta`, `html_open`, every

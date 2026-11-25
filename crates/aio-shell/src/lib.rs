@@ -689,9 +689,10 @@ fn show(app: fn() -> View, win: Window, dirs: &aio::paths::AppDirs) -> std::io::
         // since `start`; ax's own window has no `start`).
         instance::open_door(&dirs.id, &dirs.data);
         // `ax surface`, `trigger`, `shot` and `eval` reach the window here:
-        // `ax dev`'s builds only (aio-shell's `dev`: tooling; aio's control
-        // API was dev-only); elsewhere no DevTools protocol (AIORT_CDP is ignored).
-        if cfg!(feature = "dev") {
+        // the builds of `ax start` and `ax dev` only (aio-shell's `door`; aio's
+        // control API was dev-only), in the user's own private sockets dir; a
+        // release build opens none.
+        if cfg!(feature = "door") {
             let ui = aio::ipc::Listener::bind(&aio::ipc::addr(&socks, inspect::DOOR))?;
             tokio::spawn(inspect::serve(ui, inspect::hub().clone(), ctl.clone()));
         }
