@@ -54,7 +54,7 @@ config as one in the app's crate.
 
 | Type | Written as | Rules |
 |---|---|---|
-| span | `"90d"`, `"6h"`, `"30m"`, `"15s"`, `"250ms"` | a whole number, then one unit: `d`, `h`, `m`, `s` or `ms`. No fractions (`"1.5h"`), no mixes (`"1h30m"`). Every setting of how long or how often is one (the `[vitals]` thresholds, ms, and `[perf.storm] secs` are counts of what is measured); a key that took a number before (`coalesce_ms = 100`, `[perf] method = 50`, `[log] heartbeat = 3600`) still takes it, in its old unit. |
+| span | `"90d"`, `"6h"`, `"30m"`, `"15s"`, `"250ms"` | a whole number, then one unit: `d`, `h`, `m`, `s` or `ms`. No fractions (`"1.5h"`), no mixes (`"1h30m"`). Every setting of how long or how often is one (`[vitals.queue]`, effects waiting, and `[perf.storm] secs` are counts of what is measured); a key that took a number before (`coalesce_ms = 100`, `[perf] method = 50`, `[vitals.loop] frozen = 2000`, `[log] heartbeat = 3600`) still takes it, in its old unit. |
 | span or off | a span, or `"off"` | `"off"` turns the thing off (or "no limit": each key says). |
 | size | `"1MB"`, `"512KB"`, `"1.5 MB"`, `2048` | a number (fractions allowed), then `B`, `K`/`KB`, `M`/`MB` or `G`/`GB`, any case; `KB` = 1024. A bare number is bytes. Zero is refused. |
 | rate | `"20/s"`, `"20/sec"`, `"20 per second"`, `20` | per second; zero is refused. |
@@ -203,9 +203,9 @@ layout = true
 hints = true
 
 [vitals.render]
-degraded = 50
-warning = 200
-frozen = 2000
+degraded = "50ms"
+warning = "200ms"
+frozen = "2s"
 ```
 
 ## [app]
@@ -814,22 +814,23 @@ layout = false
 When a layer of the running app counts as degraded, warning or frozen
 (`ax health`; aio's `vitals` and `renderBudget`). Each of
 `[vitals.render]`, `[vitals.transport]`, `[vitals.loop]` and
-`[vitals.queue]` takes all three of `degraded`, `warning`, `frozen` (ms;
-for `queue`, effects waiting), and needs `degraded < warning < frozen`.
+`[vitals.queue]` takes all three of `degraded`, `warning`, `frozen` (spans,
+or a number of ms as before; for `queue`, a count of effects waiting), and
+needs `degraded < warning < frozen`.
 
 | Key | Default (`degraded`, `warning`, `frozen`) | What it is |
 |---|---|---|
 | `hints` | `true` | Say the likely cause with each warning and freeze. |
-| `render` | 50, 200, 2000 | A render's time. |
-| `transport` | 100, 500, 2000 | A round trip to the server. |
-| `loop` | 100, 500, 2000 | The event loop's lag. |
+| `render` | `"50ms"`, `"200ms"`, `"2s"` | A render's time. |
+| `transport` | `"100ms"`, `"500ms"`, `"2s"` | A round trip to the server. |
+| `loop` | `"100ms"`, `"500ms"`, `"2s"` | The event loop's lag. |
 | `queue` | 50, 200, 1000 | Effects waiting. |
 
 ```toml
 [vitals.transport]
-degraded = 250
-warning = 1000
-frozen = 5000
+degraded = "250ms"
+warning = "1s"
+frozen = "5s"
 ```
 
 ## [dev]

@@ -4744,6 +4744,7 @@ use aio::update::channel_refused = aio_config::update::channel_refused
 use aio::update::git_remote = aio_config::update::git_remote
 use aio::update::github_repo = aio_config::update::github_repo
 use aio::update::ssh_key = aio_config::update::ssh_key
+use aio::vitals::Counts = aio_config::vitals::Counts
 use aio::vitals::Status = aio_config::vitals::Status
 use aio::vitals::Tier = aio_config::vitals::Tier
 use aio::vitals::Vitals = aio_config::vitals::Vitals

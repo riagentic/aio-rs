@@ -225,6 +225,11 @@ version may break things.
   `Duration::from_millis(n)` where a number was. A span under a second is
   refused where a second was the least before (`[history] keep`,
   `[data] backup_every`, `[updates] every`…).
+- **Breaking: `[vitals]` times are spans too** (`frozen = "2s"`; a number
+  is ms, as before): `render`, `transport` and `loop`. `[vitals.queue]`
+  stays a count of effects waiting, its own type now: `aio::vitals::Tier`'s
+  fields are `Duration`s (`grade` still takes ms), `Vitals::queue` is an
+  `aio::vitals::Counts`.
 - **Breaking: `TestCells` takes `Duration`s**, as `TestUi` does:
   `advance(d)`, `settle_for(d)` and `budget::<C>(method, d)` (were ms):
   `t.advance(Duration::from_secs(60))`. A step back is `rewind(d)`

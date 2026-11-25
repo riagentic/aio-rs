@@ -166,7 +166,7 @@ async fn each_links_round_trip_is_timed_by_the_servers_pings() {
     let end = std::time::Instant::now() + Duration::from_secs(8);
     loop {
         if let Some(ms) = rtt(&ops.clients().await.unwrap()) {
-            assert!(ms < aio::vitals::get().transport.warning, "a loopback link: {ms} ms");
+            assert!(Duration::from_millis(ms) < aio::vitals::get().transport.warning, "a loopback link: {ms} ms");
             break;
         }
         assert!(std::time::Instant::now() < end, "no round trip timed");
