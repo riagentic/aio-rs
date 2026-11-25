@@ -84,6 +84,51 @@ impl Cancel {
     }
 }
 
+/// The effects running, by name, each counted (pure bookkeeping for [`busy`]).
+#[cfg(not(target_arch = "wasm32"))]
+static RUNNING: std::sync::Mutex<std::collections::BTreeMap<String, usize>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// One effect running, counted in [`busy`] until dropped.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct Running(String);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Running {
+    pub(crate) fn new(name: String) -> Self {
+        *RUNNING.lock().unwrap_or_else(|e| e.into_inner()).entry(name.clone()).or_default() += 1;
+        Self(name)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Running {
+    fn drop(&mut self) {
+        let mut r = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = r.get_mut(&self.0) {
+            *n -= 1;
+            if *n == 0 {
+                r.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// What this process is still doing (`ax wait --idle` asks it): each
+/// effect running (`effect <cell>.<key>`), each [`blocking`] or
+/// [`off_thread`] job (`blocking <key>`), and a commit its views are not
+/// all told of yet; empty: nothing. Work an effect doesn't hold (a task
+/// spawned on its own) is not seen. Native: a page has no door to ask it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn busy() -> Vec<String> {
+    let mut out: Vec<String> = RUNNING.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
+    out.extend(tokens().lock().unwrap_or_else(|e| e.into_inner()).keys().map(|k| format!("blocking {k}")));
+    if crate::handle::TELLING.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        out.push("a commit its views are not all told of".into());
+    }
+    out
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 type Tokens = std::sync::Mutex<std::collections::HashMap<String, Vec<Cancel>>>;
 

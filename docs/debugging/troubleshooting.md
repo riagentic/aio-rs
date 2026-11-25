@@ -143,7 +143,7 @@ Nothing went red, yet something didn't happen:
 | `ax dev` rebuilds and restarts on every Rust edit | Windows (no hot-patching there yet), or the edit can't be patched (a `Cargo.toml`, a patch that failed: the terminal says why) | expected |
 | a CSS edit doesn't show under `ax dev` | the CSS is kept in `once` (made once) | `aio::use_css!` in a hole |
 | `ax state` / `ax call` say the app isn't running | it runs from another home (a profile, an instance, `AIORT_DATA`) | name that copy: `notes@<profile>`, `--instance`, the same `AIORT_DATA` |
-| `ax shot`, `ax eval` can't reach the window | a release build has no dev door | run it with `ax dev`, or launch with `--cdp` (`ax start notes --cdp`) |
+| `ax shot`, `ax eval` can't reach the window | a release build (an installed app's), or a build on aio-rs before 0.5.0, opens no window door | `ax restart notes` in its workspace (`ax start` builds it with the door); on an older aio-rs, `ax pin notes latest` first |
 | a UI test fails on a refusal at its end | `TestUi` / `TestCells` fail on refusals nobody looked at | take the expected ones with `failures()` ([testing](../testing/README.md)) |
 | an outbound request is refused | its host is not in `[capabilities] network` | add the host there |
 | an update is never offered | `[updates] url` unset, the release not signed by one of `keys`, or blocked on data the release can't read | `ax update notes` says the state and the reason |

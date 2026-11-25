@@ -89,7 +89,12 @@ reproduce as a red test → fix → green; never widen a type or swallow an erro
 3. ax events <app> [cell] (what ran, with which args, by whom).
 4. ax state <app> <cell> [path] / ax expect (what the running app holds).
 5. ax call <app> <cell> <method> [arg…] (act as a user would, --as <user>).
-6. Reproduce as a red test, fix, green.
+6. The window, as a person (ax start's or ax dev's build: no flag): ax surface
+   <app> (what shows, named as TestUi names it) · ax trigger <app> <path> click
+   · ax expect-ui <app> <path> eq|contains <text> [--wait s] (TestUi's
+   until_text, until_contains; present, absent) · ax wait <app> --idle
+   (nothing in flight, the window still) · ax shot <app>. No sleep.
+7. Reproduce as a red test, fix, green.
 NO: widen a type, delete an assertion, swallow an error, sleep-and-retry, pkill.",
     },
     Section {

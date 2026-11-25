@@ -125,7 +125,7 @@ Every method takes `t`, which names exactly one showing element:
 
 Two matches fail, naming them: a test never acts on a guess. Two
 showing elements with one `data-t` handle are refused too (`2 elements
-have data-t="fleet" (<button> "Fleet" in data-t="side", <table> …)`):
+have data-t="fleet": <button> "Fleet" at side/fleet, <table> …`):
 give each its own handle, or name one inside another (`side/fleet`); a
 hidden one doesn't count while one shows, and `count`, `present` and
 `handles` count them all (`ax lint` warns on a literal handle written

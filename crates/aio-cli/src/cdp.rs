@@ -1,5 +1,6 @@
 //! The Chrome DevTools Protocol, as `ax shot` reaches an app's window:
-//! over the running app's own `ui` door (no flag, no port), or over a
+//! over the running app's own `ui` door (no flag, no port: a build of `ax
+//! start` or `ax dev`), or over a
 //! port a debug build opened on purpose (`--cdp`, `AIORT_CDP=<port>`, loopback only:
 //! the target list over HTTP, then one target's WebSocket). Every protocol
 //! error is an `Err`, never swallowed.
@@ -64,6 +65,11 @@ pub fn recorded(plan: &aio::paths::Plan) -> Option<u16> {
     }
     std::fs::read_to_string(plan.logs.join(PORT_FILE)).ok()?.trim().parse().ok()
 }
+
+/// Why a running app has no `ui` door, and the way to one.
+pub const NO_DOOR: &str = "a server or a CLI has no window, and a release build (an installed app's) or one on \
+     aio-rs before 0.5.0 opens no door: `ax restart <app>` in its workspace runs a build of it that does (on an older \
+     aio-rs, `ax pin <app> latest` first)";
 
 /// Where a window's DevTools protocol is reached.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -244,7 +250,7 @@ impl Session {
         use tokio::io::AsyncBufReadExt;
         let s = aio::ipc::connect(addr)
             .await
-            .map_err(|e| format!("the running app has no window to reach ({addr}: {e}); a server, a CLI or a release build opens none: start it with --cdp"))?;
+            .map_err(|e| format!("the running app opens no window door ({addr}: {e}): {NO_DOOR}"))?;
         let (r, w) = tokio::io::split(s);
         Ok(Self { link: Link::Door(tokio::io::BufReader::new(r).lines(), w), id: 0, events: vec![] })
     }
@@ -547,7 +553,8 @@ pub(crate) mod tests {
         assert_eq!(windows(&at).await.unwrap(), "0  Notes  aio://app/", "ax clients <app>");
         assert_eq!(window(&at, 1).await.err().unwrap(), "no window 1: the app has 1 (0)");
         let gone = Reach::Door(aio::ipc::addr(_d.path(), "gone"));
-        assert!(window(&gone, 0).await.err().unwrap().contains("has no window to reach"));
+        let e = window(&gone, 0).await.err().unwrap();
+        assert!(e.contains("opens no window door") && e.contains("`ax restart <app>` in its workspace"), "{e}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
