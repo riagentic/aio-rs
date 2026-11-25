@@ -1,6 +1,6 @@
 //! The controls a dashboard needs beyond inputs (aio's `controls.ts`): radio
-//! group, switch, tabs, progress, alert, tooltip, menu, breadcrumb, skeleton,
-//! empty state, connection status. Keyboard first: each does its WAI-ARIA
+//! group, switch, tabs, nav list, progress, alert, tooltip, menu, breadcrumb,
+//! skeleton, empty state, connection status. Keyboard first: each does its WAI-ARIA
 //! pattern (tabs arrow between, a menu opens on ArrowDown and closes on
 //! Escape back to its trigger, a tooltip closes on Escape).
 use super::form::{Opt, use_field};
@@ -176,12 +176,15 @@ pub fn Direction(rtl: Prop<bool>, children: View) -> View {
 /// Home/End jump, and only the active tab is in the tab order, so Tab moves
 /// on into the panel. Controlled with `value`; else it remembers its own,
 /// starting at the first enabled tab (also when the chosen one is gone).
+/// Tabs that don't fit wrap to another row; `scroll` keeps them on one,
+/// scrolling sideways.
 #[component]
 pub fn Tabs(
     #[props(into)] tabs: Prop<Vec<Tab>>,
     #[props(into)] value: Prop<Option<String>>,
     #[props(into)] label: Prop<Option<String>>,
     rtl: Prop<Option<bool>>,
+    #[props(default)] scroll: Prop<bool>,
     onchange: Option<EventHandler<String>>,
     #[props(default, into)] class: Prop<String>,
     #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
@@ -215,7 +218,7 @@ pub fn Tabs(
         memo(move || tabs.with(|t| t.iter().map(|t| (t.id.clone(), t.label.clone(), t.disabled)).collect::<Vec<_>>()));
     rsx! {
         div { class: join("aio-tabs", &class.get()), ..attributes,
-            div { class: "aio-tablist", role: "tablist", "aria-label": label,
+            div { class: if scroll.get() { "aio-tablist aio-tablist--scroll" } else { "aio-tablist" }, role: "tablist", "aria-label": label,
                 for (i, (id, name, off)) in rows.get().into_iter().enumerate() {
                     button {
                         key: "{id}",
@@ -268,6 +271,119 @@ pub fn Tabs(
                 "aria-labelledby": shown.with(|s| s.as_ref().map(|t| format!("{base}-tab-{}", dom_id(&t.id)))),
                 tabindex: "0",
                 {shown.get().map(|t| t.panel)}
+            }
+        }
+    }
+}
+
+/// One page of a [`NavList`]: its id (what `value` and `onchange` speak)
+/// and its label.
+#[derive(Clone, PartialEq)]
+pub struct NavItem {
+    pub id: String,
+    /// Text or any view (an icon and a name, a count).
+    pub label: View,
+    pub disabled: bool,
+}
+
+impl NavItem {
+    pub fn new<M>(id: impl Into<String>, label: impl ::air::IntoViewValue<M>) -> Self {
+        Self { id: id.into(), label: label.into_view_value(), disabled: false }
+    }
+
+    pub fn disabled(self) -> Self {
+        Self { disabled: true, ..self }
+    }
+}
+
+/// A vertical rail of pages (a sidebar), the current one
+/// `aria-current="page"`. One tab stop: ↑ and ↓ move focus (wrapping,
+/// skipping disabled items), Home and End jump, Enter or Space opens the
+/// page; Tab leaves, and coming back lands on the item last left (the
+/// current one once the page changed). Controlled with `value`; else it
+/// remembers its own, starting at the first enabled item.
+#[component]
+pub fn NavList(
+    #[props(into)] items: Prop<Vec<NavItem>>,
+    #[props(into)] value: Prop<Option<String>>,
+    #[props(into)] label: Prop<Option<String>>,
+    onchange: Option<EventHandler<String>>,
+    #[props(default, into)] class: Prop<String>,
+    #[props(extends = GlobalAttributes)] attributes: Vec<Attribute>,
+) -> View {
+    let first = memo(move || {
+        items.with(|v| v.iter().find(|i| !i.disabled).or(v.first()).map(|i| i.id.clone()).unwrap_or_default())
+    });
+    let inner = signal(|| value.get_untracked().unwrap_or(first.get_untracked()));
+    let controlled = value.is_live() || value.with_untracked(Option::is_some);
+    let active = memo(move || {
+        value.get().unwrap_or_else(|| {
+            let i = inner.get();
+            if items.with(|v| v.iter().any(|v| v.id == i)) { i } else { first.get() }
+        })
+    });
+    // The item focus last left, and the page current then.
+    let left = signal(|| None::<(String, String)>);
+    let stop = memo(move || {
+        let cur = active.get();
+        let open = |id: &str| items.with(|v| v.iter().any(|i| i.id == id && !i.disabled));
+        match left.get() {
+            Some((f, at)) if at == cur && open(&f) => f,
+            _ if open(&cur) => cur,
+            _ => first.get(),
+        }
+    });
+    let els = signal(HashMap::<String, Rc<MountedData>>::new);
+    let rows =
+        memo(move || items.with(|v| v.iter().map(|i| (i.id.clone(), i.label.clone(), i.disabled)).collect::<Vec<_>>()));
+    rsx! {
+        nav { class: join("aio-nav", &class.get()), "aria-label": label, ..attributes,
+            ul { class: "aio-nav__list",
+                for (i, (id, name, off)) in rows.get().into_iter().enumerate() {
+                    li { key: "{id}",
+                        button {
+                            "data-t": "{id}",
+                            r#type: "button",
+                            class: "aio-nav__item",
+                            "aria-current": (active.get() == id).then_some("page"),
+                            tabindex: if stop.get() == id { "0" } else { "-1" },
+                            disabled: off,
+                            onmounted: {
+                                let id = id.clone();
+                                move |e: MountedEvent| _ = els.write().insert(id.clone(), e.data())
+                            },
+                            onfocus: {
+                                let id = id.clone();
+                                move |_| left.set(Some((id.clone(), active.get_untracked())))
+                            },
+                            onclick: {
+                                let id = id.clone();
+                                move |_| if !off {
+                                    if !controlled {
+                                        inner.set(id.clone());
+                                    }
+                                    if let Some(f) = onchange { f.call(id.clone()) }
+                                }
+                            },
+                            onkeydown: move |e: KeyboardEvent| {
+                                let all = rows.get_untracked();
+                                let (from, delta) = match e.key() {
+                                    Key::ArrowDown => (i as isize, 1),
+                                    Key::ArrowUp => (i as isize, -1),
+                                    Key::Home => (-1, 1),
+                                    Key::End => (all.len() as isize, -1),
+                                    _ => return,
+                                };
+                                e.prevent_default();
+                                let disabled: Vec<bool> = all.iter().map(|r| r.2).collect();
+                                if let Some(el) = tab_step(&disabled, from, delta).and_then(|to| els.read_untracked().get(&all[to].0).cloned()) {
+                                    spawn(async move { _ = el.set_focus(true).await });
+                                }
+                            },
+                            {name}
+                        }
+                    }
+                }
             }
         }
     }

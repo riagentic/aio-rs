@@ -1344,6 +1344,18 @@ aio::kit::Motion::rule: fn rule(&self) -> Option<String>
 aio::kit::Motion::ticking: const fn ticking(self, tick: fn(f64, f64)) -> Self
 aio::kit::Motion::timed: fn timed(self, t: Timing) -> Self
 aio::kit::Motion::total: fn total(&self) -> Duration
+aio::kit::NavItem.disabled: bool
+aio::kit::NavItem.id: String
+aio::kit::NavItem.label: View
+aio::kit::NavItem::disabled: fn disabled(self) -> Self
+aio::kit::NavItem::new: fn new<M>(id: impl Into<String>, label: impl ::air::IntoViewValue<M>) -> Self
+aio::kit::NavList: fn NavList(_: NavListProps) -> View
+aio::kit::NavListProps.attributes: Vec<Attribute>
+aio::kit::NavListProps.class: Prop<String>
+aio::kit::NavListProps.items: Prop<Vec<NavItem>>
+aio::kit::NavListProps.label: Prop<Option<String>>
+aio::kit::NavListProps.onchange: Option<EventHandler<String>>
+aio::kit::NavListProps.value: Prop<Option<String>>
 aio::kit::Opt.disabled: bool
 aio::kit::Opt.label: String
 aio::kit::Opt.value: String
@@ -1479,6 +1491,7 @@ aio::kit::TabsProps.class: Prop<String>
 aio::kit::TabsProps.label: Prop<Option<String>>
 aio::kit::TabsProps.onchange: Option<EventHandler<String>>
 aio::kit::TabsProps.rtl: Prop<Option<bool>>
+aio::kit::TabsProps.scroll: Prop<bool>
 aio::kit::TabsProps.tabs: Prop<Vec<Tab>>
 aio::kit::TabsProps.value: Prop<Option<String>>
 aio::kit::Textarea: fn Textarea(_: TextareaProps) -> View
@@ -3056,6 +3069,8 @@ impl Clone for Moment
 impl Clone for Motion
 impl Clone for MountedComponent
 impl Clone for Move
+impl Clone for NavItem
+impl Clone for NavListProps
 impl Clone for Near
 impl Clone for Nest
 impl Clone for Offer
@@ -3703,6 +3718,7 @@ impl PartialEq for Moment
 impl PartialEq for Motion
 impl PartialEq for MountedComponent
 impl PartialEq for Move
+impl PartialEq for NavItem
 impl PartialEq for Near
 impl PartialEq for Nest
 impl PartialEq for Offer
@@ -3799,6 +3815,7 @@ impl Props for InputProps
 impl Props for MarkdownProps
 impl Props for MenuProps
 impl Props for ModalProps
+impl Props for NavListProps
 impl Props for PaginationProps
 impl Props for ProgressProps
 impl Props for RadioGroupProps
@@ -3935,6 +3952,7 @@ impl StructuralPartialEq for Mode
 impl StructuralPartialEq for Moment
 impl StructuralPartialEq for MountedComponent
 impl StructuralPartialEq for Move
+impl StructuralPartialEq for NavItem
 impl StructuralPartialEq for Near
 impl StructuralPartialEq for Nest
 impl StructuralPartialEq for Offer
@@ -4380,6 +4398,8 @@ struct aio::kit::MenuItem
 struct aio::kit::MenuProps
 struct aio::kit::ModalProps
 struct aio::kit::Motion
+struct aio::kit::NavItem
+struct aio::kit::NavListProps
 struct aio::kit::Opt
 struct aio::kit::PaginationProps
 struct aio::kit::Parse<'a, T>
