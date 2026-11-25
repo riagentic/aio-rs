@@ -157,7 +157,7 @@ More pitfalls, by symptom: [FAQ and pitfalls](../basics/faq.md#pitfalls).
 | the window never opens; `ax setup` names a library (`libgtk-3`, `libnss3`, `libgbm`, `libasound`) | Electron's system libraries are missing (servers, minimal images) | install the packages `ax setup` names |
 | the log says `starting it with --no-sandbox` | Chromium's sandbox can't start: unprivileged user namespaces are restricted (Ubuntu 23.10+ AppArmor, Debian's switch, a container) and `chrome-sandbox` is not setuid root | expected, and the page is the app's own UI; `AIORT_SANDBOX=1` refuses instead, or make `chrome-sandbox` root-owned with mode 4755 |
 | an agent's or CI's window shows on the person's screen | it ran with `--display current` | leave `--display auto` (no terminal: a nested display); install Xvfb or Xephyr (`ax setup` checks) |
-| `ax build --deb` fails | no `[app] maintainer`, or no `dpkg-deb` | set `maintainer = "Name <email>"`; install `dpkg` |
+| `ax build --deb` fails | no `[app] maintainer` (or a placeholder at `example.org`, `.invalid`, ...), or no `dpkg-deb` | set `maintainer = "Name <email>"` under `[app]`; install `dpkg` |
 | `ax build --appimage` fails | no `mksquashfs` | install `squashfs-tools` |
 | `ax build --windows` fails | no MinGW cross linker or rustup target | the error names the package (`mingw-w64`) and the `rustup target add` line |
 

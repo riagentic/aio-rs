@@ -196,6 +196,11 @@ version may break things.
 
 ### Changed
 
+- `ax create` writes no `[app] maintainer` (it took git's `user.name` and
+  `user.email` into `aio.toml`, a file the repo shares): the line is there
+  commented out. `ax build --deb` asks for it before the build, and
+  refuses a placeholder at a domain kept for examples (`example.org`,
+  `.invalid`, as an older `ax create` wrote with no git identity).
 - **Breaking: ax's plumbing is out of the API**: `aio_shell`'s `runtime`,
   `splash`, `place`, `prune`, `pidlock`, `macmove`, `oneclick`, `fuses`,
   `swap`, `switches`, `inspect` and `delta`, `html_open`, every

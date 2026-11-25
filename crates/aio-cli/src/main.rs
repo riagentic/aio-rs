@@ -1129,11 +1129,9 @@ fn run(args: &[String]) -> Result<String, Fail> {
                 Some("tailwind") => true,
                 Some(c) => return Err(usage(format!("--css {c}: tailwind (any other tool: [build] css in aio.toml)"))),
             };
-            let maintainer = create::git_maintainer(&here);
             let new = create::New {
                 template: value("--template").unwrap_or("app"),
                 id: value("--id").unwrap_or(name),
-                maintainer: maintainer.as_deref().unwrap_or(create::NO_MAINTAINER),
                 aio,
                 targets: value("--target").map_or(vec![], |t| t.split(',').map(str::trim).collect()),
                 tailwind: css,
@@ -1154,7 +1152,7 @@ fn run(args: &[String]) -> Result<String, Fail> {
                 ));
             }
             made.notes.extend(create::lock(&made.at));
-            made.notes.push(create::git_init(&made.at, maintainer.is_some()));
+            made.notes.push(create::git_init(&made.at, create::git_identity(&here)));
             // The first `ax dev` is a launch, not a 20 s build: built now, in the background.
             let terminal = std::io::IsTerminal::is_terminal(&std::io::stderr()) && !json;
             if dev::warms_after_create(terminal, has("--no-warm"), std::env::var("AIORT_NO_WARM").ok().as_deref()) {

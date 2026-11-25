@@ -97,13 +97,29 @@ fn dir_kb(dir: &Path) -> u64 {
         .sum()
 }
 
+/// `[app] maintainer` for a package (pure): set, and not a placeholder at
+/// a domain reserved for examples (RFC 2606: `example.org`, `.invalid`, …),
+/// as an older `ax create` wrote.
+pub fn maintainer(m: Option<&str>) -> Result<&str, String> {
+    let fix = "set maintainer = \"Name <email>\" under [app] in aio.toml (yours or your team's: the package's \
+               maintainer, whom its users reach)";
+    let m = m.map(str::trim).filter(|m| !m.is_empty()).ok_or_else(|| format!("--deb needs a maintainer: {fix}"))?;
+    let host = m.rsplit_once('@').map_or("", |(_, h)| h.trim_end_matches('>').trim()).to_ascii_lowercase();
+    let reserved = ["example.com", "example.org", "example.net"].contains(&host.as_str())
+        || [".example", ".invalid", ".test", ".localhost", ".example.com", ".example.org", ".example.net"]
+            .iter()
+            .any(|t| host.ends_with(t))
+        || ["invalid", "localhost"].contains(&host.as_str());
+    match reserved {
+        true => Err(format!("--deb: maintainer \"{m}\" is a placeholder: {fix}")),
+        false => Ok(m),
+    }
+}
+
 /// `dist/<pkg>_<version>_<arch>.deb`.
 pub fn deb(b: &Built) -> Result<PathBuf, String> {
     let app = &b.app;
-    let maintainer =
-        b.cfg.app.maintainer.as_deref().ok_or(
-            "--deb needs a maintainer: add maintainer = \"Your Name <you@example.org>\" under [app] in aio.toml",
-        )?;
+    let maintainer = maintainer(b.cfg.app.maintainer.as_deref())?;
     let dist = &b.dist;
     std::fs::create_dir_all(dist).map_err(|e| e.to_string())?;
     let root = dist.join(format!(".{}-deb", app.id));
@@ -213,6 +229,26 @@ pub fn appimage(b: &Built) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_package_needs_a_real_maintainer_and_says_where_to_set_it() {
+        assert_eq!(maintainer(Some("Notes Team <team@notes.dev>")), Ok("Notes Team <team@notes.dev>"));
+        for none in [None, Some(""), Some("  ")] {
+            let e = maintainer(none).unwrap_err();
+            assert!(e.contains("needs a maintainer") && e.contains("under [app] in aio.toml"), "{e}");
+        }
+        for fake in [
+            "Your Name <you@example.org>",
+            "Maintainer <maintainer@example.invalid>",
+            "A <a@EXAMPLE.COM>",
+            "A <a@mail.example.net>",
+            "A <a@x.test>",
+            "A <a@localhost>",
+        ] {
+            assert!(maintainer(Some(fake)).unwrap_err().contains("is a placeholder"), "{fake}");
+        }
+        assert!(maintainer(Some("A <a@myexample.org>")).is_ok(), "a real domain that ends alike");
+    }
 
     #[test]
     fn debian_names_and_versions_sort_like_the_app() {
