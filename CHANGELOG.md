@@ -193,6 +193,8 @@ version may break things.
   ([relay](docs/examples/relay.md)).
 - `Source::for_server_with(cfg, dirs, http)`: `for_server` serving the
   app's own routes too, without the sync client `for_app_with` holds.
+- `air::Root::faults()`: what views did wrong that drawing went past (a
+  list's repeated key), taken; `TestPage` and `TestUi` fail on them.
 
 ### Changed
 
@@ -334,6 +336,13 @@ version may break things.
 
 ### Fixed
 
+- Two rows of a `for` with one key no longer panic the window dead (in
+  every build, with no place of the app's): the window draws every row,
+  the second keyed by its repeat, and says once, through the log and
+  the problem bus (`ui:duplicate-key`), the component and the `for`'s
+  `file:line:col`. A test (`TestUi`, `TestPage`) fails with that message
+  in every build (before: in a debug build only). A server render draws
+  every row too.
 - A `TestUi` step waits for the files its event reads: a form's submit
   read its files as the event went out, and a click that submitted it
   could end before they were read (the submit unheard on a loaded

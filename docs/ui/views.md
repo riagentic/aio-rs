@@ -797,6 +797,10 @@ Routes are [routing](routing.md); styles and dark mode are
 - `e.prevent_default()` on keys in a window comes too late: put
   `data-aio-prevent` on the element ([kit](kit.md#keys)).
 - A `for` row without `key:` on its first node: `rsx!` refuses it.
+- Two rows with one key (`key: "{s.line}"` where lines repeat): a test
+  (`TestUi`, `TestPage`) fails, naming the component and the `for`'s
+  `file:line:col`; a window draws every row, the second keyed by its
+  repeat, and says it once (`ui:duplicate-key` in the log). Key by an id.
 - A 0.1 app's renderer left in (its paths, its dependency, a page
   script's `send`): `ax lint` refuses them, and the migration guide's
   section 8, [0.1 → 0.2](../migration/README.md), has the names.

@@ -193,6 +193,7 @@ air::Retry(_)
 air::Retry::retry: fn retry(self)
 air::Root::beside: fn beside(&self, f: impl Fn() -> View + 'static)
 air::Root::event: fn event(&self, frame: &[u8]) -> bool
+air::Root::faults: fn faults(&self) -> Vec<String>
 air::Root::hot: fn hot(&self)
 air::Root::mount: fn mount(app: impl Fn() -> View + 'static) -> Self
 air::Root::new: fn new() -> Self

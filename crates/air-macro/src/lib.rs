@@ -749,6 +749,18 @@ fn is_colon(toks: &[TokenTree], i: usize) -> bool {
     matches!(toks.get(i), Some(TokenTree::Punct(p)) if p.as_char() == ':' && p.spacing() == Spacing::Alone)
         && !is_punct(toks.get(i.wrapping_sub(1)), ':')
 }
+/// Where `s` is written (line, column, 1-based) in a compile; `(0, 0)` as
+/// `ax` reads the source (a hot reload's shape holds no place).
+fn line_col(s: Span) -> (u32, u32) {
+    #[cfg(proc_macro)]
+    return (s.unwrap().line() as u32, s.unwrap().column() as u32);
+    #[cfg(not(proc_macro))]
+    {
+        _ = s;
+        (0, 0)
+    }
+}
+
 fn span_of(toks: &[TokenTree], i: usize) -> Span {
     toks.get(i).or(toks.last()).map_or(Span::call_site(), |t| t.span())
 }
@@ -2127,7 +2139,11 @@ impl Tpl {
                         cr.retain(|n| !b.contains(n));
                         let (ce, ck, cr) = (clones(&ce), clones(&ck), clones(&cr));
                         let view = body(rows);
-                        quote!(#[allow(unused_variables)] air::__rt::each(#id,
+                        // Where the `for` is, for what a repeated key says.
+                        let file = HOT.with_borrow(|h| h.at.as_ref().map(|a| a.0.clone())).unwrap_or_default();
+                        let (line, col) = line_col(*at);
+                        let site = quote!(&air::__rt::At { file: #file, line: #line, col: #col, idx: 0 });
+                        quote!(#[allow(unused_variables)] air::__rt::each(#id, #site,
                             { #ce move || { #ce ::std::iter::IntoIterator::into_iter(#expr).collect::<::std::vec::Vec<_>>() } },
                             { #ck move |#pat: &_| (#key).to_owned() },
                             { #cr move |#pat| #view });)
