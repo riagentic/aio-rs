@@ -259,7 +259,7 @@ ax test notes && ax dev notes
 ```text
 ax add <app> cell <name>
 ax add <app> server <name>
-ax add <app> page <name>
+ax add <app> page <name> [--yes]
 ```
 
 Writes a new part into an existing app and wires it in, so it builds and
@@ -270,9 +270,9 @@ Rust keyword: it becomes a file and an identifier (`due-date`: module
 
 | Kind | Writes | Wires |
 |---|---|---|
-| `cell` | `src/<name>.rs`: a saved cell with a method and its test; with its views' `client!` in an app with a window | `pub mod <name>;` in `src/lib.rs`; its source opened beside the first one by each launcher in `app/src` (`main.rs`, Android's `lib.rs`) and by the browser build's `web()` |
+| `cell` | `src/<name>.rs` (`core/src/<name>.rs` in an app with a core crate): a saved cell with a method and its test; with its views' `client!` in an app with a window | `pub mod <name>;` in `src/lib.rs` (`core/src/lib.rs`); its source opened beside the first one by each launcher in `app/src` (`main.rs`, Android's `lib.rs`) and by the browser build's `web()` |
 | `server` | `src/<name>.rs`: a server function (`<name>.list`) with its test, and `http`, which serves it | `pub mod <name>;` (native builds) in `src/lib.rs`; the launcher's source becomes `Source::for_app_with(.., <name>::http(..))`; aio's `server` feature on in `Cargo.toml` (an app with a page: for its native builds alone) |
-| `page` | `pages/<name>`: a crate of its own (`<app>-<name>`) on the app's aio-rs, with a view, `<name>::<Name>` | a member of the app's workspace and a dependency of its library (`<name>`) in `Cargo.toml` |
+| `page` | `pages/<name>`: a crate of its own (`<app>-<name>`) on the app's aio-rs and its core crate, with a view, `<name>::<Name>`, that shows a field of the app's cell | a member of the app's workspace and a dependency of its library (`<name>`) in `Cargo.toml` |
 
 A name the app has already is refused and nothing is written; a launcher
 it can't wire (a service's `for_server` takes no functions) is named,
@@ -282,11 +282,45 @@ with the line to add. A new cell's views update once the root view calls
 edit in it, however big the app grows: keep a big app's views by area in
 pages ([what an edit costs](../build/README.md#what-an-edit-costs)).
 
+A page can't use the app's library: the library depends on it. So the
+cells live in a crate both use, the app's **core crate** (`core/`,
+`<app>-core`), made by the first `ax add page` of an app whose library
+holds its cells. It moves there the cells, their methods and `client!`
+(with its `prelude`), the types and functions they use, and each module
+that holds a cell (`src/tally.rs` → `core/src/tally.rs`); the views, the
+browser build's `web()` and the tests stay. The library re-exports the
+core crate whole (`pub use <app>_core::*;`), so `crate::prelude`,
+`crate::tally::Tally`, the launchers' `app::SOURCE` and the Android
+library read as before; each page, and each page made before, depends on
+it. A page reads a cell through its prelude, as a module of the library
+does:
+
+```text
+use notes_core::prelude::*; // notes_core::tally::prelude for a cell in mod tally
+
+#[component]
+pub fn Settings() -> View {
+    let count = part(|c| &c.count);
+    rsx! { p { "count: {count}" } }
+}
+```
+
+It says what moves and asks first (`--yes`: not; with nobody to ask, it
+stops there; `--json` says the plan and does nothing without `--yes`).
+It is tried on a copy beside the app (`cargo check` of every crate and
+target) and written only if that builds, else nothing changes and the
+compiler's errors are said (a view reading a field only the cell's crate
+may: make it `pub`). Imports the cells didn't need are left out of
+`core/src/lib.rs`. Then each `ax add page` is a page on the core crate,
+and `ax add cell` writes into it. An app without pages stays one crate.
+`ax dev` patches an edit in the core crate or a page as one in the
+library ([what an edit costs](../build/README.md#what-an-edit-costs)).
+
 ```sh
 ax add notes cell tally && ax test notes
 ax call notes tally add 1
 ax add notes server tools && ax call notes --fn tools.list
-ax add notes page settings && ax dev notes
+ax add notes page settings --yes && ax dev notes
 ```
 
 ### `ax pin`
