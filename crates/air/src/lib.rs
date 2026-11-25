@@ -95,8 +95,8 @@ mod tree;
 pub use air_macro::{Props, component, rsx};
 pub use dom::{
     AttrValue, Child, ErrorBoundary, ErrorBoundaryProps, Eval, Fragment, FragmentProps, IntoAttr, IntoChild,
-    IntoHandler, MountedData, Retry, Root, Suspense, SuspenseProps, Tree, View, ViewError, eval, exec, is_empty,
-    longest_increasing, retry, styled, take_edits, text_view,
+    IntoHandler, MountedData, Retry, Root, Suspense, SuspenseProps, TextSelection, Tree, View, ViewError, eval, exec,
+    is_empty, longest_increasing, retry, styled, take_edits, text_view,
 };
 pub use event::*;
 pub use global::{Global, GlobalMemo, TrackedMemo};

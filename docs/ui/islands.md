@@ -429,7 +429,9 @@ ui.until_text("preview", "camera back");
   when its box changes.
 - **The element itself** (aio's `ref` and `use=`): `onmounted: move |e|
   ..` gives a `MountedData`: `set_focus(true)`, `scroll_to(ScrollBehavior::Smooth)`,
-  `get_client_rect()`. Keep it in a signal to use it later. The kit's
+  `get_client_rect()`, and a text field's `selection()`, `set_selection(s)`
+  and `insert_text(text)` ([views](views.md#a-text-fields-selection)).
+  Keep it in a signal to use it later. The kit's
   `Button` passes `onmounted` through.
 - **Scroll into view**: `"data-aio-reveal"` on the element, applied with
   its frame ([views](views.md#the-page)).

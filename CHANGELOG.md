@@ -115,6 +115,25 @@ version may break things.
   key kept beside it. Before, every call in a page was `Unsupported`. An
   app without `secrets` builds none of it
   ([keychain](docs/auth/keychain.md#the-web-a-passkey)).
+- `aio::kit::CodeArea`: a code editor's light core (notes, dev tools,
+  config editors, learning apps): a real `textarea` over a highlighted
+  copy of its text in one scroller, line numbers, the app's highlighting
+  (`spans`: runs of `(class, text)` per line; the kit has no grammars),
+  line marks (`(line, class)`; `error`, `warning`, `current` have a
+  look), `tab_size` (Tab indents to the next stop or every selected line,
+  Shift+Tab outdents, in the page and undoable; Escape, then Tab, leaves),
+  `wrap`, `onkeydown` (Ctrl+Enter), `onmounted`. IME-safe; labelled by a
+  `Field`. Its sheet and script come with it: an app without one carries
+  neither ([kit](docs/ui/kit.md#code)).
+- A text field's selection, written as well as read: `MountedData::
+  selection()`, `set_selection(TextSelection)` and `insert_text(text)`
+  (the browser's own typing: `input` fires, Ctrl+Z undoes it), in bytes
+  of the value as Rust indexes it, on the desktop, the web and Android;
+  `aio_shell::page::selection`, `set_selection` and `insert_text` by
+  selector, beside `caret` ([views](docs/ui/views.md#a-text-fields-selection)).
+- `data-aio-prevent` on a field keeps the keys it names (Tab in a
+  `textarea` that indents), even as a modal dialog's last control: a
+  field's keys were always its own, so Tab left it whatever the view did.
 - `aio::kit::NavList` and `NavItem`: a sidebar's rail of pages, the
   current one `aria-current="page"` (marked by a bar and weight, not
   colour alone), one tab stop with ↑/↓, Home and End moving focus and
@@ -525,6 +544,13 @@ version may break things.
 - `ax lint`'s fix for a `for` over a block was a `{items.iter().map(..)}`
   hole, which doesn't compile; it says to key a row component now.
   docs/testing/lint.md listed the finding as a warning: it is an error.
+- The web build's page kept no key an element names in
+  `data-aio-prevent` (arrows scrolled the page, Tab left a list) and
+  scrolled no `data-aio-reveal` row into view: its page scripts left both
+  out. They are the window's now.
+- A constant `value` on a `textarea` or a `select` (`textarea { value:
+  "hi" }`) showed nothing: it was written as the attribute, which neither
+  shows. It is set as the property, as a changing one was.
 - With `theme = "full"` the look's button reached the kit's quiet ones:
   a `Menu`'s items were centred and shadowed, tabs had a shadow, rounded
   corners and a press nudge. They start from `.aio-plain` now.

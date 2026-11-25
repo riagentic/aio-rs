@@ -1137,6 +1137,17 @@ aio::kit::CheckboxProps.disabled: Prop<bool>
 aio::kit::CheckboxProps.label: Option<View>
 aio::kit::CheckboxProps.onchange: Option<EventHandler<bool>>
 aio::kit::ChordSpec(_)
+aio::kit::CodeArea: fn CodeArea(_: CodeAreaProps) -> View
+aio::kit::CodeAreaProps.attributes: Vec<Attribute>
+aio::kit::CodeAreaProps.class: Prop<String>
+aio::kit::CodeAreaProps.marks: Prop<Vec<(usize, String)>>
+aio::kit::CodeAreaProps.oninput: Option<EventHandler<String>>
+aio::kit::CodeAreaProps.onkeydown: Option<EventHandler<KeyboardEvent>>
+aio::kit::CodeAreaProps.onmounted: Option<EventHandler<MountedEvent>>
+aio::kit::CodeAreaProps.spans: Prop<Vec<Vec<(String, String)>>>
+aio::kit::CodeAreaProps.tab_size: Prop<u32>
+aio::kit::CodeAreaProps.value: Prop<String>
+aio::kit::CodeAreaProps.wrap: Prop<bool>
 aio::kit::Column.align: Align
 aio::kit::Column.cell: Callback<(R, usize), View>
 aio::kit::Column.header: View
@@ -2957,6 +2968,7 @@ impl Clone for Chunks
 impl Clone for Client
 impl Clone for Closed
 impl Clone for Code
+impl Clone for CodeAreaProps
 impl Clone for Col
 impl Clone for Columns
 impl Clone for ConfirmButtonProps
@@ -3769,6 +3781,7 @@ impl Props for BreadcrumbProps
 impl Props for ButtonProps
 impl Props for CardProps
 impl Props for CheckboxProps
+impl Props for CodeAreaProps
 impl Props for ConfirmButtonProps
 impl Props for ConfirmProps
 impl Props for ConnectionStatusProps
@@ -4334,6 +4347,7 @@ struct aio::kit::ButtonProps
 struct aio::kit::CardProps
 struct aio::kit::CheckboxProps
 struct aio::kit::ChordSpec
+struct aio::kit::CodeAreaProps
 struct aio::kit::Column<R: 'static>
 struct aio::kit::ConfirmButtonProps
 struct aio::kit::ConfirmProps
@@ -4640,6 +4654,7 @@ use aio::ui::events::ScrollBehavior = air::event::ScrollBehavior
 use aio::ui::events::ScrollData = air::event::ScrollData
 use aio::ui::events::ScrollEvent = air::event::ScrollEvent
 use aio::ui::events::SelectionEvent = air::event::SelectionEvent
+use aio::ui::events::TextSelection = air::dom::TextSelection
 use aio::ui::events::ToggleEvent = air::event::ToggleEvent
 use aio::ui::events::TouchEvent = air::event::TouchEvent
 use aio::ui::events::TransitionEvent = air::event::TransitionEvent
@@ -4711,6 +4726,7 @@ use aio::ui::prelude::Signal = air::reactive::Signal
 use aio::ui::prelude::Suspense = air::dom::Suspense
 use aio::ui::prelude::SuspenseProps = air::dom::SuspenseProps
 use aio::ui::prelude::Task = air::task::Task
+use aio::ui::prelude::TextSelection = air::dom::TextSelection
 use aio::ui::prelude::ToggleEvent = air::event::ToggleEvent
 use aio::ui::prelude::TouchEvent = air::event::TouchEvent
 use aio::ui::prelude::TrackedMemo = air::global::TrackedMemo

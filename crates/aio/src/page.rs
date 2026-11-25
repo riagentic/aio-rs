@@ -237,15 +237,24 @@ pub const KEYS: &str = "for (const type of ['keydown', 'keyup']) document.addEve
 /// `data-aio-prevent="ArrowUp ArrowDown PageUp PageDown Home End Tab"` (key
 /// names as `KeyboardEvent.key` says them, any modifiers), those keys don't
 /// scroll or move the focus; the view still hears them. A field typed in
-/// keeps its own keys, and a modal dialog inside keeps its own Tab (this
-/// runs after the dialog's own Tab handling).
-pub const PREVENT: &str = "document.addEventListener('keydown', (e) => {
-  const t = e.target;
-  if (e.defaultPrevented || e.isComposing || !(t instanceof Element)) return;
-  if (t.matches('input, textarea, select') || t.isContentEditable) return;
-  const at = t.closest('[data-aio-prevent],[aria-modal=\"true\"]');
-  if (at && at.hasAttribute('data-aio-prevent') && at.getAttribute('data-aio-prevent').split(' ').includes(e.key)) e.preventDefault();
-});";
+/// keeps its own keys, but those it names itself (`data-aio-prevent` on the
+/// field: Tab kept in a textarea that indents), taken before anything else
+/// hears them, so a dialog's Tab doesn't move the focus out; a modal dialog
+/// inside keeps its own Tab (this runs after the dialog's own Tab handling).
+pub const PREVENT: &str = "(() => {
+  const named = (at, e) => at.getAttribute('data-aio-prevent').split(' ').includes(e.key);
+  const field = (t) => t.matches('input, textarea, select') || t.isContentEditable;
+  document.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (!e.isComposing && t instanceof Element && field(t) && t.hasAttribute('data-aio-prevent') && named(t, e)) e.preventDefault();
+  }, true);
+  document.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (e.defaultPrevented || e.isComposing || !(t instanceof Element) || field(t)) return;
+    const at = t.closest('[data-aio-prevent],[aria-modal=\"true\"]');
+    if (at && at.hasAttribute('data-aio-prevent') && named(at, e)) e.preventDefault();
+  });
+})();";
 
 /// An element that gets `data-aio-reveal` (or a new value of it: the
 /// cursor's index) is scrolled into view, nearest edge, as its frame is

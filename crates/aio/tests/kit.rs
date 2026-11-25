@@ -3122,3 +3122,175 @@ fn an_svg_built_without_rsx_draws_in_svgs_namespace() {
     assert_eq!(ns.as_str(), Some("http://www.w3.org/2000/svg"));
     assert_eq!(ui.rect("dot").width, 8.0, "drawn: a circle of radius 4");
 }
+
+/// A toy highlighter, as an app's would be: `let` is a keyword.
+fn toy(text: &str) -> Vec<Vec<(String, String)>> {
+    let run = |w: &str| (if w.trim() == "let" { "kw" } else { "" }.to_string(), w.to_string());
+    text.split('\n').map(|l| l.split_inclusive(' ').map(run).collect()).collect()
+}
+
+fn editor() -> View {
+    let code = signal(|| "let a = 1\n    let b = 2\nc".to_string());
+    let ran = signal(|| 0);
+    let field = signal(|| None::<std::rc::Rc<MountedData>>);
+    styled(rsx! {
+        Field { label: "Source",
+            CodeArea { "data-t": "code", style: "height: 150px", value: code.get(), oninput: move |v| code.set(v),
+                spans: toy(&code.get()), marks: vec![(0, "error".to_string()), (2, "current".to_string())],
+                onkeydown: move |e: KeyboardEvent| if e.key() == Key::Enter && e.modifiers().ctrl() { ran += 1 },
+                onmounted: move |e: MountedEvent| *field.write() = Some(e.data()),
+            }
+        }
+        p { "data-t": "ran", "{ran}" }
+        button { "data-t": "pick", onclick: move |_| async move {
+            field.get().unwrap().set_selection(TextSelection::range(4, 5)).await.expect("set")
+        }, "pick" }
+    })
+}
+
+/// The textarea's selection, as the page counts it.
+fn sel(ui: &mut TestUi) -> (u64, u64) {
+    let s = ui.eval(
+        "(() => { const t = document.querySelector('[data-t=code]'); return [t.selectionStart, t.selectionEnd]; })()",
+    );
+    (s[0].as_u64().unwrap(), s[1].as_u64().unwrap())
+}
+
+fn select(ui: &mut TestUi, a: usize, z: usize) {
+    ui.focus("code");
+    ui.eval(&format!("document.querySelector('[data-t=code]').setSelectionRange({a}, {z})"));
+}
+
+#[test]
+fn a_code_area_shows_the_apps_highlighting_and_marks_under_a_labelled_field() {
+    let mut ui = TestUi::new(editor);
+    assert_eq!(ui.count(".aio-code__lines[aria-hidden=true] > .aio-code__line"), 3);
+    assert_eq!(ui.count(".aio-code__line:nth-child(1).error") + ui.count(".aio-code__line:nth-child(3).current"), 2);
+    assert_eq!(
+        ui.eval("[...document.querySelectorAll('.kw')].map((e) => e.textContent)"),
+        serde_json::json!(["let ", "let "])
+    );
+    assert_eq!(ui.eval("document.querySelector('[data-t=code]').labels[0].textContent"), serde_json::json!("Source"));
+    assert_eq!(
+        ui.eval("document.querySelector('[data-t=code]').tagName"),
+        serde_json::json!("TEXTAREA"),
+        "the real control"
+    );
+    ui.type_text("code", " + let");
+    assert_eq!(ui.value("code"), "let a = 1\n    let b = 2\nc + let");
+    assert_eq!(ui.count(".kw"), 3, "highlighted as typed");
+    assert_eq!(ui.text("ran"), "0");
+    ui.press("code", "ctrl+Enter");
+    assert_eq!((ui.text("ran"), ui.value("code").lines().count()), ("1".into(), 3), "the app's key; no line put in");
+    ui.click("pick");
+    assert_eq!(sel(&mut ui), (4, 5), "its handle selects in it");
+}
+
+#[test]
+fn tab_indents_in_a_code_area_and_shift_tab_outdents_without_leaving_it() {
+    let mut ui = TestUi::new(editor);
+    select(&mut ui, 1, 1);
+    ui.press_key(Key::Tab, Modifiers::empty());
+    assert_eq!(ui.value("code").lines().next(), Some("l   et a = 1"), "spaces to the next stop");
+    assert_eq!((ui.focused().as_deref(), sel(&mut ui)), (Some("code"), (4, 4)));
+    ui.eval("document.execCommand('undo')");
+    ui.settle();
+    assert_eq!(ui.value("code"), "let a = 1\n    let b = 2\nc", "Ctrl+Z takes it back, and the app hears it");
+    // The first two lines, the second's end on the third's start: two lines.
+    select(&mut ui, 0, 24);
+    ui.press_key(Key::Tab, Modifiers::empty());
+    assert_eq!(ui.value("code"), "    let a = 1\n        let b = 2\nc");
+    assert_eq!(sel(&mut ui), (0, 32), "the lines stay selected");
+    ui.press_key(Key::Tab, Modifiers::SHIFT);
+    ui.press_key(Key::Tab, Modifiers::SHIFT);
+    assert_eq!(ui.value("code"), "let a = 1\nlet b = 2\nc", "out to the margin, no further");
+    assert_eq!(sel(&mut ui), (0, 20));
+    select(&mut ui, 13, 13);
+    ui.press_key(Key::Tab, Modifiers::SHIFT);
+    assert_eq!(ui.value("code"), "let a = 1\nlet b = 2\nc", "a caret's line with no indent: nothing");
+    assert_eq!(ui.focused().as_deref(), Some("code"));
+    ui.press_key(Key::Escape, Modifiers::empty());
+    ui.press_key(Key::Tab, Modifiers::empty());
+    assert_eq!(ui.focused().as_deref(), Some("pick"), "Escape, then Tab, leaves");
+    tab_to(&mut ui, "code");
+    ui.press_key(Key::Tab, Modifiers::empty());
+    assert_eq!(ui.focused().as_deref(), Some("code"), "and Tab indents again once back");
+}
+
+fn long() -> View {
+    let wrap = signal(|| false);
+    let code = signal(|| (0..60).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n") + &"x".repeat(300));
+    styled(rsx! {
+        button { "data-t": "wrap", onclick: move |_| wrap.set(true), "wrap" }
+        CodeArea { "data-t": "code", "aria-label": "Code", style: "height: 120px; width: 300px", wrap: wrap.get(), tab_size: 2,
+            value: code.get(), oninput: move |v| code.set(v), marks: vec![(59, "heat".to_string())] }
+    })
+}
+
+/// How the textarea lies over the copy: [its text's top and left minus the
+/// first row's text, how far line 60's row is from the first, a line's
+/// height, whether the textarea scrolls itself, the box's scroll top, how
+/// much taller the field's text is than the copy (its lines wrapped alike)].
+const LAYOUT: &str = "(() => {
+  const t = document.querySelector('[data-t=code]'), rows = document.querySelectorAll('.aio-code__text');
+  const a = t.getBoundingClientRect(), r0 = rows[0].getBoundingClientRect(), last = rows[rows.length - 1].getBoundingClientRect();
+  const s = getComputedStyle(t), lh = parseFloat(s.lineHeight), top = parseFloat(s.paddingTop);
+  const scrolls = !!(t.scrollTop || t.scrollLeft || t.scrollHeight > t.clientHeight + 1);
+  t.style.blockSize = '0px';
+  const text = t.scrollHeight - top;
+  t.style.blockSize = '';
+  return [Math.round(a.top + top - r0.top), Math.round(a.left - r0.left), Math.round(last.top - r0.top), lh, scrolls,
+    t.closest('.aio-code').scrollTop, Math.round(text - t.parentElement.querySelector('.aio-code__lines').getBoundingClientRect().height)];
+})()";
+
+#[test]
+fn a_code_areas_field_lies_on_its_copy_in_one_scroller_wrapped_or_not() {
+    use serde_json::json;
+    let mut ui = TestUi::new(long);
+    let same = ui.eval(
+        "(() => { const a = getComputedStyle(document.querySelector('[data-t=code]')), b = getComputedStyle(document.querySelector('.aio-code__text'));
+          return ['fontFamily', 'fontSize', 'lineHeight', 'letterSpacing', 'tabSize', 'whiteSpace'].filter((k) => a[k] !== b[k]); })()",
+    );
+    assert_eq!(same, serde_json::json!([]), "the same metrics in both layers");
+    let l = ui.eval(LAYOUT);
+    let lh = l[3].as_f64().unwrap();
+    assert_eq!((&l[0], &l[1], &l[4], &l[6]), (&json!(0), &json!(0), &json!(false), &json!(0)), "{l}");
+    assert!((l[2].as_f64().unwrap() - 59.0 * lh).abs() < 1.0, "row 60 where the field's line 60 is: {l}");
+    assert_eq!(ui.attr("code", "wrap").as_deref(), Some("off"));
+    assert!(
+        ui.eval("(() => { const b = document.querySelector('.aio-code'); return b.scrollWidth > b.clientWidth; })()")
+            == true,
+        "the long line scrolls sideways"
+    );
+    assert_eq!(ui.count(".aio-code__line:last-child.heat"), 1, "an app's own mark");
+    // Typing at the end: the box scrolls to the caret, the field never scrolls itself.
+    ui.focus("code");
+    ui.eval("(() => { const t = document.querySelector('[data-t=code]'); t.setSelectionRange(t.value.length, t.value.length); })()");
+    ui.press_key(Key::Enter, Modifiers::empty());
+    ui.type_text("code", "end");
+    let l = ui.eval(LAYOUT);
+    assert_eq!((&l[0], &l[4], &l[6]), (&json!(0), &json!(false), &json!(0)), "{l}");
+    assert!(l[5].as_f64().unwrap() > 60.0 * lh - 120.0, "the box shows the caret: {l}");
+    ui.click("wrap");
+    let l = ui.eval(LAYOUT);
+    assert_eq!(ui.attr("code", "wrap").as_deref(), Some("soft"));
+    assert_eq!((&l[0], &l[1], &l[4], &l[6]), (&json!(0), &json!(0), &json!(false), &json!(0)), "wrapped alike: {l}");
+    assert!(
+        ui.eval("(() => { const b = document.querySelector('.aio-code'); return b.scrollWidth <= b.clientWidth; })()")
+            == true,
+        "wrapped: no sideways scroll"
+    );
+    let tall =
+        ui.eval("document.querySelectorAll('.aio-code__line')[59].getBoundingClientRect().height").as_f64().unwrap();
+    assert!(tall > 3.0 * lh, "the long line wraps: {tall}");
+}
+
+#[test]
+fn an_ime_composition_shows_the_fields_own_text_while_it_lasts() {
+    let mut ui = TestUi::new(editor);
+    let hidden = "getComputedStyle(document.querySelector('.aio-code__text')).visibility";
+    ui.eval("document.querySelector('[data-t=code]').dispatchEvent(new CompositionEvent('compositionstart'))");
+    assert_eq!((ui.attr("code", "data-ime").as_deref(), ui.eval(hidden)), (Some(""), serde_json::json!("hidden")));
+    ui.eval("document.querySelector('[data-t=code]').dispatchEvent(new CompositionEvent('compositionend'))");
+    assert_eq!((ui.attr("code", "data-ime"), ui.eval(hidden)), (None, serde_json::json!("visible")));
+}
