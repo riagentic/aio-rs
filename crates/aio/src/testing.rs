@@ -13,6 +13,8 @@ mod electron;
 mod sim;
 #[cfg(feature = "kit")]
 mod ui;
+#[cfg(feature = "usb")]
+pub mod usb;
 #[cfg(feature = "kit")]
 mod video;
 

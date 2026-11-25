@@ -148,6 +148,7 @@ In `aio`: `aio::boot` (the boot report), `aio::paths` (where files are),
 | `aio::auth` | none (`oidc` for `auth::oidc`) | accounts, roles, passwords, TOTP, sessions |
 | `aio::capabilities` | none (`outbound` for the client) | the hosts outbound requests may reach |
 | `aio::secrets` (`set`, `get`, `delete`, `set_biometric`, `Secret`) | `secrets` | the OS's secret store: Keychain, Secret Service, DPAPI, Android's Keystore ([keychain](../auth/keychain.md)) |
+| `aio::hw` (`list`, `watch`, `open`, `Filter`, `Device`, `Interface`, `Control`) | `usb` | USB devices: bulk, interrupt and control transfers, held to `[capabilities] usb` ([USB devices](../devices/usb.md)) |
 | `aio::plugin` | none | a crate's cells, routes and hooks as one value |
 | `aio::compat` | `compat` (data: none) | aio's `state.db`, aio clients on `/ws`, `AioLink` |
 
@@ -169,6 +170,7 @@ In `aio`: `aio::boot` (the boot report), `aio::paths` (where files are),
 | `aio::testing::TestCells` | cells in a sandbox: `cell`, `start`, `effects`, `settle`, `advance`, `fuzz`, `as_client`, `saved` |
 | `aio::testing::TestUi` | the real views headless (feature `kit`) |
 | `aio::testing::TestServer`, `Sim`, `TestBrowser` | a server, simulated sync, a browser page (feature `server`) |
+| `aio::testing::usb` (`Device`, `plug`, `Plugged`, `Transfer`, `Reply`) | fake USB devices for `aio::hw` (feature `usb`) |
 | `aio::testing::{expect, seeded, totp_code, fails, exclusive}` | helpers; `exclusive()`: the test world to one test at a time |
 | `aio::log`, `trace!` … `error!` | the app's log (`logs/app.log`, `error.log`, `warning.log`) |
 | `aio::report`, `aio::feedback` | problem reports; a "Report a problem" UI |

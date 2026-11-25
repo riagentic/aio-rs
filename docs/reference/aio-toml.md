@@ -138,6 +138,7 @@ cookie = true
 
 [capabilities]
 network = []
+usb = []
 
 [updates]
 keys = []
@@ -496,6 +497,7 @@ require_verified = true
 | Key | Type | Default | What it is |
 |---|---|---|---|
 | `network` | hosts | `[]` | Hosts aio's outbound requests may reach besides this machine (loopback is always allowed). Everything else is refused. |
+| `usb` | devices | `[]` | The USB devices `aio::hw` may see and open: `"2c97"` (a vendor), `"1209:5342"` (a product), `"*"` (any). Every other device is invisible to the app. The APK offers itself for them on Android; the `.deb` installs their udev rule ([USB devices](../devices/usb.md)). |
 
 Each entry is one of: a host (`"api.example.org"`), a host and port
 (`"10.0.0.5:8443"`: only that port), `"*.example.org"` (any name under it,

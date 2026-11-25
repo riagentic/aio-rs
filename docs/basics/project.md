@@ -181,6 +181,8 @@ of aio-rs.
 | `web` | the app in the browser's page (`ax build --web`) |
 | `compat` | talking to aio (Deno) live: aio pages and tools on `/ws`, `aio::compat::AioLink`, `#[on_aio]` ([migration](../migration/README.md)); a ported app's `state.db` needs none of it |
 | `dev` | `ax dev`'s hot-patching (never in a release; `ax dev` turns it on) |
+| `secrets` | `aio::secrets`, the OS's secret store ([keychain](../auth/keychain.md)) |
+| `usb` | `aio::hw`, USB devices from the app's code; with `testing`, `aio::testing::usb`'s fake devices ([USB devices](../devices/usb.md)) |
 
 The templates: `app` uses `kit` (and `web` for its browser build),
 `service` uses `net`, `cli` none; each gives its tests `testing` as a

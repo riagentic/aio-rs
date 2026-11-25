@@ -127,6 +127,10 @@ pub fn deb(b: &Built) -> Result<PathBuf, String> {
                 put(&root.join(format!("usr/share/icons/hicolor/scalable/apps/{id}.svg")), &svg, 0o644)?;
             }
         }
+        // The devices of `[capabilities] usb`, open to the person at the machine.
+        if let Some(rules) = aio_config::capabilities::udev_rules(id, &b.cfg.capabilities.usb) {
+            put(&root.join(format!("usr/lib/udev/rules.d/70-{id}.rules")), rules.as_bytes(), 0o644)?;
+        }
         let control = deb_control(app, b.platform.arch, maintainer, dir_kb(&root));
         put(&root.join("DEBIAN/control"), control.as_bytes(), 0o644)?;
         open_dirs(&root)?;

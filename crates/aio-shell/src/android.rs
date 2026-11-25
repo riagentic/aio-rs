@@ -114,7 +114,64 @@ pub fn start(env: &mut JNIEnv, class: &JClass, files: &JString, app: &App) -> Re
     eprintln!("[aio] {} started on Android", cfg.app.id);
     let page = HOST.get_or_init(|| host).page.clone();
     _ = aio::KEYSTORE.set(aio::Keystore { seal: |b, d| keystore("seal", b, d), open: |b, d| keystore("open", b, d) });
+    _ = aio::USB_HOST.set(aio::UsbHost { list: usb_list, open: usb_open });
     Ok(page)
+}
+
+/// `aio::hw`'s devices: `aio.rt.Host.usbList`'s JSON.
+fn usb_list() -> std::io::Result<String> {
+    host_call(|env, class| {
+        let got = env.call_static_method(class, "usbList", "()Ljava/lang/String;", &[])?.l()?;
+        Ok(env.get_string(&JString::from(got))?.into())
+    })
+}
+
+/// `aio::hw`'s device `id` opened (`aio.rt.Host.usbOpen`), the user asked
+/// first if the app may not yet: on the caller's thread (a worker's: it
+/// blocks while the user is asked). Its descriptor, now this library's.
+fn usb_open(id: i32) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    let fd = host_call(|env, class| env.call_static_method(class, "usbOpen", "(I)I", &[JValue::Int(id)])?.i())?;
+    // SAFETY: the activity detached this descriptor for this library.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+/// `f` with the Java side, on the caller's thread; a Java exception is
+/// said by its kind: the user said no, the device is gone.
+fn host_call<T>(f: impl FnOnce(&mut JNIEnv, &GlobalRef) -> jni::errors::Result<T>) -> std::io::Result<T> {
+    let h = HOST.get().ok_or_else(|| std::io::Error::other("the app has not started"))?;
+    let mut env = h.vm.attach_current_thread_permanently().map_err(std::io::Error::other)?;
+    env.with_local_frame(8, |env| -> jni::errors::Result<std::io::Result<T>> {
+        match f(env, &h.class) {
+            Ok(v) => Ok(Ok(v)),
+            Err(jni::errors::Error::JavaException) => {
+                let ex = env.exception_occurred()?;
+                env.exception_clear()?;
+                let said = env.call_method(&ex, "getMessage", "()Ljava/lang/String;", &[])?.l()?;
+                let said: String = match said.is_null() {
+                    true => "(no message)".into(),
+                    false => env.get_string(&JString::from(said))?.into(),
+                };
+                use std::io::ErrorKind as K;
+                let kind = if env.is_instance_of(&ex, "java/lang/SecurityException")? {
+                    K::PermissionDenied
+                } else if env.is_instance_of(&ex, "java/io/FileNotFoundException")? {
+                    K::NotConnected
+                } else {
+                    K::Other
+                };
+                Ok(Err(std::io::Error::new(kind, said)))
+            }
+            Err(e) => Err(e),
+        }
+    })
+    .map_err(std::io::Error::other)?
+}
+
+/// A USB device came or went (`aio.rt.Host.usbChanged`): `aio::hw`'s
+/// watches look again.
+pub fn usb_changed() {
+    aio::usb_changed();
 }
 
 /// `aio::secrets`' sealing (`aio.rt.Host.seal` or `open`, `method`), on the
@@ -483,6 +540,14 @@ macro_rules! android_app {
             error: $crate::android::jni::objects::JString<'l>,
         ) {
             $crate::android::answer(&mut env, id, &names, &fds, &error)
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_aio_rt_Host_usbChanged<'l>(
+            _: $crate::android::jni::JNIEnv<'l>,
+            _: $crate::android::jni::objects::JClass<'l>,
+        ) {
+            $crate::android::usb_changed()
         }
 
         #[unsafe(no_mangle)]

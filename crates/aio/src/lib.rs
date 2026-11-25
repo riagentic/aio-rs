@@ -109,6 +109,8 @@ pub mod fmt;
 #[cfg(doctest)]
 mod guide;
 pub mod head;
+#[cfg(feature = "usb")]
+pub mod hw;
 #[cfg(feature = "kit")]
 pub mod kit;
 #[cfg(target_arch = "wasm32")]
@@ -1127,6 +1129,35 @@ pub struct Keystore {
 #[cfg(target_os = "android")]
 #[doc(hidden)]
 pub static KEYSTORE: std::sync::OnceLock<Keystore> = std::sync::OnceLock::new();
+
+/// Android's USB host API, as aio-shell's host hands it in at start: the
+/// devices plugged in (JSON, `aio.rt.Host.usbList`) and one opened by its
+/// id (its usbfs descriptor), blocking while the user is asked. `aio::hw`
+/// reads it.
+#[cfg(target_os = "android")]
+#[doc(hidden)]
+pub struct UsbHost {
+    pub list: fn() -> std::io::Result<String>,
+    pub open: fn(i32) -> std::io::Result<std::os::fd::OwnedFd>,
+}
+
+/// The [`UsbHost`] aio-shell's Android host handed in.
+#[cfg(target_os = "android")]
+#[doc(hidden)]
+pub static USB_HOST: std::sync::OnceLock<UsbHost> = std::sync::OnceLock::new();
+
+/// A USB device came or went (Android's broadcast, through aio-shell's
+/// host): `aio::hw`'s watches look again.
+#[cfg(target_os = "android")]
+#[doc(hidden)]
+pub fn usb_changed() {
+    USB_CHANGED.send_modify(|n| *n = n.wrapping_add(1));
+}
+
+#[cfg(target_os = "android")]
+#[cfg_attr(not(feature = "usb"), allow(dead_code))]
+static USB_CHANGED: std::sync::LazyLock<tokio::sync::watch::Sender<u64>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::Sender::new(0));
 
 #[cfg(not(target_arch = "wasm32"))]
 type Closer =

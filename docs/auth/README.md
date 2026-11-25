@@ -926,6 +926,9 @@ allows it.
 The hosts `aio.toml` itself names (`[client] server`, `[updates] url`,
 `[feedback] url`) must be in it: the build says which is missing.
 
+`[capabilities] usb` does the same for USB devices: `aio::hw` sees only
+the vendors and products it names ([USB devices](../devices/usb.md#who-may-open-what)).
+
 ## The local door and the window
 
 - The app's own tools (`ax state`, `ax call`, time travel) reach a

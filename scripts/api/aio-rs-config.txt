@@ -10,8 +10,12 @@ aio_config::budgets::Budgets.state: Option<u64>
 aio_config::budgets::parse_rate: fn parse_rate(s: &str, key: &str) -> Result<f64, String>
 aio_config::budgets::parse_size: fn parse_size(s: &str, key: &str) -> Result<u64, String>
 aio_config::capabilities::allows: fn allows(network: &[String], host: &str, port: Option<u16>) -> bool
+aio_config::capabilities::allows_usb: fn allows_usb(usb: &[String], vendor: u16, product: u16) -> bool
 aio_config::capabilities::bad_entry: fn bad_entry(entry: &str) -> Option<String>
 aio_config::capabilities::host_port: fn host_port(target: &str) -> (String, Option<u16>)
+aio_config::capabilities::udev_rule: fn udev_rule(vendor: u16, product: Option<u16>) -> String
+aio_config::capabilities::udev_rules: fn udev_rules(id: &str, usb: &[String]) -> Option<String>
+aio_config::capabilities::usb_entry: fn usb_entry(entry: &str) -> Result<(Option<u16>, Option<u16>), String>
 aio_config::config::Accounts.cookie: bool
 aio_config::config::Accounts.max_sessions: Option<u32>
 aio_config::config::Accounts.on: bool
@@ -70,6 +74,7 @@ aio_config::config::Build.splash: Option<Splash>
 aio_config::config::Build.targets: Vec<Target>
 aio_config::config::Build.windows: WindowsBuild
 aio_config::config::Capabilities.network: Vec<String>
+aio_config::config::Capabilities.usb: Vec<String>
 aio_config::config::Client.retention: Option<std::time::Duration>
 aio_config::config::Client.server: Option<String>
 aio_config::config::Client.strict_pin: bool

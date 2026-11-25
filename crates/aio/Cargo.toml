@@ -88,6 +88,9 @@ dev = ["dep:aio-hotpatch", "air?/dev", "aio-config/dev"]
 # `aio::secrets`: the OS's secret store (Keychain, Secret Service, DPAPI,
 # Android's Keystore), on what each OS already has: no crate.
 secrets = ["windows-sys/Win32_Security_Cryptography"]
+# `aio::hw`: USB devices (list, watch, open, transfers), held to
+# `[capabilities] usb`; with `testing`, `aio::testing::usb`'s fake devices.
+usb = ["dep:nusb"]
 # `aio::imbl`: persistent collections, so a call's copy of big state is O(1).
 imbl = ["dep:imbl"]
 # The `updates` cell (`aio::update::Updates`, `share`): what an app's UI shows
@@ -213,6 +216,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "proces
 ring = "0.17"
 # The local door's frames (`door`).
 bytes = "1"
+# `aio::hw`: USB devices from the app's code, pure Rust over each OS's own
+# USB stack (usbfs, WinUSB, IOKit; Android's from the fd the OS hands out).
+nusb = { version = "0.2", optional = true }
 tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
 
 # The browser build: the page's clock, randomness, socket and storage.
@@ -294,3 +300,7 @@ required-features = ["net", "compat"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "usb"
+required-features = ["usb"]
