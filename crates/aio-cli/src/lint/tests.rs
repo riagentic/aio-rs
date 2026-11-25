@@ -852,6 +852,12 @@ fn clippy_json_becomes_findings_once_each_in_the_project() {
             (Severity::Error, "rustc", "src/ui.rs".into(), "see unused_imports".into()),
         ]
     );
+    // An error whose fix is aio's says it instead.
+    let page = serde_json::json!({"reason": "compiler-message", "message": {"level": "error",
+        "message": "cannot find function `part` in this scope", "code": {"code": "E0425"},
+        "spans": [{"file_name": "app/src/page.rs", "line_start": 4, "is_primary": true}]}});
+    let fix = clippy_issues(&page.to_string(), root, &root.join("app")).remove(0).fix.unwrap();
+    assert!(fix.contains("use crate::prelude::*;"), "{fix}");
 }
 
 #[test]

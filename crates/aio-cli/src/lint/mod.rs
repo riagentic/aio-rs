@@ -491,7 +491,9 @@ pub fn clippy_issues(stdout: &str, root: &Path, dir: &Path) -> Vec<Issue> {
             message: m["message"].as_str().unwrap_or_default().to_string(),
             file: Some(rel.to_string_lossy().replace('\\', "/")),
             line: span["line_start"].as_u64().map(|l| l as usize),
-            fix: (!code.is_empty()).then(|| format!("see {code}")),
+            fix: crate::dev::hint(m["message"].as_str().unwrap_or_default())
+                .map(String::from)
+                .or_else(|| (!code.is_empty()).then(|| format!("see {code}"))),
             fixable: machine.then_some("--safe-fix"),
         };
         if !out.contains(&issue) {

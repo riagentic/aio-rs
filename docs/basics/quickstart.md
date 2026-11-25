@@ -154,6 +154,18 @@ pub fn App() -> View {
         style { {aio::use_css!(aio::ui::scheme(), &theme; "assets/style.css")} }
         main { class: "container",
             h1 { "data-t": "count", "{n}" }
+            controls::Controls {}
+        }
+    }
+}
+
+mod controls {
+    use super::prelude::*;
+
+    #[component]
+    pub fn Controls() -> View {
+        let n = part(|c| &c.count);
+        rsx! {
             button { class: aio::ui::btn("primary"), onclick: move |_| _ = act!(add(1)), "Add" }
             button { class: aio::ui::btn("ghost"), onclick: move |_| _ = act!(add(-1)), "Subtract" }
             button { class: aio::ui::btn("ghost"), disabled: n.get() == 0, onclick: move |_| _ = act!(reset()), "Reset" }
@@ -163,7 +175,11 @@ pub fn App() -> View {
 ```
 
 - `aio::client!` connects the views to the cell (it makes `SOURCE`,
-  `part`, `use_live` and the rest for this cell).
+  `part`, `use_live` and the rest for this cell, and a `prelude` with
+  them and the view API).
+- `controls` is a second module, as a page grows into: it takes the
+  client's names from that prelude (`use crate::prelude::*;` in a file of
+  its own, `src/controls.rs`).
 - `part(|c| &c.count)` is a handle on one field: a hole of `rsx!` reading
   it (`"{n}"`, `n.get()`) runs again only when it changes (a view's body
   runs once).

@@ -75,10 +75,25 @@ version may break things.
 
 ### Added
 
+- `aio::client!` also makes `prelude`, a module with its items (`part`,
+  `Ui` that `act!` calls through, the cell's reader, `use_live`…) and the
+  view API: another module of the crate (a page) needs one line,
+  `use crate::prelude::*;`, where each page module failed with dozens of
+  `cannot find function part` / `cannot find type Ui` errors until it
+  found `use crate::*;`. `ax dev` and `ax lint` add that line to those
+  errors as the fix, `ax create`'s template draws its buttons from a
+  second module that uses it, and `ax add cell`'s file says it
+  ([views](docs/ui/views.md#what-client-makes)).
 - `ax lint` warns of a literal `data-t` equal to the id of a kit `Tab`
   the same component makes (`Tab::new("gpu", …)` beside a
   `Select { "data-t": "gpu" }`): a tab's id is its handle, so `ax trigger`
   and tests met two elements by one name, though `data-t` was written once.
+- The guide says how to read a field that isn't `Copy` from a client's
+  state (`todo().title.clone()`; why no getter is made) and how to keep
+  app-lifetime state that isn't saved: a `Global` filled by
+  `spawn_forever` + `off_thread`, read by a test with `ui.read(&GLOBAL)`
+  ([views](docs/ui/views.md#app-lifetime-state-that-isnt-saved)); `ax
+  agent ui` says both.
 - `aio::capabilities::network()`: this process's `[capabilities] network`
   list, `None` when it is not held.
 - `aio::http::content_name(name, bytes)`: a file's name by its content
@@ -200,6 +215,10 @@ version may break things.
 
 ### Changed
 
+- **Breaking:** a module named `prelude` beside an `aio::client!(..)`
+  call collides with the one it makes now: rename yours, or move the
+  `client!` into a module of its own
+  ([migration](docs/migration/0.4-to-0.5.md#views)).
 - `ax lint`'s view checks (hooks, signal guards, `rsx!` markup) run only
   on crates that can hold views: those depending on aio-rs or air, by
   their own dependency, through `[workspace.dependencies]` or through a
