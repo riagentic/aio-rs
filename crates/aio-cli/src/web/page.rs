@@ -131,3 +131,21 @@ pub fn votes() -> String {
 pub fn vote() -> bool {
     VOTES.with_borrow(|v| v.as_ref().is_some_and(|v| v.vote().is_ok()))
 }
+
+/// `aio::secrets` in the page: `op` (`set`, `bio`, `get`, `delete`) of
+/// secret `name`, its answer or its error's kind and words, as JSON.
+#[wasm_bindgen]
+pub async fn secret(op: String, name: String, value: String) -> String {
+    use aio::secrets;
+    let r = match op.as_str() {
+        "set" => secrets::set(&name, value.as_bytes()).await.map(|_| aio::serde_json::Value::Null),
+        "bio" => secrets::set_biometric(&name, value.as_bytes()).await.map(|_| aio::serde_json::Value::Null),
+        "get" => secrets::get(&name).await.map(|s| s.map(|s| String::from_utf8_lossy(&s).into_owned()).into()),
+        _ => secrets::delete(&name).await.map(|_| aio::serde_json::Value::Null),
+    };
+    match r {
+        Ok(v) => aio::serde_json::json!({ "ok": v }),
+        Err(e) => aio::serde_json::json!({ "err": format!("{:?}", e.kind()), "why": e.to_string() }),
+    }
+    .to_string()
+}

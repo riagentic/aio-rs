@@ -1578,7 +1578,7 @@ pub(crate) mod browser {
         let manifest = format!(
             "[package]\nname = \"webpage\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n\
              [lib]\ncrate-type = [\"cdylib\"]\n\n[dependencies]\n\
-             aio = {{ package = \"aio-rs\", path = {:?}, default-features = false, features = [\"web\", \"kit\"] }}\n\
+             aio = {{ package = \"aio-rs\", path = {:?}, default-features = false, features = [\"web\", \"kit\", \"secrets\"] }}\n\
              wasm-bindgen = \"0.2\"\nwasm-bindgen-futures = \"0.4\"\njs-sys = \"0.3\"\n\
              web-sys = {{ version = \"0.3\", features = [\"Location\", \"Window\"] }}\n\n[workspace]\n",
             aio.display().to_string()
@@ -2236,6 +2236,131 @@ pub(crate) mod browser {
         t.eval("document.getElementById('out').click() || true").await.unwrap();
         until(&mut t, "window.ready", json!("unlinked")).await;
         until(&mut t, who, json!("nobody")).await;
+    }
+
+    /// `aio::secrets` in the page (`op` of `name`), as the page answers.
+    async fn secret(t: &mut crate::cdp::Session, op: &str, name: &str, value: &str) -> Value {
+        let call = format!("import('./app.js').then((m) => m.secret('{op}', '{name}', '{value}')).then(JSON.parse)");
+        t.eval(&call).await.unwrap()
+    }
+
+    /// A virtual authenticator in tab `t` (Chromium's, as a phone's or a
+    /// security key's passkeys), with PRF (hmac-secret) or not: its id.
+    async fn authenticator(t: &mut crate::cdp::Session, prf: bool) -> String {
+        let o = json!({ "protocol": "ctap2", "ctap2Version": "ctap2_1", "transport": "internal", "hasResidentKey": true,
+                        "hasUserVerification": true, "isUserVerified": true, "hasPrf": prf,
+                        "automaticPresenceSimulation": true });
+        let a = t.call("WebAuthn.addVirtualAuthenticator", json!({ "options": o })).await.unwrap();
+        a["authenticatorId"].as_str().unwrap().to_string()
+    }
+
+    /// The passkeys authenticator `a` keeps.
+    async fn passkeys(t: &mut crate::cdp::Session, a: &str) -> usize {
+        let c = t.call("WebAuthn.getCredentials", json!({ "authenticatorId": a })).await.unwrap();
+        c["credentials"].as_array().unwrap().len()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_pages_secrets_are_sealed_by_its_passkeys_prf_and_kept_as_ciphertext_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(site) = tokio::task::spawn_blocking({
+            let d = dir.path().to_path_buf();
+            move || site(&d)
+        })
+        .await
+        .unwrap() else {
+            return;
+        };
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        // A passkey's origin is a domain's: `localhost`, not an IP.
+        let url = format!("http://localhost:{port}/");
+        let _server = super::browser_air::serve(site, l);
+        let Some(c) = Chromium::open(&url) else {
+            return skipped("no Chromium");
+        };
+        let mut t = c.tabs(&url, 1).await.remove(0);
+        // The module started: a get of nothing answers (and asks no one).
+        let started = "import('./app.js').then((m) => m.secret('get', 'a', '')).then(() => true, () => false)";
+        until(&mut t, started, json!(true)).await;
+        t.call("WebAuthn.enable", json!({ "enableUI": false })).await.unwrap();
+        let ok = json!({ "ok": null });
+        let stored = "Object.keys(localStorage).filter((k) => k.startsWith('aio-secrets/')).sort()";
+
+        // A passkey without PRF: nothing kept, saying so and what to do.
+        let plain = authenticator(&mut t, false).await;
+        let r = secret(&mut t, "set", "tok", "hunter2").await;
+        assert_eq!(r["err"], "Unsupported", "{r}");
+        assert!(r["why"].as_str().unwrap().contains("no PRF") && r["why"].as_str().unwrap().contains("ask the user"));
+        assert_eq!(t.eval(stored).await.unwrap(), json!([]), "neither the secret nor the passkey's id");
+        t.call("WebAuthn.removeVirtualAuthenticator", json!({ "authenticatorId": plain })).await.unwrap();
+
+        let a = authenticator(&mut t, true).await;
+        assert_eq!(secret(&mut t, "get", "tok", "").await, ok, "none kept");
+        assert_eq!(passkeys(&mut t, &a).await, 0, "a get makes no passkey");
+        let r = secret(&mut t, "get", "Tok", "").await;
+        assert_eq!(r["err"], "InvalidInput", "{r}");
+        // The first set makes the app's passkey; the secret is kept sealed.
+        assert_eq!(secret(&mut t, "set", "tok", "hunter2").await, ok);
+        assert_eq!(passkeys(&mut t, &a).await, 1);
+        assert_eq!(t.eval(stored).await.unwrap(), json!(["aio-secrets/passkey", "aio-secrets/s_tok"]));
+        let sealed = "atob(localStorage.getItem('aio-secrets/s_tok'))";
+        let sealed = t.eval(sealed).await.unwrap();
+        let sealed = sealed.as_str().unwrap();
+        assert!(
+            sealed.starts_with('\u{1}') && sealed.chars().count() == 1 + 12 + 7 + 16 && !sealed.contains("hunter2"),
+            "{sealed:?}"
+        );
+        assert_eq!(secret(&mut t, "get", "tok", "").await, json!({ "ok": "hunter2" }));
+        assert_eq!(secret(&mut t, "set", "tok", "second").await, ok);
+        assert_eq!(secret(&mut t, "get", "tok", "").await, json!({ "ok": "second" }), "set replaces");
+        // One passkey for the app: a second secret, user-verified each time.
+        assert_eq!(secret(&mut t, "bio", "pin", "1234").await, ok);
+        assert_eq!(secret(&mut t, "get", "pin", "").await, json!({ "ok": "1234" }));
+        assert_eq!(passkeys(&mut t, &a).await, 1);
+        // Changed or moved under another name: opened by no key.
+        t.eval("localStorage.setItem('aio-secrets/s_x', localStorage.getItem('aio-secrets/s_pin'))").await.unwrap();
+        let r = secret(&mut t, "get", "x", "").await;
+        assert_eq!(r["err"], "InvalidData", "{r}");
+        assert!(r["why"].as_str().unwrap().contains("delete it and set it again"), "{r}");
+        let flip = "{ const b = atob(localStorage.getItem('aio-secrets/s_pin')); \
+                    localStorage.setItem('aio-secrets/s_pin', btoa(b.slice(0, 20) + String.fromCharCode(b.charCodeAt(20) ^ 1) + b.slice(21))) }";
+        t.eval(flip).await.unwrap();
+        assert_eq!(secret(&mut t, "get", "pin", "").await["err"], "InvalidData");
+        assert_eq!(secret(&mut t, "delete", "pin", "").await, ok);
+        assert_eq!(secret(&mut t, "delete", "pin", "").await, ok);
+        assert_eq!(secret(&mut t, "get", "pin", "").await, ok);
+        // Another passkey made since (this one's id gone): the old secret opens no more.
+        // Made by a passkey that says only that it has PRF (many security
+        // keys): its output asked for next.
+        let enabled_only = "{ const f = PublicKeyCredential.prototype.getClientExtensionResults; \
+            PublicKeyCredential.prototype.getClientExtensionResults = function () { const r = f.call(this); \
+              return this.response instanceof AuthenticatorAttestationResponse ? { prf: { enabled: r.prf.enabled } } : r } }";
+        t.eval(enabled_only).await.unwrap();
+        t.eval("localStorage.removeItem('aio-secrets/passkey')").await.unwrap();
+        assert_eq!(secret(&mut t, "set", "new", "n").await, ok);
+        assert_eq!(passkeys(&mut t, &a).await, 1, "made again: it replaced the old one");
+        assert_eq!(secret(&mut t, "get", "tok", "").await["err"], "InvalidData");
+        assert_eq!(secret(&mut t, "get", "new", "").await, json!({ "ok": "n" }));
+        // Not verified (a wrong fingerprint, no PIN): the user said no.
+        t.call("WebAuthn.setUserVerified", json!({ "authenticatorId": a, "isUserVerified": false })).await.unwrap();
+        let r = secret(&mut t, "get", "new", "").await;
+        assert_eq!(r["err"], "PermissionDenied", "{r}");
+        // The passkey gone from the device: not there to ask.
+        t.call("WebAuthn.removeVirtualAuthenticator", json!({ "authenticatorId": a })).await.unwrap();
+        let other = authenticator(&mut t, true).await;
+        assert_eq!(secret(&mut t, "get", "new", "").await["err"], "PermissionDenied");
+        t.call("WebAuthn.removeVirtualAuthenticator", json!({ "authenticatorId": other })).await.unwrap();
+
+        // An IP's page has no passkeys: said, nothing kept.
+        let ip = format!("http://127.0.0.1:{port}/");
+        t.call("Page.navigate", json!({ "url": ip })).await.unwrap();
+        until(&mut t, &format!("location.host.startsWith('127.') && {started}"), json!(true)).await;
+        authenticator(&mut t, true).await;
+        let r = secret(&mut t, "set", "tok", "v").await;
+        assert_eq!(r["err"], "Unsupported", "{r}");
+        assert!(r["why"].as_str().unwrap().contains("can't use a passkey"), "{r}");
+        assert_eq!(t.eval(stored).await.unwrap(), json!([]));
     }
 }
 
