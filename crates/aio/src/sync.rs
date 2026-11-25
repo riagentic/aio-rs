@@ -1548,7 +1548,7 @@ fn evictable(oldest: Option<i64>, keep: Option<Duration>, now: i64) -> Option<Du
 
 /// A call made on the copy, waiting for the server.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct Pending {
+pub(crate) struct Pending {
     op: String,
     method: String,
     args: Value,
@@ -1672,18 +1672,10 @@ impl Copy {
 
     /// The calls still waiting, replayed on `from`.
     fn replayed(&self, from: &dyn AnyCell) -> St {
-        let mut st = from.dup();
-        for p in self.pending.iter().filter(|p| !p.waits) {
-            let cx = Cx::replay(p.at, p.inputs.clone(), &self.by);
-            let mut next = st.dup();
-            let applied =
-                crate::store::apply_guarded(own(&mut next), &cx, &p.method, p.args.clone()).map_err(Rejected::from);
-            if applied.and_then(|_| next.check()).is_ok() {
-                st = next;
-            }
-        }
-        st
+        (self.kind.replayed)(from, &self.pending, &self.by)
     }
+
+
 
     /// Own call `op` is in the confirmed copy (the server sends its change
     /// before its reply): no longer replayed on top of it.
@@ -1702,6 +1694,23 @@ impl Copy {
         }
         Some((self.view.clone(), self.shown.to_json().ok()?))
     }
+}
+
+/// `pending` (by `by`) replayed on cell `T`'s state `from`: a call that
+/// no longer applies is skipped (the server will refuse it). Typed: it runs
+/// for each waiting call on every call made ([`Kind::replayed`]).
+pub(crate) fn replayed<T: Cell>(from: &dyn AnyCell, pending: &[Pending], by: &By) -> St {
+    let mut st = crate::kind::typed_ref::<T>(from).clone();
+    for p in pending.iter().filter(|p| !p.waits) {
+        let cx = Cx::replay(p.at, p.inputs.clone(), by);
+        let mut next = st.clone();
+        let applied =
+            crate::store::apply_guarded(&mut next, &cx, &p.method, p.args.clone()).map_err(Rejected::from);
+        if applied.and_then(|_| next.check()).is_ok() {
+            st = next;
+        }
+    }
+    Arc::new(st)
 }
 
 /// What a copy keeps on disk (`Remote::connect_saved`): the server's view it
