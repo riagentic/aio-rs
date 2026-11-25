@@ -156,10 +156,10 @@ q.enqueue("deploy, then fail".into()).unwrap();
 assert_eq!((one, q.state().waiting()), (1, 2));
 assert!(q.enqueue("  ".into()).is_err());
 
-t.advance(1_000); // the first tick starts job 1; its 2 s of work run at once
+t.advance(Duration::from_secs(1)); // the first tick starts job 1; its 2 s of work run at once
 assert_eq!(q.state().jobs[0].status, Status::Done);
 assert_eq!(q.state().jobs[1].status, Status::Waiting, "one job at a time");
-t.advance(1_000);
+t.advance(Duration::from_secs(1));
 assert_eq!((q.state().done, q.state().failed), (1, 1));
 assert_eq!(q.state().jobs[1].said.as_deref(), Some("deploy, then fail: exit 1"));
 

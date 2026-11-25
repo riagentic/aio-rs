@@ -73,7 +73,7 @@ fn who(user: &str, role: Option<&str>) -> Caller {
 
 fn denied(r: Result, why: &str) {
     match r {
-        Err(e) => assert!(e.code() == Some(aio::Code::AccessDenied) && e.why.contains(why), "{e}"),
+        Err(e) => assert!(e.code == Some(aio::Code::AccessDenied) && e.why.contains(why), "{e}"),
         Ok(()) => panic!("allowed, expected: {why}"),
     }
 }

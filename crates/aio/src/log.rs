@@ -3,7 +3,7 @@
 //! stamped with UTC time; errors also in `error.log`, warnings in
 //! `warning.log`. Files rotate at `[log] file_mb` and `keep` are kept, so
 //! logs stay within their budget. Credentials are masked (`report::redact`).
-//! Every `[log] heartbeat` seconds a line says uptime, calls and errors; at
+//! Every `[log] heartbeat` a line says uptime, calls and errors; at
 //! `debug`, each call is a line (never its arguments).
 //!
 //! Structured lines: `aio::info!("saved")`, `aio::warn!(cat: "net", peer = id,
@@ -629,14 +629,11 @@ pub fn beat(up: std::time::Duration, calls: u64, errors: u64) -> String {
     render(Level::Info, "aio", "heartbeat", &[("uptime", &up), ("calls", &calls), ("errors", &errors)])
 }
 
-/// Every `[log] heartbeat` seconds, one line that says the app is alive and
-/// how it is doing, until [`finish`].
+/// Every `[log] heartbeat`, one line that says the app is alive and how
+/// it is doing, until [`finish`].
 fn heartbeat() {
-    let every = std::time::Duration::from_secs(settings().heartbeat);
     let run = RUN.fetch_add(1, Relaxed) + 1;
-    if every.is_zero() {
-        return;
-    }
+    let Some(every) = settings().heartbeat else { return };
     let t0 = std::time::Instant::now();
     _ = std::thread::Builder::new().name("aio-heartbeat".into()).spawn(move || {
         loop {

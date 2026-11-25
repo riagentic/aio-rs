@@ -120,7 +120,7 @@ other.
   `effectTimeoutMs`): one that never settles is cut off, logged and
   reported, its later steps never run, and its caller is told. `#[long]`
   lifts the ceiling for a method that legitimately waits (a long download);
-  `#[long(ms)]` sets that method's own.
+  `#[long("2m")]` sets that method's own.
 
 ## What happens to an effect
 
@@ -270,7 +270,7 @@ assert_eq!(end.now(), Some(Ok(())), "and its caller has the end");
   (aio's `concurrency: "first"`). `cx.abort("scan")` stops every call of
   `scan`. Without one, overlapping calls'
   awaits run in turn.
-- `#[ttl(ms)]` answers a repeated call with the same arguments within
+- `#[ttl("1m")]` answers a repeated call with the same arguments within
   `ms` of a finished one with its kept answer, without running it again
   (aio's `ttl`); its effects are keyed by the arguments. A network
   caller's answer is kept for that caller (user and role) alone, and a
@@ -477,6 +477,7 @@ retries, session timeouts); in short:
 ```rust
 use aio::prelude::*;
 use aio::testing::TestCells;
+use std::time::Duration;
 
 #[cell(persist)]
 pub struct Feed {
@@ -506,7 +507,7 @@ impl Feed {
 let mut t = TestCells::new();
 let h = t.cell::<Feed>();
 h.remind_later().unwrap();
-t.advance(60_000); // the virtual clock: schedules fire, effects settle
+t.advance(Duration::from_secs(60)); // the virtual clock: schedules fire, effects settle
 assert_eq!((h.state().ticks, h.state().reminders), (1, 1));
 # }
 ```
@@ -632,7 +633,7 @@ until the test lets them run, and their sleeps and timeouts pass at once.
 |---|---|
 | `t.effects()` | the effects asked for that haven't started (`Cell.key`), in order |
 | `t.settle()` | start them and wait until they, and all they lead to, are done (5 s at most, then it panics naming those still running) |
-| `t.advance(ms)` | move the clock: schedules fire, then everything settles |
+| `t.advance(d)` | move the clock: schedules fire, then everything settles |
 | `t.failures()` | take the failed effect and schedule calls, so the test's end doesn't fail on them |
 
 ```rust

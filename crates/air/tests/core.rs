@@ -366,6 +366,19 @@ fn an_effect_older_than_a_global_memo_it_reads_never_sees_it_stale() {
     assert_eq!(said(), ["1 11"], "one run, with the sum of the new left");
 }
 
+#[test]
+fn a_global_memo_read_untracked_runs_nothing_again() {
+    fn app() -> View {
+        effect(|| log(format!("{} {} {}", LEFT.get(), SUM.with_untracked(|s| *s), *SUM.read_untracked())));
+        rsx! { button { "data-t": "right", onclick: move |_| RIGHT.update(|n| *n += 1), "+" } }
+    }
+    said();
+    let mut p = TestPage::mount(app);
+    assert_eq!(said(), ["0 10 10"]);
+    p.click("right");
+    assert!(said().is_empty(), "the sum changed, and the effect never subscribed to it");
+}
+
 static DOUBLE: GlobalMemo<u32> = GlobalMemo::new(|| SUM.get() * 2);
 
 #[test]

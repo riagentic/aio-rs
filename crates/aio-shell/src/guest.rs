@@ -66,6 +66,7 @@ pub const PERMISSIONS: [&str; 13] = [
 /// Why `name` cannot be a guest preload's name, if it cannot (aio
 /// `guestPreloadRefusal`): it reads the same on every OS and in a URL, and
 /// never climbs out of the folder it is in.
+#[doc(hidden)]
 pub fn preload_refusal(name: &str) -> Option<&'static str> {
     if name.is_empty() {
         return Some("it is empty");

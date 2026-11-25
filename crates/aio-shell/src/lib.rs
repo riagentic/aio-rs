@@ -110,6 +110,9 @@ pub use aio::config::Dir;
 #[cfg(target_os = "android")]
 pub mod android;
 mod connect;
+// `#[doc(hidden)]` modules and items are ax's plumbing, not API: they
+// change in any release.
+#[doc(hidden)]
 pub mod delta;
 pub mod desktop;
 mod dialog;
@@ -117,6 +120,7 @@ mod feedback;
 mod firstpage;
 mod firstrun;
 mod fresh;
+#[doc(hidden)]
 pub mod fuses;
 #[cfg(all(target_os = "linux", any(test, feature = "native-splash")))]
 mod gtksplash;
@@ -125,6 +129,7 @@ pub mod guest;
 mod guests;
 #[cfg(any(target_os = "android", all(test, unix)))]
 mod handover;
+#[doc(hidden)]
 pub mod inspect;
 pub mod instance;
 #[cfg(all(test, unix))]
@@ -135,15 +140,19 @@ mod islands;
 /// (or swap the sink) take turns.
 #[cfg(test)]
 pub(crate) static WINDOW_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+#[doc(hidden)]
 pub mod macmove;
 #[cfg(target_os = "macos")]
 mod macurl;
 #[cfg(test)]
 mod offline;
+#[doc(hidden)]
 pub mod oneclick;
 pub mod os;
 pub mod page;
+#[doc(hidden)]
 pub mod pidlock;
+#[doc(hidden)]
 pub mod place;
 // The OS's splash (`native-splash`, which `ax build` turns on for an app
 // with a `[build.splash]`); without it Electron draws the splash.
@@ -152,11 +161,16 @@ mod presplash;
 #[cfg(not(any(test, feature = "native-splash")))]
 #[path = "presplash_off.rs"]
 mod presplash;
+#[doc(hidden)]
 pub mod prune;
+#[doc(hidden)]
 pub mod runtime;
+#[doc(hidden)]
 pub mod splash;
 mod stderr;
+#[doc(hidden)]
 pub mod swap;
+#[doc(hidden)]
 pub mod switches;
 pub mod update;
 mod urls;
@@ -293,6 +307,7 @@ html.aio-themed body{padding-top:var(--aio-titlebar-height)}
 
 /// The page's `<html>` tag: its language (`en` unless set) and its
 /// direction, escaped (pure; the web build's page uses it too).
+#[doc(hidden)]
 pub fn html_open(lang: Option<&str>, dir: Dir) -> String {
     let lang = esc(lang.map(str::trim).filter(|l| !l.is_empty()).unwrap_or("en"));
     let dir = match dir {

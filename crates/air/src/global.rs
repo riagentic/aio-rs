@@ -169,8 +169,16 @@ impl<T: PartialEq + 'static> GlobalMemo<T> {
         self.memo().with(f)
     }
 
+    pub fn with_untracked<R>(&self, f: impl FnOnce(&T) -> R) -> R {
+        self.memo().with_untracked(f)
+    }
+
     pub fn read(&self) -> ReadGuard<T> {
         self.memo().read()
+    }
+
+    pub fn read_untracked(&self) -> ReadGuard<T> {
+        self.memo().read_untracked()
     }
 }
 

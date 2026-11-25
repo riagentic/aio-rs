@@ -104,7 +104,7 @@ aio_config::config::Config::rust: fn rust(&self) -> String
 aio_config::config::Css(Vec<String>)
 aio_config::config::Data.backup_every: Option<std::time::Duration>
 aio_config::config::Data.backup_keep: usize
-aio_config::config::Data.coalesce_ms: u64
+aio_config::config::Data.coalesce: std::time::Duration
 aio_config::config::Data.durability: Durability
 aio_config::config::Data.only_persist: bool
 aio_config::config::Data.persist: bool
@@ -147,11 +147,11 @@ aio_config::config::Limits.calls_per_sec: u32
 aio_config::config::Limits.clients: usize
 aio_config::config::Limits.full_state_percent: u32
 aio_config::config::Limits.max_message: usize
-aio_config::config::Limits.sync_interval_ms: u64
+aio_config::config::Limits.sync_interval: std::time::Duration
 aio_config::config::Lit::lit: fn lit(&self, o: &mut String)
 aio_config::config::Log.dir: Option<String>
 aio_config::config::Log.file_mb: u64
-aio_config::config::Log.heartbeat: u64
+aio_config::config::Log.heartbeat: Option<std::time::Duration>
 aio_config::config::Log.keep: usize
 aio_config::config::Log.level: crate::log::Level
 aio_config::config::Log.per_run: bool
@@ -211,15 +211,15 @@ aio_config::config::Splash.bold: bool
 aio_config::config::Splash.border: Option<String>
 aio_config::config::Splash.cancel: bool
 aio_config::config::Splash.download_text: Option<String>
-aio_config::config::Splash.fade_ms: Option<u64>
+aio_config::config::Splash.fade: Option<std::time::Duration>
 aio_config::config::Splash.fit: Fit
 aio_config::config::Splash.follow_window: bool
 aio_config::config::Splash.font: Option<String>
 aio_config::config::Splash.font_size: Option<u16>
 aio_config::config::Splash.image: std::path::PathBuf
 aio_config::config::Splash.margin: Option<u32>
-aio_config::config::Splash.max_ms: u64
-aio_config::config::Splash.min_ms: u64
+aio_config::config::Splash.max: std::time::Duration
+aio_config::config::Splash.min: std::time::Duration
 aio_config::config::Splash.png: &'static [u8]
 aio_config::config::Splash.position: SplashPosition
 aio_config::config::Splash.progress: bool
@@ -279,6 +279,7 @@ aio_config::config::moved_from: fn moved_from(from: &str) -> Option<(&'static st
 aio_config::config::parse_span: fn parse_span(s: &str) -> Result<std::time::Duration, String>
 aio_config::config::reserved: fn reserved(path: &str) -> bool
 aio_config::config::scheme_refused: fn scheme_refused(s: &str) -> Option<String>
+aio_config::config::span_ms: const fn span_ms(s: &str) -> Option<u64>
 aio_config::config::span_text: fn span_text(d: std::time::Duration) -> String
 aio_config::db::pragma_name: fn pragma_name(stmt: &str) -> Option<String>
 aio_config::icon::hue: fn hue(name: &str) -> u16
@@ -295,11 +296,11 @@ aio_config::log::Level::Info
 aio_config::log::Level::Trace
 aio_config::log::Level::Warn
 aio_config::paths::id_ok: fn id_ok(id: &str) -> std::io::Result<()>
-aio_config::perf::Budgets.call_ceiling: Option<u64>
-aio_config::perf::Budgets.effect: Option<u64>
-aio_config::perf::Budgets.effects: std::collections::BTreeMap<String, u64>
-aio_config::perf::Budgets.method: Option<u64>
-aio_config::perf::Budgets.methods: std::collections::BTreeMap<String, u64>
+aio_config::perf::Budgets.call_ceiling: Option<std::time::Duration>
+aio_config::perf::Budgets.effect: Option<std::time::Duration>
+aio_config::perf::Budgets.effects: std::collections::BTreeMap<String, std::time::Duration>
+aio_config::perf::Budgets.method: Option<std::time::Duration>
+aio_config::perf::Budgets.methods: std::collections::BTreeMap<String, std::time::Duration>
 aio_config::perf::Budgets.storm: Storm
 aio_config::perf::Budgets::ceiling: fn ceiling(&self) -> Duration
 aio_config::perf::Budgets::effect: fn effect(&self, label: &str) -> Duration

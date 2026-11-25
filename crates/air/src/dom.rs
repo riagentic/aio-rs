@@ -1764,9 +1764,12 @@ impl MountedData {
         async move { f.await.map(drop) }
     }
 
-    /// Scroll it into view, nearest edge (`smooth`: animated).
-    pub fn scroll_to(&self, smooth: bool) -> impl std::future::Future<Output = Result<(), String>> + use<> {
-        let b = if smooth { "smooth" } else { "auto" };
+    /// Scroll it into view, nearest edge.
+    pub fn scroll_to(
+        &self,
+        behavior: crate::ScrollBehavior,
+    ) -> impl std::future::Future<Output = Result<(), String>> + use<> {
+        let b = if behavior == crate::ScrollBehavior::Smooth { "smooth" } else { "instant" };
         let f = self.call(&format!("n.scrollIntoView({{ block: 'nearest', behavior: '{b}' }}); return true;"));
         async move { f.await.map(drop) }
     }

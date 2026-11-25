@@ -85,9 +85,9 @@ fn a_paused_cell_and_a_panic_refuse_with_aios_codes() {
         }
     }
     let h = aio::Handle::<Probe>::memory();
-    assert_eq!(h.bug().unwrap_err().code(), Some(aio::Code::ReduceError));
+    assert_eq!(h.bug().unwrap_err().code, Some(aio::Code::ReduceError));
     h.pause(true);
     let e = h.ok().unwrap_err();
-    assert_eq!(e.code(), Some(aio::Code::DispatchClosed), "{e}");
+    assert_eq!(e.code, Some(aio::Code::DispatchClosed), "{e}");
     assert!(aio::error_summary(&e).starts_with("DISPATCH_CLOSED: "), "{}", aio::error_summary(&e));
 }

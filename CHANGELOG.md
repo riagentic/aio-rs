@@ -40,12 +40,6 @@ version may break things.
 - The `#[client]` rule is asked before a kept `#[ttl]` answer is handed
   out or a running `#[mode(first)]` call is joined: a caller the state now
   refuses (an `allow` rule) no longer gets the answer it was let in for.
-- A `Browser`'s guest shows http(s) and `about:blank` only: any `src`
-  was loaded (`file:`, `chrome:`, `javascript:`, `data:`), from the
-  element, `Guest::load_url` or the page's `loadURL`. Another scheme
-  loads only when the window lists it (`Web { schemes: &["data"] }`,
-  added); its first page, every load and its page's own navigations are
-  asked, and each refusal is said (`<Browser> load REFUSED`).
 - **Breaking:** a `Browser`'s guest shows http(s) and `about:blank`
   only: any `src` was loaded (`file:`, `chrome:`, `javascript:`,
   `data:`), from the element, `Guest::load_url` or the page's `loadURL`.
@@ -124,6 +118,7 @@ version may break things.
 - `aio::log::parse_stamp`: an RFC 3339 time (as `aio::log::stamp` writes
   it, or with an offset) as ms since the epoch.
 - `air::Prop::new(v)`: a constant prop.
+- `air::GlobalMemo::read_untracked` and `with_untracked`, as `Memo` has.
 - `[home] moved = [{ from, files }]`: an app's own older layout
   (`$XDG_DATA_HOME/<id>`, `~/…`) moved into its home once, before the
   store opens, on `aio::compat::scatter`'s safe move (never over a file
@@ -201,6 +196,59 @@ version may break things.
 
 ### Changed
 
+- **Breaking: ax's plumbing is out of the API**: `aio_shell`'s `runtime`,
+  `splash`, `place`, `prune`, `pidlock`, `macmove`, `oneclick`, `fuses`,
+  `swap`, `switches`, `inspect` and `delta`, `html_open`, every
+  `aio_shell::update` item but `cell` and `stub`, `instance::{hand_over,
+  programs, quit_at, DEV_ARGS}`, `guest::preload_refusal` and
+  `page::char_index` are `#[doc(hidden)]`: ax's, changed in any release.
+  So are the macro-made constants of `aio::Cell` and `aio::CellData` but
+  `ID`, `VERSION`, `METHODS`, `SIGNATURES`, `CLIENT`, `SCHEDULES`,
+  `SERVER` and `TRANSIENT`, and their `advance`, `changed_fields`,
+  `machine_errors`, `machine_ends`, `async_mode` and `redacts`. Code that
+  named one still compiles; it may break in any release: ask for what it
+  needs in an issue.
+- **Breaking: every time in `aio.toml` is a span**, one parser
+  (`aio::config::span_ms`) for all of them and for `#[every]`, `#[ttl]`
+  and `#[long]`, with `ms` as a unit now (`"250ms"`): `[data] coalesce`,
+  `[server.limits] sync_interval`, `[build.splash] min`, `max` and `fade`,
+  `[perf] method`, `effect`, `call_ceiling`, `methods` and `effects`, and
+  `[log] heartbeat` (or `"off"`). The old `coalesce_ms`, `sync_interval_ms`,
+  `min_ms`, `max_ms` and `fade_ms` keys and bare numbers (ms; seconds for
+  `heartbeat`) still read; `#[ttl("1m")]` and `#[long("2m")]` join
+  `#[ttl(60000)]`. In Rust the fields are `Duration`s: `Data::coalesce`,
+  `Limits::sync_interval`, `Splash::{min, max, fade}`, `perf::Budgets`'
+  five and `Log::heartbeat` (`Option`): write
+  `Duration::from_millis(n)` where a number was. A span under a second is
+  refused where a second was the least before (`[history] keep`,
+  `[data] backup_every`, `[updates] every`…).
+- **Breaking: `TestCells` takes `Duration`s**, as `TestUi` does:
+  `advance(d)`, `settle_for(d)` and `budget::<C>(method, d)` (were ms):
+  `t.advance(Duration::from_secs(60))`. A step back is `rewind(d)`
+  (was `advance(-ms)`).
+- **Breaking: `Rejected::code()` is gone**: the field says the same
+  (`e.code`, as `e.why`): `e.code() == Some(Code::X)` is
+  `e.code == Some(Code::X)`.
+- **Breaking: no name means two things in one app's scope**: with
+  `aio::prelude::*` and `aio::ui::prelude::*` both in, `Code` and `Effect`
+  were ambiguous (an error where named). The view prelude's key code is
+  `KeyCode` (`e.code() == KeyCode::KeyA`), and air's `Effect` handle
+  stays out of it (`aio::ui::Effect`): `Code` and `Effect` are the cell's.
+  `aio::report::Code` is `aio::report::Problem` (`Problem::of(kind)`,
+  `Diagnostic::problem()`), so `Code` is only a refusal's wire code;
+  `aio::ui::Tab` is `aio::ui::BrowserTab` and `aio::http::Tab`
+  `aio::http::TabWire`, so `Tab` is only the kit's tab.
+- **Breaking: `MountedData::scroll_to` takes a `ScrollBehavior`**, as
+  `scroll` does, not a `bool`: `scroll_to(ScrollBehavior::Smooth)` for
+  `scroll_to(true)`, `ScrollBehavior::Instant` for `false`.
+- **Breaking: `GuestEvent` is `#[non_exhaustive]`**: each release gave
+  guests more to say (`LoadFailed` in this one), and each broke a `match`
+  over them; one ends with `_ => {}` now and no new kind breaks it.
+- **Breaking:** aio-config's `App` has `schemes` (deep links, above): a
+  literal naming every field adds `schemes: vec![]`. The config structs
+  stay exhaustive, built with `..Default::default()`, which no new key
+  breaks: `#[non_exhaustive]` would forbid that literal outside aio-rs,
+  and `aio::config!()` writes the config as one in the app's crate.
 - A commit runs statements prepared once per connection, where it
   prepared four or more each time: a call in memory takes about half the
   time (7 -> 3.6 µs, release), a saved one a fifth less (13 -> 10 µs).

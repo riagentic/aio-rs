@@ -97,12 +97,13 @@ impl Metrics {
 
 # fn main() {
 use aio::testing::TestCells;
+use std::time::Duration;
 let mut t = TestCells::new(); // the cell live, on a virtual clock
 let m = t.cell::<Metrics>();
-t.advance(5_000); // the schedule fires; its effect settles
+t.advance(Duration::from_secs(5)); // the schedule fires; its effect settles
 assert_eq!(m.state().history.len(), 1);
 for _ in 0..120 {
-    t.advance(5_000);
+    t.advance(Duration::from_secs(5));
 }
 assert_eq!(m.state().history.len(), KEEP, "the oldest go");
 assert!(m.state().history.windows(2).all(|w| w[0].at < w[1].at), "in order, one per tick");

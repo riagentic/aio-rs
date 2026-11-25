@@ -49,7 +49,7 @@ impl Contacts {
 
 /// What a UI does with a failed call: branch on the code, never the words.
 fn say(e: &Rejected) -> String {
-    match e.code() {
+    match e.code {
         Some(Code::AccessDenied) => "sign in to do that".into(),
         Some(Code::ConnectionLost) => "offline: try again when connected".into(),
         Some(Code::ActionRefused) => "this app is older than the page: reload".into(),
@@ -67,7 +67,7 @@ assert!(h.add("ada@example.org".into()).is_err(), "a duplicate");
 assert_eq!(h.state().emails.len(), 1, "a refused call changed nothing");
 
 let e = h.call("remove", serde_json::json!(["ada@example.org"])).unwrap_err();
-assert_eq!((e.code(), e.code().as_ref().map(Code::as_str)), (Some(Code::ActionRefused), Some("ACTION_REFUSED")));
+assert_eq!((e.code.clone(), e.code.as_ref().map(Code::as_str)), (Some(Code::ActionRefused), Some("ACTION_REFUSED")));
 # }
 ```
 
@@ -82,7 +82,7 @@ assert_eq!((e.code(), e.code().as_ref().map(Code::as_str)), (Some(Code::ActionRe
 | `ReduceError` | `REDUCE_ERROR` | the method panicked: a bug, its call changed nothing | fix the method; `ax errors` has the panic |
 | `InitError` | `INIT_ERROR` | an `#[on_start]` refused or panicked | the log and `ax errors` say why |
 | `DestroyError` | `DESTROY_ERROR` | an `#[on_stop]` refused or panicked (the cell still stops) | the log and `ax errors` say why |
-| `EffectTimeout` | `EFFECT_TIMEOUT` | an async call's awaited I/O ran past the call ceiling (`[perf] call_ceiling`, `#[long(ms)]`) and was cut off | call again, or give the method `#[long]` |
+| `EffectTimeout` | `EFFECT_TIMEOUT` | an async call's awaited I/O ran past the call ceiling (`[perf] call_ceiling`, `#[long("2m")]`) and was cut off | call again, or give the method `#[long]` |
 | `EffectError` | `EFFECT_ERROR` | an async call's awaited I/O panicked before it answered: a bug | fix the I/O; `ax errors` has the panic |
 | `HookError` | `HOOK_ERROR` | a reaction (`listens_to`) to another cell's call refused or panicked; on the bus, never a caller's answer | the log says why |
 | `QueueOverflow` | `QUEUE_OVERFLOW` | a synced copy's 500 calls wait for the server | wait for the link; tell the person their changes wait |
@@ -100,7 +100,7 @@ assert_eq!((e.code(), e.code().as_ref().map(Code::as_str)), (Some(Code::ActionRe
 - `aio::error_summary(&e)` is one line for a log or a CI gate (aio's
   `errorSummary`): the code and the first sentence, at most 160
   characters.
-- The words are not stable. Branch on `code()`, never on `why`.
+- The words are not stable. Branch on `code`, never on `why`.
 - A refusal crosses the wire as `why` and the wire name, so a synced copy,
   a `Link`, an aio client (`errorCode(err)`) and `ax call` all see the
   same code.
@@ -149,10 +149,10 @@ window)` ([lifecycle](../state/lifecycle.md)).
 
 A problem is anything worth a person's look: written as a report (most
 kinds), said to the [`on_problem` hook](#hearing-problems-in-code), put on
-the diagnostic bus. `aio::report::Code::of(kind)` types the kind and
+the diagnostic bus. `aio::report::Problem::of(kind)` types the kind and
 `tip()` says what to do.
 
-| Kind | `report::Code` | Report? | Made when | Tip |
+| Kind | `report::Problem` | Report? | Made when | Tip |
 |---|---|---|---|---|
 | `panic` | `Panic` | yes | any panic: a method's (its call refused), an effect's, a thread's | return `Err` (`reject!`) for an expected failure |
 | `tripped` | `Tripped` | yes | [the breaker](#the-breaker) disabled a cell | fix the failing calls, then enable the cell |
@@ -185,7 +185,7 @@ let tx = std::sync::Mutex::new(tx);
 // Runs where the problem happened, maybe while a cell is mid-call: hand
 // the work off (a channel, a task), never call a cell from here.
 aio::report::on_problem(move |kind, msg| {
-    let tip = aio::report::Code::of(kind).tip().unwrap_or("see the report");
+    let tip = aio::report::Problem::of(kind).tip().unwrap_or("see the report");
     _ = tx.lock().unwrap().send(format!("{kind}: {msg} ({tip})"));
 });
 
@@ -291,7 +291,7 @@ instruction:
   start). aio's `--no-backup-logs` (each run on fresh files, nothing kept)
   is `[log] per_run = true` with `keep = 1`.
 - When the log closes, its last line counts the run's errors and
-  warnings; every `[log] heartbeat` seconds (3600) a line says uptime,
+  warnings; every `[log] heartbeat` (an hour) a line says uptime,
   calls and errors.
 
 [Debugging: logs](README.md#3-logs) has `[log]` in full and `ax logs`.
@@ -354,7 +354,7 @@ What aio has and aio-rs doesn't, with what to use instead:
 - **`onError`'s `original`.** A panic's text and place are in the
   diagnostic's message; there is no thrown value to keep.
 - **aio's `MEMORY_*`, `BUDGET_*` and test harness codes**: a budget or
-  memory step is a problem kind on the bus (`report::Code`), and the
+  memory step is a problem kind on the bus (`report::Problem`), and the
   test harnesses fail with words.
 
 ## API

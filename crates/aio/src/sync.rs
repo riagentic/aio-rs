@@ -722,7 +722,7 @@ fn ui_socket<T: Cell>(
                     .on_upgrade(move |s| async move {
                         let (ours, wire) = tokio::io::duplex(1 << 20);
                         let user = who.and_then(|(user, _)| user);
-                        let tab = tokio::spawn((ui.tab)(crate::http::Tab { user, wire }));
+                        let tab = tokio::spawn((ui.tab)(crate::http::TabWire { user, wire }));
                         let pump = tab_pump(s, ours);
                         match (ended_with, recheck) {
                             (Some((a, t)), _) => tokio::select! { () = pump => {}, () = ended(a, t) => {} },

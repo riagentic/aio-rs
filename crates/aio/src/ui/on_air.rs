@@ -5,13 +5,16 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+/// A key's place on the keyboard (`KeyboardData::code`): `KeyCode::KeyA`.
+/// Not `Code`, which `aio::prelude` names a refusal's code.
+pub use air::Code as KeyCode;
 pub use air::{
-    Attribute, Callback, Code, Component, Effect, ErrorBoundary, ErrorBoundaryProps, EventHandler, Fragment,
-    FragmentProps, Global, GlobalMemo, H, Key, Location, Memo, Modifiers, MouseButton, Optimistic, Prop, Props,
-    ReadGuard, Resource, Retry, Signal, Suspense, SuspenseProps, Task, TrackedMemo, View, ViewError, WriteGuard,
-    callback, comp, component, context, effect, effect_quiet, geometry, h, in_views, is_empty, key_event, memo,
-    on_cleanup, once, parent_context, provide, provide_now, provide_root, resource, retry, rsx, signal, spawn,
-    spawn_forever, task, try_context, untrack, use_optimistic, watch,
+    Attribute, Callback, Component, Effect, ErrorBoundary, ErrorBoundaryProps, EventHandler, Fragment, FragmentProps,
+    Global, GlobalMemo, H, Key, Location, Memo, Modifiers, MouseButton, Optimistic, Prop, Props, ReadGuard, Resource,
+    Retry, Signal, Suspense, SuspenseProps, Task, TrackedMemo, View, ViewError, WriteGuard, callback, comp, component,
+    context, effect, effect_quiet, geometry, h, in_views, is_empty, key_event, memo, on_cleanup, once, parent_context,
+    provide, provide_now, provide_root, resource, retry, rsx, signal, spawn, spawn_forever, task, try_context, untrack,
+    use_optimistic, watch,
 };
 
 /// [`resource`] whose value a served page carries (`Http::painted`): the

@@ -159,8 +159,8 @@ text = "{title}"
 - `runtime`: a desktop app's Electron is `shared` (one per machine,
   fetched at its first start) or `bundled`.
 - `[build.splash]`: the app's image (and text) from its start until its
-  window has loaded, on the desktop, the web and Android; `min_ms`,
-  `max_ms`, `background = ["#light", "#dark"]`. A web build also makes
+  window has loaded, on the desktop, the web and Android; `min`,
+  `max`, `background = ["#light", "#dark"]`. A web build also makes
   iOS's launch images from it (`apple-splash-<w>x<h>.png`, one per
   iPhone and iPad screen), so a Home Screen app starts on the same picture.
 - `assets` (aio's `assets`): folders beside `aio.toml` built into the app

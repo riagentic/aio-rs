@@ -331,12 +331,13 @@ assert_eq!((h.state().samples.len(), h.state().status.as_str()), (2, "done"), "t
 
 ## 6. Answer an identical call from cache
 
-`#[ttl(ms)]` on an async method: a call with the same arguments within
+`#[ttl("1m")]` on an async method: a call with the same arguments within
 `ms` of a finished one answers `Ok(())` without running again.
 
 ```rust
 use aio::prelude::*;
 use aio::testing::TestCells;
+use std::time::Duration;
 
 #[cell]
 pub struct Weather {
@@ -351,7 +352,7 @@ async fn fetch_temp(city: String) -> i32 {
 
 #[methods]
 impl Weather {
-    #[ttl(60_000)]
+    #[ttl("1m")]
     pub async fn forecast(&mut self, city: String) -> Result {
         let t: i32 = fetch_temp(city).await;
         self.temp = Some(t);
@@ -368,7 +369,7 @@ t.settle();
 h.forecast("Oslo".into()).unwrap(); // within a minute: from cache
 t.settle();
 assert_eq!(h.state().fetches, 1);
-t.advance(61_000);
+t.advance(Duration::from_secs(61));
 h.forecast("Oslo".into()).unwrap(); // expired: fetched again
 t.settle();
 assert_eq!(h.state().fetches, 2);
@@ -505,6 +506,7 @@ while the last one's effect still runs.
 ```rust
 use aio::prelude::*;
 use aio::testing::TestCells;
+use std::time::Duration;
 
 #[cell(persist)]
 pub struct Digest {
@@ -525,7 +527,7 @@ impl Digest {
 let mut t = TestCells::new();
 let h = t.cell::<Digest>();
 for _ in 0..3 {
-    t.advance(5 * 60_000);
+    t.advance(Duration::from_secs(5 * 60));
 }
 assert_eq!(h.state().sent, 3);
 # }

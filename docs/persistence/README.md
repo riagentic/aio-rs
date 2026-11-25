@@ -317,7 +317,7 @@ assert_eq!(h.store(|s| s.events()).unwrap().len(), before + 1, "five steps, one 
 ```
 
 Each call shows its state at once. The run is written in one transaction
-`[data] coalesce_ms` after its first call (aio's `persistDebounceMs`;
+`[data] coalesce` after its first call (aio's `persistDebounceMs`;
 default `aio::PERSIST_DEBOUNCE`, 100 ms; `0` writes each call), or as soon as a call
 that can't wait comes (one with an effect, a schedule or an id), a
 time-travel step, or the close. When the last call alone ends where the

@@ -24,12 +24,12 @@ fn subscribers_hear_problems_and_warnings_until_dropped() {
 /// typed (`code`); a degraded part that works again is said as recovered.
 /// (Run by the test above: the bus is global.)
 fn diagnostics_carry_severity_a_tip_and_a_code_and_recoveries_are_said() {
-    use aio::report::{Code, Severity};
+    use aio::report::{Problem, Severity};
     let heard = Arc::new(Mutex::new(vec![]));
     let h = heard.clone();
     let _sub = aio::report::subscribe(move |d| {
         if d.kind.contains("sev:") {
-            h.lock().unwrap().push((d.kind.clone(), d.severity, d.tip, d.code()));
+            h.lock().unwrap().push((d.kind.clone(), d.severity, d.tip, d.problem()));
         }
     });
     aio::report::problem("panic", "sev: a bug");
@@ -38,12 +38,12 @@ fn diagnostics_carry_severity_a_tip_and_a_code_and_recoveries_are_said() {
     part.ok();
     let got = heard.lock().unwrap().clone();
     assert_eq!(got.len(), 2, "{got:?}");
-    assert_eq!((got[0].0.as_str(), got[0].1, got[0].3), ("degraded:sev:disk", Severity::Error, Code::Degraded));
+    assert_eq!((got[0].0.as_str(), got[0].1, got[0].3), ("degraded:sev:disk", Severity::Error, Problem::Degraded));
     assert_eq!(
         (got[1].0.as_str(), got[1].1, got[1].3),
-        ("degraded-recovered:sev:disk", Severity::Info, Code::Recovered)
+        ("degraded-recovered:sev:disk", Severity::Info, Problem::Recovered)
     );
     let panic = aio::report::recent().into_iter().find(|d| d.kind == "panic").unwrap();
-    assert_eq!((panic.severity, panic.tip, panic.code()), (Severity::Error, Code::Panic.tip(), Code::Panic));
+    assert_eq!((panic.severity, panic.tip, panic.problem()), (Severity::Error, Problem::Panic.tip(), Problem::Panic));
     assert!(panic.tip.unwrap().contains("aio::reject!"));
 }

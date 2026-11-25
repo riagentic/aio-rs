@@ -139,7 +139,7 @@ app on the phone can open one, with any text after the scheme. So:
 
 ## The shared runtime
 
-aio-rs pins one Electron version (`aio_shell::runtime::VERSION`, the same
+aio-rs pins one Electron version (`ax setup` names it; the same
 release aio ships). The app never chooses it; an aio-rs upgrade moves it.
 
 Where the window's runtime comes from, first match wins:
@@ -209,8 +209,8 @@ link-time dependency), macOS with JavaScript for Automation over Cocoa,
 Windows with Windows Forms. It opens where the app's window will
 (`position`), above other windows, never takes the focus and has no
 taskbar or Dock entry. The app's window shows the moment it has painted,
-under the splash; the splash goes once it has been up `min_ms`, at its
-`max_ms` cap with no window, or when Electron exits.
+under the splash; the splash goes once it has been up `min`, at its
+`max` cap with no window, or when Electron exits.
 
 A first start's Electron download runs on it: the bar and its line
 (`download_text`) under the text, a ✕ that cancels the start (`cancel`).
