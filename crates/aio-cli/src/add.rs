@@ -274,9 +274,10 @@ pub fn wire_cell(launcher: &str, snake: &str, pascal: &str, ui: bool) -> Option<
 }
 
 /// `launcher` with the new module's server functions served by the first
-/// source it opens (pure): `for_app(a, b)` becomes `for_app_with(a, b,
-/// <lib>::<snake>::http(..))`, an `Http` already there wrapped. Err: it
-/// opens none that can serve them (a `for_server` source takes none).
+/// source it opens (pure): `let http = <lib>::<snake>::http(..);` before
+/// it, wrapping what it served (`for_app(a, b)` becomes `for_app_with(a,
+/// b, http)`), so each line stays one rustfmt keeps. Err: it opens none
+/// that can serve them (a `for_server` source takes none).
 pub fn wire_server(launcher: &str, snake: &str) -> Result<Option<String>, String> {
     let lines: Vec<&str> = launcher.lines().collect();
     let Some(i) = lines.iter().position(|l| l.contains("aio::Source::") && l.contains("for_app")) else {
@@ -284,29 +285,26 @@ pub fn wire_server(launcher: &str, snake: &str) -> Result<Option<String>, String
     };
     let line = lines[i];
     let lib = lib_path(line);
-    let http = format!("{lib}{snake}::http(");
-    if launcher.contains(&http) {
+    if launcher.contains(&format!("{lib}{snake}::http(")) {
         return Ok(None);
     }
-    let new = match line.find("for_app_with(") {
+    let indent = &line[..line.len() - line.trim_start().len()];
+    let (served, new) = match line.find("for_app_with(") {
         Some(at) => {
             let args = inside(line, at + "for_app_with".len()).ok_or("an unclosed for_app_with(")?;
             let (head, last) = args.rsplit_once(',').ok_or("for_app_with with no Http")?;
-            let wrapped = format!("{head}, {http}{})", last.trim());
-            line.replacen(args, &wrapped, 1)
+            (last.trim().to_string(), line.replacen(args, &format!("{head}, http"), 1))
         }
         None => {
             let at = line.find("for_app(").ok_or("no for_app(")?;
             let args = inside(line, at + "for_app".len()).ok_or("an unclosed for_app(")?;
-            line.replacen(
-                &format!("for_app({args})"),
-                &format!("for_app_with({args}, {http}aio::http::Http::default()))"),
-                1,
-            )
+            let with = line.replacen(&format!("for_app({args})"), &format!("for_app_with({args}, http)"), 1);
+            ("aio::http::Http::default()".to_string(), with)
         }
     };
     let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
     out[i] = new;
+    out.insert(i, format!("{indent}let http = {lib}{snake}::http({served});"));
     Ok(Some(out.join("\n") + "\n"))
 }
 
@@ -389,8 +387,8 @@ pub fn run(root: &Path, kind: Kind, name: &str, json: bool) -> Result<String, St
     }
     let lib_new = with_mod(&lib, &snake, kind == Kind::Server)
         .ok_or_else(|| format!("src/lib.rs declares a module {snake} already"))?;
-    // A cell of an app with a core crate goes there, where its pages read it.
-    let core = core.filter(|_| kind == Kind::Cell);
+    // In an app with a core crate a cell or server functions go there,
+    // where its pages use them.
     let file = core.as_ref().unwrap_or(&root.join("src")).join(format!("{snake}.rs"));
     let core_lib = core.as_ref().map(|c| c.join("lib.rs"));
     let core_text = core_lib.as_ref().map(|f| read(f)).transpose()?;
@@ -426,11 +424,19 @@ pub fn run(root: &Path, kind: Kind, name: &str, json: bool) -> Result<String, St
         }
         Kind::Server => {
             writes.push((file.clone(), server_file(&snake)));
+            let (lib_rs, lib_new, manifest) = match (core_lib, core_text) {
+                (Some(f), Some(t)) => {
+                    let with = with_mod(&t, &snake, true)
+                        .ok_or_else(|| format!("{} declares a module {snake} already", rel(root, &f)))?;
+                    (f, with, root.join(split::DIR).join("Cargo.toml"))
+                }
+                _ => (lib_rs, lib_new, root.join("Cargo.toml")),
+            };
             writes.push((lib_rs, lib_new));
-            let manifest = root.join("Cargo.toml");
             if let Some(t) = with_server_feature(&read(&manifest)?)? {
+                let m = rel(root, &manifest);
                 writes.push((manifest, t));
-                notes.push("aio's `server` feature turned on (Cargo.toml): server functions need it".into());
+                notes.push(format!("aio's `server` feature turned on ({m}): server functions need it"));
             }
             for l in &launchers {
                 match wire_server(&read(l)?, &snake) {
@@ -693,16 +699,22 @@ mod tests {
     #[test]
     fn the_launcher_serves_the_new_functions() {
         let w = wire_server(crate::create::APP_MAIN, "tools").unwrap().unwrap();
-        assert!(
-            w.contains("aio::Source::for_app_with(&cfg, &dirs, app::tools::http(aio::http::Http::default()))?"),
-            "{w}"
-        );
+        let served = "    let http = app::tools::http(aio::http::Http::default());\n    \
+                      _ = app::SOURCE.set(aio::Source::for_app_with(&cfg, &dirs, http)?);\n";
+        assert!(w.contains(served), "{w}");
+        // A second wraps the first, each line short (cargo fmt keeps them).
         let twice = wire_server(&w, "more").unwrap().unwrap();
-        assert!(
-            twice.contains("for_app_with(&cfg, &dirs, app::more::http(app::tools::http(aio::http::Http::default())))?"),
-            "{twice}"
-        );
+        let served = "    let http = app::tools::http(aio::http::Http::default());\n    \
+                      let http = app::more::http(http);\n    \
+                      _ = app::SOURCE.set(aio::Source::for_app_with(&cfg, &dirs, http)?);\n";
+        assert!(twice.contains(served), "{twice}");
         assert_eq!(wire_server(&w, "tools"), Ok(None));
+        let own = "    _ = app::SOURCE.set(aio::Source::for_app_with(&cfg, &dirs, app::routes())?);\n";
+        let w = wire_server(own, "tools").unwrap().unwrap();
+        assert_eq!(
+            w,
+            format!("    let http = app::tools::http(app::routes());\n{}", own.replace("app::routes()", "http"))
+        );
         assert!(wire_server(crate::create::SERVICE_MAIN, "tools").unwrap_err().contains("for_app"));
     }
 
@@ -821,7 +833,7 @@ mod tests {
             "'.dependencies]\naio = { package = \"aio-rs\", git = \"https://github.com/riagentic/aio-rs\", tag = \"v"
         ));
         assert!(get("Cargo.toml").ends_with(", features = [\"server\"] }\n"), "natively: {}", get("Cargo.toml"));
-        assert!(get("app/src/main.rs").contains("app::tools::http(aio::http::Http::default())"));
+        assert!(get("app/src/main.rs").contains("let http = app::tools::http(aio::http::Http::default());"));
         assert!(run(d.path(), Kind::Cell, "../x", false).is_err());
     }
 }
