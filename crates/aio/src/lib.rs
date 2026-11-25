@@ -1495,7 +1495,7 @@ pub(crate) fn copy_of<T: CellData>(view: Value) -> serde_json::Result<T> {
 
 /// The state a copy that holds `paths` of its cell (empty: all of it) makes
 /// of the server's `view`: the parts it doesn't hold are the cell's defaults.
-#[cfg(any(feature = "server", target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn held<T: CellData>(paths: &[String], view: &Value) -> serde_json::Result<T> {
     match paths.is_empty() {
         true => copy_of(view.clone()),

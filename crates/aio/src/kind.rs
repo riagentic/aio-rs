@@ -77,6 +77,8 @@ pub(crate) struct Kind {
     pub methods: &'static [&'static str],
     pub signatures: &'static [&'static str],
     pub client: &'static [&'static str],
+    #[cfg(feature = "server")]
+    pub unpredicted: &'static [&'static str],
     pub redacted: &'static [&'static str],
     pub coalesced: &'static [&'static str],
     pub skip_if_running: &'static [&'static str],
@@ -88,6 +90,13 @@ pub(crate) struct Kind {
     pub schedules: &'static [Declared],
     pub default: fn() -> St,
     pub from_json: fn(Value) -> serde_json::Result<St>,
+    /// A synced copy's state of a server's view ([`crate::copy_of`]).
+    #[cfg(feature = "server")]
+    pub copy_of: fn(Value) -> serde_json::Result<St>,
+    /// A synced copy's waiting calls replayed on a state ([`crate::sync`]):
+    /// typed, as it runs for every call made.
+    #[cfg(feature = "server")]
+    pub replayed: fn(&dyn AnyCell, &[crate::sync::Pending], &crate::By) -> St,
     pub migrate: fn(Value, u32) -> std::result::Result<St, String>,
     pub machine_errors: fn(&[&str]) -> Vec<String>,
     pub machine_ends: fn() -> Vec<String>,
@@ -167,6 +176,8 @@ impl<T: Cell> KindOf for T {
         methods: T::METHODS,
         signatures: T::SIGNATURES,
         client: T::CLIENT,
+        #[cfg(feature = "server")]
+        unpredicted: T::UNPREDICTED,
         redacted: T::REDACTED,
         coalesced: T::COALESCED,
         skip_if_running: T::SKIP_IF_RUNNING,
@@ -178,6 +189,10 @@ impl<T: Cell> KindOf for T {
         schedules: T::SCHEDULES,
         default: || Arc::new(T::default()),
         from_json: |v| serde_json::from_value::<T>(v).map(|t| Arc::new(t) as St),
+        #[cfg(feature = "server")]
+        copy_of: |v| crate::copy_of::<T>(v).map(|t| Arc::new(t) as St),
+        #[cfg(feature = "server")]
+        replayed: crate::sync::replayed::<T>,
         migrate: |v, from| T::migrate(v, from).map(|t| Arc::new(t) as St),
         machine_errors: T::machine_errors,
         machine_ends: T::machine_ends,
