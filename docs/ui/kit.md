@@ -368,7 +368,10 @@ assert_eq!(ui.text("editor"), "1");
   field (a canvas editor) calls `aio::kit::field_key(&e)` in its `onkeydown`.
 - `e.prevent_default()` in a handler comes too late in a window (the
   browser moved on before the view hears the key): put
-  `data-aio-prevent` on the element instead.
+  `data-aio-prevent` on the element instead. A field keeps its own keys
+  inside such an element; one it names itself (`data-aio-prevent="Tab"`
+  on a `textarea` that indents) it doesn't, even as a dialog's last
+  control.
 - Only arrows, PageUp/PageDown and Backspace repeat when held (aio's
   `REPEATABLE_KEYS`); `Chord::repeating(bool)` overrides.
 

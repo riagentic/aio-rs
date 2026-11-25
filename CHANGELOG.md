@@ -81,6 +81,9 @@ version may break things.
   of the value as Rust indexes it, on the desktop, the web and Android;
   `aio_shell::page::selection`, `set_selection` and `insert_text` by
   selector, beside `caret` ([views](docs/ui/views.md#a-text-fields-selection)).
+- `data-aio-prevent` on a field keeps the keys it names (Tab in a
+  `textarea` that indents), even as a modal dialog's last control: a
+  field's keys were always its own, so Tab left it whatever the view did.
 - `aio::kit::NavList` and `NavItem`: a sidebar's rail of pages, the
   current one `aria-current="page"` (marked by a bar and weight, not
   colour alone), one tab stop with ↑/↓, Home and End moving focus and
