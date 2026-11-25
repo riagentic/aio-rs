@@ -180,7 +180,7 @@ budgets.
 | Finding | Level |
 |---|---|
 | a `for` loop's element or component with no `key` (air refuses it) | error |
-| a `for` loop over a block (its `rsx!` inside an unkeyed node) | warn |
+| a `for` loop over a block (its `rsx!` inside an unkeyed node; `rsx!` refuses it) | error: a row component, keyed |
 | a `key` on a `for` row's later node: it keys no row (it remakes that node when it changes) | warn |
 | a `.read()`, `.read_untracked()` or `.write()` guard held across an `if let`, `while let` or `match` whose block writes: it panics as already borrowed (taken for a signal's: an argument-less call on a value other than `self`; a lock or a reader of your own: `// aio-ok(render): <what it is>`) | warn |
 | page CSS made in `once`: an edit never shows under `ax dev` | error |

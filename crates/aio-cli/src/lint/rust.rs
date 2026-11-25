@@ -1091,7 +1091,7 @@ fn unkeyed(roots: &[Node]) -> Found {
                 Severity::Error,
                 "render",
                 msg.into(),
-                "{items.iter().map(|it| { …; rsx! { div { key: \"{it.id}\", … } } })}",
+                "work out a row's values in its own component, keyed: for it in items { Row { key: \"{it.id}\", it } } (a {items.map(..)} hole keys nothing either: it makes every row again)",
             )];
         }
         _ => None,

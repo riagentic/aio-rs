@@ -227,6 +227,9 @@ version may break things.
   borrowed across a `while let`. The guard finding says why it took the
   value for a signal, and how to mark one that isn't
   ([lint](docs/testing/lint.md#what-it-checks)).
+- `ax agent`'s brief is checked against the guide: every example its UI
+  section shows in backticks is in docs/agents.md's compiled doctest, and
+  every one it refuses in a `compile_fail` block of it.
 - **Breaking: ax's plumbing is out of the API**: `aio_shell`'s `runtime`,
   `splash`, `place`, `prune`, `pidlock`, `macmove`, `oneclick`, `fuses`,
   `swap`, `switches`, `inspect` and `delta`, `html_open`, every
@@ -365,9 +368,24 @@ version may break things.
 
 ### Fixed
 
+- `ax agent` said views have no `if let` or `match` nodes, so agents
+  wrote `{x.map(|e| rsx! {..})}` holes instead; both are markup, and the
+  brief shows them. Its other stale lines too: `{xs.map(|x| rsx! {..})}`
+  given as keyed rows (it doesn't compile, and such a hole keys nothing),
+  a prop following state only as a `Signal`, `Part` or `Prop` (plain
+  props follow since this release), `h.done(x)` as an effect's answer
+  (a method call is), `cx.at` and `cx.backoff`'s arguments, a `VList`
+  (`VirtualList`), `use_css!(false, ..)` for the template's
+  `aio::ui::scheme()`, `ax setup` fetching dx, a pipe getting JSON from
+  every verb, the `cli` mode, the `secrets` and `updates` features,
+  `#[cell(id)]`, `Code` in `aio::prelude`, `TestCells::advance` taking a
+  `Duration`, and `TestUi` refusing a handle two elements share.
 - `ax lint` took any argument-less `.peek()` for a signal's guard (aio-rs
   0.1's Dioxus signals; air's have none), and `self.read()` (the type's
   own method) too.
+- `ax lint`'s fix for a `for` over a block was a `{items.iter().map(..)}`
+  hole, which doesn't compile; it says to key a row component now.
+  docs/testing/lint.md listed the finding as a warning: it is an error.
 - A `TestUi` step waits for the files its event reads: a form's submit
   read its files as the event went out, and a click that submitted it
   could end before they were read (the submit unheard on a loaded
