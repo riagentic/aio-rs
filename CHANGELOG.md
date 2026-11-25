@@ -89,7 +89,10 @@ version may break things.
   and target) and writes it only if that builds; else nothing changes and
   the compiler's errors are said. A new page reads the app's cell through
   the core crate's prelude (`use <app>_core::prelude::*;`, a field of it
-  shown); `ax add cell` writes into `core/` from then on. An app without
+  shown); `ax add cell` and `ax add server` write into `core/` from then
+  on. Modules declaring server functions move there too, so a page's view
+  can run one through a synced copy (`r.run(<app>_core::tools::LIST,
+  ()).await`, an app in `client` mode). An app without
   pages stays one crate. `ax dev` patches an edit in a page in ~0.1 s, in
   the core crate in ~0.24 s (the template with two pages)
   ([ax add](docs/clients/ax.md#ax-add)).
@@ -555,6 +558,14 @@ version may break things.
 
 ### Fixed
 
+- A dev build no longer says, in every new app, that a view's body
+  "reads all of" its cell once, at the `client!` line: that was Redux
+  DevTools' own read of the cell as it mounts. A view's own whole read is
+  still said.
+- A second `ax add server` left a launcher line `cargo fmt` rewraps, so
+  the app's `ax check` failed its format step: each module's functions
+  are now served through a `let http = <name>::http(..);` line of their
+  own before the source.
 - `ax add <app> page core` (or `std`, `alloc`, `proc_macro`, `test`) is
   refused: its crate took the name of one of Rust's own, which it hid
   from the app.

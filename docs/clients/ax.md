@@ -271,7 +271,7 @@ Rust keyword: it becomes a file and an identifier (`due-date`: module
 | Kind | Writes | Wires |
 |---|---|---|
 | `cell` | `src/<name>.rs` (`core/src/<name>.rs` in an app with a core crate): a saved cell with a method and its test; with its views' `client!` in an app with a window | `pub mod <name>;` in `src/lib.rs` (`core/src/lib.rs`); its source opened beside the first one by each launcher in `app/src` (`main.rs`, Android's `lib.rs`) and by the browser build's `web()` |
-| `server` | `src/<name>.rs`: a server function (`<name>.list`) with its test, and `http`, which serves it | `pub mod <name>;` (native builds) in `src/lib.rs`; the launcher's source becomes `Source::for_app_with(.., <name>::http(..))`; aio's `server` feature on in `Cargo.toml` (an app with a page: for its native builds alone) |
+| `server` | `src/<name>.rs` (`core/src/<name>.rs` in an app with a core crate): a server function (`<name>.list`) with its test, and `http`, which serves it | `pub mod <name>;` (native builds) in `src/lib.rs` (`core/src/lib.rs`); `let http = <name>::http(..);` before the launcher's source, which becomes `Source::for_app_with(.., http)`; aio's `server` feature on in `Cargo.toml` (`core/Cargo.toml`; an app with a page: for its native builds alone) |
 | `page` | `pages/<name>`: a crate of its own (`<app>-<name>`) on the app's aio-rs and its core crate, with a view, `<name>::<Name>`, that shows a field of the app's cell | a member of the app's workspace and a dependency of its library (`<name>`) in `Cargo.toml` |
 
 A name the app has already is refused and nothing is written; a launcher
@@ -287,7 +287,8 @@ cells live in a crate both use, the app's **core crate** (`core/`,
 `<app>-core`), made by the first `ax add page` of an app whose library
 holds its cells. It moves there the cells, their methods and `client!`
 (with its `prelude`), the types and functions they use, and each module
-that holds a cell (`src/tally.rs` → `core/src/tally.rs`); the views, the
+that holds a cell or declares a server function (`src/tally.rs` →
+`core/src/tally.rs`); the views, the
 browser build's `web()` and the tests stay. The library re-exports the
 core crate whole (`pub use <app>_core::*;`), so `crate::prelude`,
 `crate::tally::Tally`, the launchers' `app::SOURCE` and the Android
@@ -305,6 +306,15 @@ pub fn Settings() -> View {
 }
 ```
 
+A page's view runs a server function as any view does: through a synced
+copy, which runs it on its server (an app in `client` mode; a local cell
+has no server, and a browser build's copy runs none):
+
+```text
+let aio::Source::Remote(r) = HANDLE.read_untracked().clone() else { return };
+let names = r.run(notes_core::tools::LIST, ()).await?;
+```
+
 It says what moves and asks first (`--yes`: not; with nobody to ask, it
 stops there; `--json` says the plan and does nothing without `--yes`).
 It is tried on a copy beside the app (`cargo check` of every crate and
@@ -312,7 +322,7 @@ target) and written only if that builds, else nothing changes and the
 compiler's errors are said (a view reading a field only the cell's crate
 may: make it `pub`). Imports the cells didn't need are left out of
 `core/src/lib.rs`. Then each `ax add page` is a page on the core crate,
-and `ax add cell` writes into it. An app without pages stays one crate.
+and `ax add cell` and `ax add server` write into it. An app without pages stays one crate.
 `ax dev` patches an edit in the core crate or a page as one in the
 library ([what an edit costs](../build/README.md#what-an-edit-costs)).
 

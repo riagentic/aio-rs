@@ -51,7 +51,7 @@ fn an_added_cell_and_server_functions_build_and_pass_their_tests() {
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("again with --yes"), "{out:?}");
     let said = ax(&app, &["add", "added", "page", "start", "--json"]);
     assert!(said.contains(r#""done":false"#) && said.contains(r#""package":"added-core""#), "{said}");
-    assert!(said.contains(r#""removes":["src/tally.rs"]"#), "{said}");
+    assert!(said.contains(r#""removes":["src/tally.rs","src/tools.rs"]"#), "{said}");
     assert_eq!(std::fs::read_to_string(&lib).unwrap(), before);
     assert!(!app.join("pages").exists() && !app.join("core").exists());
     // What doesn't build so split (the view reads a field only the cell's
@@ -83,6 +83,15 @@ fn an_added_cell_and_server_functions_build_and_pass_their_tests() {
     assert!(get("pages/more/Cargo.toml").contains("added-core = { path = \"../../core\" }"));
     let said = ax(&app, &["add", "cell", "extra", "--text"]);
     assert!(said.starts_with("created core/src/extra.rs\nchanged core/src/lib.rs\nchanged src/lib.rs\n"), "{said}");
+    let said = ax(&app, &["add", "server", "lookup", "--text"]);
+    assert!(said.starts_with("created core/src/lookup.rs\nchanged core/src/lib.rs\nchanged app/src/main.rs"), "{said}");
+    // A page's view runs the app's server functions (a client's copy runs them on its server).
+    let more = get("pages/more/src/lib.rs");
+    let run = "\n/// The server's tools, as a client's view asks for them; a local cell has no server.\n\
+               #[cfg(not(target_arch = \"wasm32\"))]\npub async fn tools() -> Option<Vec<String>> {\n    \
+               let aio::Source::Remote(r) = HANDLE.read_untracked().clone() else { return None };\n    \
+               r.run(added_core::tools::LIST, ()).await.ok()\n}\n";
+    std::fs::write(app.join("pages/more/src/lib.rs"), more + run).unwrap();
     // The app's view shows both (each reading the cell).
     let main = "        main { class: \"container\",\n";
     let text = get("src/lib.rs");
@@ -97,16 +106,27 @@ fn an_added_cell_and_server_functions_build_and_pass_their_tests() {
     ok(fmt.args(["fmt", "--all", "--check"]).current_dir(&app).env_remove("RUSTUP_TOOLCHAIN").env_remove("CARGO"));
     let mut test = Command::new("cargo");
     // Every crate built (the launcher's wiring too); the added parts' tests run.
-    test.args(["test", "--offline", "--workspace", "--", "tally::", "tools::", "extra::", "tests::the_buttons"])
-        .current_dir(&app)
-        .env("CARGO_TARGET_DIR", target)
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .env_remove("CARGO");
+    test.args([
+        "test",
+        "--offline",
+        "--workspace",
+        "--",
+        "tally::",
+        "tools::",
+        "lookup::",
+        "extra::",
+        "tests::the_buttons",
+    ])
+    .current_dir(&app)
+    .env("CARGO_TARGET_DIR", target)
+    .env_remove("RUSTUP_TOOLCHAIN")
+    .env_remove("CARGO");
     let said = ok(&mut test);
     for t in [
         "tally::tests::add_counts ... ok",
         "extra::tests::add_counts ... ok",
         "tools::tests::list_answers ... ok",
+        "lookup::tests::list_answers ... ok",
         "tests::the_buttons_count_and_reset ... ok",
     ] {
         assert!(said.contains(t), "{t}:\n{said}");

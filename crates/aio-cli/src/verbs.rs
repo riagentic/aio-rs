@@ -42,15 +42,16 @@ first ax dev is a launch (--no-warm, AIORT_NO_WARM=1: not)",
 cell: src/<name>.rs (core/src/<name>.rs once the app has a core crate),
 a saved cell with a method and its test, its mod line, its source opened
 by each launcher in app/src (and the browser build's); server:
-src/<name>.rs, server functions with their test, served by the
-launcher's source (Source::for_app_with), aio's `server` feature turned
-on; page: pages/<name>, a crate of its own on the app's aio-rs and its
-core crate (core/: the cells, which the first page moves there from the
-library, asked first, --yes: not; --json: the plan said, nothing done
-without --yes; checked on a copy, nothing changed unless it builds), a
-member of its workspace and a dependency of its library (ax dev
-recompiles that crate alone for an edit there); a name already there is
-refused, nothing written; <app> left out inside it",
+src/<name>.rs (core/src/ too), server functions with their test, served
+by the launcher's source (Source::for_app_with), aio's `server` feature
+turned on; page: pages/<name>, a crate of its own on the app's aio-rs
+and its core crate (core/: the cells and server functions, which the
+first page moves there from the library, asked first, --yes: not;
+--json: the plan said, nothing done without --yes; checked on a copy,
+nothing changed unless it builds), a member of its workspace and a
+dependency of its library (ax dev recompiles that crate alone for an
+edit there); a name already there is refused, nothing written; <app>
+left out inside it",
     ),
     v(
         "pin",
