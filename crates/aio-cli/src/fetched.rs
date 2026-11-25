@@ -22,7 +22,7 @@ pub fn run(link: &str, app: Option<&str>, at: Option<&str>, yes: bool, dev: bool
     let apps = crate::dev::in_dir(dir.clone(), crate::stop::workspace_apps).unwrap_or_default();
     eprintln!("{}", shown(&url, at, &commit, &line, &dir, &apps));
     let app = pick(&apps, app)?;
-    allowed(&dir, &commit, yes, &ask_terminal)?;
+    allowed(&dir, &commit, yes, &|| ask_terminal("Run it?"))?;
     let ax = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(ax);
     match dev {
@@ -152,13 +152,13 @@ pub fn allowed(dir: &Path, commit: &str, yes: bool, ask: &dyn Fn() -> Option<boo
     std::fs::write(approved(dir), commit).map_err(|e| e.to_string())
 }
 
-/// "Run it?" at the terminal: None when there is none.
-pub fn ask_terminal() -> Option<bool> {
+/// `question` (a yes or no) at the terminal: None when there is none.
+pub fn ask_terminal(question: &str) -> Option<bool> {
     use std::io::{BufRead, IsTerminal, Write};
     if !std::io::stdin().is_terminal() {
         return None;
     }
-    eprint!("Run it? [y/N] ");
+    eprint!("{question} [y/N] ");
     _ = std::io::stderr().flush();
     let mut said = String::new();
     _ = std::io::stdin().lock().read_line(&mut said);

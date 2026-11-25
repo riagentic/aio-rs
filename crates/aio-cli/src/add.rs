@@ -6,6 +6,8 @@
 //! library: `ax dev` recompiles that crate alone for an edit in it.
 use std::path::{Path, PathBuf};
 
+mod split;
+
 const CELL: &str = include_str!("create/add_cell.rs");
 const SERVER: &str = include_str!("create/add_server.rs");
 const PAGE: &str = include_str!("create/add_page.rs");
@@ -75,17 +77,8 @@ pub fn server_file(snake: &str) -> String {
     SERVER.replace("thing", snake)
 }
 
-/// A new page's crate (pure): its manifest and source, and the app's
-/// `manifest` with it a workspace member and a dependency of the library,
-/// on the app's own aio-rs (its line, a path two folders deeper).
-pub fn page_crate(manifest: &str, snake: &str, pascal: &str) -> Result<[String; 3], String> {
-    let t: toml::Table = manifest.parse().map_err(|e| format!("Cargo.toml: {e}"))?;
-    let package =
-        t.get("package").and_then(|p| p.get("name")).and_then(|n| n.as_str()).ok_or("Cargo.toml names no package")?;
-    if t.get("dependencies").and_then(|d| d.get(snake)).is_some() {
-        return Err(format!("the app depends on a `{snake}` already: name the page otherwise"));
-    }
-    let mut lines: Vec<String> = manifest.lines().map(String::from).collect();
+/// The one-line `[workspace] members` and `[dependencies]` aio of `lines` (a manifest).
+fn spots(lines: &[String]) -> Result<(usize, usize), String> {
     let (mut section, mut members, mut aio) = (String::new(), None, None);
     for (i, line) in lines.iter().enumerate() {
         let l = line.trim();
@@ -99,26 +92,90 @@ pub fn page_crate(manifest: &str, snake: &str, pascal: &str) -> Result<[String; 
     }
     let members =
         members.ok_or("Cargo.toml has no one-line [workspace] members = [..]: add the page's crate yourself")?;
-    let aio = aio.ok_or("no one-line aio dependency under [dependencies] in Cargo.toml")?;
-    let name = format!("{package}-{}", snake.replace('_', "-"));
-    let dep = deeper(&lines[aio]);
-    lines[aio].push_str(&format!("\n{snake} = {{ package = \"{name}\", path = \"pages/{snake}\" }}"));
+    Ok((members, aio.ok_or("no one-line aio dependency under [dependencies] in Cargo.toml")?))
+}
+
+/// The package `manifest` names (pure).
+fn package_of(manifest: &str) -> Result<String, String> {
+    let t: toml::Table = manifest.parse().map_err(|e| format!("Cargo.toml: {e}"))?;
+    let name = t.get("package").and_then(|p| p.get("name")).and_then(|n| n.as_str());
+    name.map(String::from).ok_or_else(|| "Cargo.toml names no package".into())
+}
+
+/// `manifest` with the crate in `dir` a workspace member and `dep` (its
+/// line) a dependency of the library, beside its aio (pure).
+fn with_member(manifest: &str, dir: &str, dep: &str) -> Result<String, String> {
+    let mut lines: Vec<String> = manifest.lines().map(String::from).collect();
+    let (members, aio) = spots(&lines)?;
+    lines[aio].push_str(&format!("\n{dep}"));
     let m = &mut lines[members];
-    m.insert_str(m.len() - 1, &format!(", \"pages/{snake}\""));
+    m.insert_str(m.len() - 1, &format!(", \"{dir}\""));
+    Ok(lines.join("\n") + "\n")
+}
+
+/// A new page's crate (pure): its manifest and source, and the app's
+/// `manifest` with it a workspace member and a dependency of the library,
+/// on the app's own aio-rs (its line, a path two folders deeper) and its
+/// core crate (`core`: its package, and what the page shows of a cell).
+pub fn page_crate(
+    manifest: &str,
+    snake: &str,
+    pascal: &str,
+    core: Option<(&str, Option<&split::Reading>)>,
+) -> Result<[String; 3], String> {
+    let t: toml::Table = manifest.parse().map_err(|e| format!("Cargo.toml: {e}"))?;
+    let package = package_of(manifest)?;
+    if t.get("dependencies").and_then(|d| d.get(snake)).is_some() {
+        return Err(format!("the app depends on a `{snake}` already: name the page otherwise"));
+    }
+    let lines: Vec<String> = manifest.lines().map(String::from).collect();
+    let (_, aio) = spots(&lines)?;
+    let name = format!("{package}-{}", snake.replace('_', "-"));
+    let dep = format!("{snake} = {{ package = \"{name}\", path = \"pages/{snake}\" }}");
+    let app = with_member(manifest, &format!("pages/{snake}"), &dep)?;
     let shared = match t.get("workspace").and_then(|w| w.get("package")).is_some() {
         true => "edition.workspace = true\npublish.workspace = true",
         false => "edition = \"2024\"\npublish = false",
     };
-    let own = format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n{shared}\n\n[dependencies]\n{dep}\n");
-    let source = PAGE.replace("Thing", "\u{0}").replace("thing", snake).replace('\u{0}', pascal);
-    Ok([lines.join("\n") + "\n", own, source])
+    let core_dep = core.map_or(String::new(), |(p, _)| format!("{p} = {{ path = \"../../{}\" }}\n", split::DIR));
+    let own = format!(
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n{shared}\n\n[dependencies]\n{}\n{core_dep}",
+        deeper(&lines[aio], 2)
+    );
+    Ok([app, own, page_source(snake, pascal, core.and_then(|(_, r)| r))])
 }
 
-/// A dependency's line two folders deeper (pure): its relative path too.
-fn deeper(line: &str) -> String {
+/// A new page's source (pure); `reading`: it reads a cell of the core crate.
+pub fn page_source(snake: &str, pascal: &str, reading: Option<&split::Reading>) -> String {
+    let source = PAGE.replace("Thing", "\u{0}").replace("thing", snake).replace('\u{0}', pascal);
+    let Some(r) = reading else { return source };
+    let prelude = format!(
+        "//! The app's cells are in its core crate ({}/): `{}` brings a cell's\n\
+         //! `part`, `act!` and the view API, as `crate::prelude` does in the library.\nuse {}::*;\n",
+        split::DIR,
+        r.prelude,
+        r.prelude
+    );
+    let source = source.replace("use aio::ui::prelude::*;\n", &prelude);
+    let Some((f, list)) = &r.field else { return source };
+    let read = format!(
+        "    // A field of the cell: what reads it runs again only when it changes.\n    let {f} = part(|c| &c.{f});\n"
+    );
+    let shown = match list {
+        true => format!("            p {{ {{format!(\"{f}: {{}}\", {f}.with(Vec::len))}} }}\n"),
+        false => format!("            p {{ \"{f}: {{{f}}}\" }}\n"),
+    };
+    let h2 = format!("            h2 {{ \"{pascal}\" }}\n");
+    source.replacen("    rsx! {\n", &format!("{read}    rsx! {{\n"), 1).replacen(&h2, &format!("{h2}{shown}"), 1)
+}
+
+/// A dependency's line `up` folders deeper (pure): its relative path too.
+pub(crate) fn deeper(line: &str, up: usize) -> String {
     match line.find("path = \"") {
-        Some(i) => format!("{}../../{}", &line[..i + 8], &line[i + 8..]),
-        None => line.to_string(),
+        Some(i) if !line[i + 8..].starts_with('/') && !line[i + 8..].get(1..).is_some_and(|r| r.starts_with(':')) => {
+            format!("{}{}{}", &line[..i + 8], "../".repeat(up), &line[i + 8..])
+        }
+        _ => line.to_string(),
     }
 }
 
@@ -324,13 +381,20 @@ pub fn run(root: &Path, kind: Kind, name: &str, json: bool) -> Result<String, St
     let read = |f: &Path| std::fs::read_to_string(f).map_err(|e| format!("{}: {e}", f.display()));
     let lib_rs = root.join("src").join("lib.rs");
     let lib = read(&lib_rs).map_err(|e| format!("{e}: ax add writes into an app's library (src/lib.rs)"))?;
-    let file = root.join("src").join(format!("{snake}.rs"));
-    if file.exists() || root.join("src").join(&snake).join("mod.rs").exists() {
-        return Err(format!("{}: the app has a module {snake} already", file.display()));
+    let core = split::existing(root).map(|_| root.join(split::DIR).join("src"));
+    for src in std::iter::once(root.join("src")).chain(core.clone()) {
+        if src.join(format!("{snake}.rs")).exists() || src.join(&snake).join("mod.rs").exists() {
+            return Err(format!("{}: the app has a module {snake} already", src.join(&snake).display()));
+        }
     }
     let lib_new = with_mod(&lib, &snake, kind == Kind::Server)
         .ok_or_else(|| format!("src/lib.rs declares a module {snake} already"))?;
-    let ui = lib.contains("aio::client!(");
+    // A cell of an app with a core crate goes there, where its pages read it.
+    let core = core.filter(|_| kind == Kind::Cell);
+    let file = core.as_ref().unwrap_or(&root.join("src")).join(format!("{snake}.rs"));
+    let core_lib = core.as_ref().map(|c| c.join("lib.rs"));
+    let core_text = core_lib.as_ref().map(|f| read(f)).transpose()?;
+    let ui = lib.contains("aio::client!(") || core_text.as_ref().is_some_and(|t| t.contains("aio::client!("));
     // Every change worked out first: nothing is written unless all of it can be.
     let mut writes: Vec<(PathBuf, String)> = vec![];
     let mut notes: Vec<String> = vec![];
@@ -339,8 +403,15 @@ pub fn run(root: &Path, kind: Kind, name: &str, json: bool) -> Result<String, St
         Kind::Cell => {
             writes.push((file.clone(), cell_file(&snake, &pascal, ui)));
             // The browser build's source, in the library itself.
-            let lib_new = wire_cell(&lib_new, &snake, &pascal, ui).unwrap_or(lib_new);
-            writes.push((lib_rs, lib_new));
+            match (core_lib, core_text) {
+                (Some(f), Some(t)) => {
+                    let with = with_mod(&t, &snake, false)
+                        .ok_or_else(|| format!("{} declares a module {snake} already", rel(root, &f)))?;
+                    writes.push((f, with));
+                    writes.extend(wire_cell(&lib, &snake, &pascal, ui).map(|t| (lib_rs, t)));
+                }
+                _ => writes.push((lib_rs, wire_cell(&lib_new, &snake, &pascal, ui).unwrap_or(lib_new))),
+            }
             for l in &launchers {
                 match wire_cell(&read(l)?, &snake, &pascal, ui) {
                     Some(t) => writes.push((l.clone(), t)),
@@ -395,27 +466,131 @@ pub fn run(root: &Path, kind: Kind, name: &str, json: bool) -> Result<String, St
     Ok(out.join("\n"))
 }
 
-/// `ax add [app] page <name>`: its crate under `pages/`, said.
-pub fn page(root: &Path, name: &str, json: bool) -> Result<String, String> {
+/// Rust's own crates: a page named so would hide one from the app.
+const RUSTS: [&str; 5] = ["core", "std", "alloc", "proc_macro", "test"];
+
+/// `ax add [app] page <name>`: its crate under `pages/`, on the app's core
+/// crate, said. The first page of an app whose library holds its cells
+/// moves them there first ([`split`]): asked (`yes`: not; `json`: the plan
+/// said, nothing done), tried on a copy, then written; else nothing changes.
+pub fn page(root: &Path, name: &str, yes: bool, json: bool) -> Result<String, String> {
     let (snake, pascal) = names(name)?;
     let (snake, pascal) = (snake.as_str(), pascal.as_str());
-    let dir = root.join("pages").join(snake);
-    if dir.exists() {
-        return Err(format!("{}: there already", rel(root, &dir)));
+    if RUSTS.contains(&snake) {
+        return Err(format!("`{name}` names one of Rust's own crates, which it would hide: name the page otherwise"));
     }
-    let manifest = root.join("Cargo.toml");
-    let text = std::fs::read_to_string(&manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
-    let [app, own, source] = page_crate(&text, snake, pascal)?;
-    let file = dir.join("src").join("lib.rs");
-    std::fs::create_dir_all(file.parent().unwrap_or(&dir)).map_err(|e| format!("{}: {e}", dir.display()))?;
-    for (f, t) in [(&dir.join("Cargo.toml"), own), (&file, source), (&manifest, app)] {
-        std::fs::write(f, t).map_err(|e| format!("{}: {e}", f.display()))?;
+    let dir = format!("pages/{snake}");
+    if root.join(&dir).exists() {
+        return Err(format!("{dir}: there already"));
     }
-    let (created, show) = (rel(root, &file), format!("show it from the app's view: {snake}::{pascal} {{}}"));
+    let read = |f: &str| std::fs::read_to_string(root.join(f)).map_err(|e| format!("{f}: {e}"));
+    let manifest = read("Cargo.toml")?;
+    let existing = split::existing(root);
+    let plan = match existing {
+        Some(_) => None,
+        None => split::plan(root, &package_of(&manifest)?, &read("src/lib.rs")?, &manifest)?,
+    };
+    let core = existing.or_else(|| plan.as_ref().map(|p| p.package.clone()));
+    let core_lib = format!("{}/src/lib.rs", split::DIR);
+    // The core crate's source, as it is or is to be.
+    let core_file = |f: &str| match &plan {
+        Some(p) => p.writes.iter().find(|(w, _)| *w == format!("{}/src/{f}", split::DIR)).map(|(_, b)| b.clone()),
+        None => std::fs::read(root.join(split::DIR).join("src").join(f)).ok(),
+    };
+    let text = |f: &str| core_file(f).and_then(|b| String::from_utf8(b).ok());
+    let reading = core.as_ref().and_then(|c| split::reading(&c.replace('-', "_"), &text("lib.rs")?, &text));
+    let base = match &plan {
+        Some(p) => with_member(&manifest, split::DIR, &format!("{} = {{ path = \"{}\" }}", p.package, split::DIR))?,
+        None => manifest.clone(),
+    };
+    let [app, own, source] = page_crate(&base, snake, pascal, core.as_deref().map(|c| (c, reading.as_ref())))?;
+    let created = format!("{dir}/src/lib.rs");
+    let mut writes = vec![
+        (format!("{dir}/Cargo.toml"), own.into_bytes()),
+        (created.clone(), source.into_bytes()),
+        ("Cargo.toml".to_string(), app.into_bytes()),
+    ];
+    let show = format!("show it from the app's view: {snake}::{pascal} {{}}");
+    let Some(plan) = plan else {
+        write(root, &writes, &[])?;
+        if json {
+            return Ok(
+                serde_json::json!({ "created": created, "changed": ["Cargo.toml"], "notes": [show] }).to_string()
+            );
+        }
+        return Ok(format!("created {created}\nchanged Cargo.toml\n{show}\nnext: ax dev <app>"));
+    };
+    // The pages made before depend on it too.
+    for (_, path) in split::pages(&manifest) {
+        let f = format!("{path}/Cargo.toml");
+        writes.push((f.clone(), split::with_core_dep(&read(&f)?, &plan.package, 2).into_bytes()));
+    }
+    writes.extend(plan.writes.iter().cloned());
+    if !yes {
+        let said = plan.said(json);
+        if json {
+            let next = format!("ax add <app> page {name} --yes");
+            return Ok(serde_json::json!({ "done": false, "core": said, "next": next }).to_string());
+        }
+        eprintln!("{}", said.as_str().unwrap_or_default());
+        match crate::fetched::ask_terminal("Make it?") {
+            None => return Err("nothing changed: nobody here to ask; read the above, then again with --yes".into()),
+            Some(false) => return Err("nothing changed".into()),
+            Some(true) => {}
+        }
+    }
+    let trial = split::Trial::of(root)?;
+    write(&trial.0, &writes, &plan.removes)?;
+    eprintln!("ax add: the app with its cells in {}/, checked on a copy (cargo check)", split::DIR);
+    let unused = split::check(&trial.0, &core_lib).map_err(|e| {
+        format!(
+            "nothing changed: the app with its cells in {}/ doesn't build:\n\n{e}\n\nmake what its views use of them \
+             pub, then ax add again; or move them yourself (docs/clients/ax.md#ax-add)",
+            split::DIR
+        )
+    })?;
+    // Imports of the library the cells didn't need, dropped from the copy's.
+    if let Some((_, b)) = writes.iter_mut().find(|(f, _)| *f == core_lib) {
+        *b = split::edited(&String::from_utf8_lossy(b), &unused).into_bytes();
+    }
+    writes.extend(std::fs::read(trial.0.join("Cargo.lock")).ok().map(|l| ("Cargo.lock".to_string(), l)));
+    drop(trial);
+    write(root, &writes, &plan.removes)?;
+    let krate = plan.package.replace('-', "_");
+    let mut out = vec![
+        format!("created {created}"),
+        "changed Cargo.toml".into(),
+        format!("made {}/ ({}): {}", split::DIR, plan.package, plan.moved.join(", ")),
+        format!("changed src/lib.rs: pub use {krate}::*; (each path to them as it was)"),
+    ];
+    out.extend(plan.removes.iter().map(|r| format!("moved {r} to {}/{r}", split::DIR)));
+    out.extend(split::pages(&manifest).iter().map(|(_, p)| format!("changed {p}/Cargo.toml")));
     if json {
-        return Ok(serde_json::json!({ "created": created, "changed": ["Cargo.toml"], "notes": [show] }).to_string());
+        return Ok(serde_json::json!({ "created": created, "changed": ["Cargo.toml", "src/lib.rs"],
+            "core": plan.said(true), "notes": [show] })
+        .to_string());
     }
-    Ok(format!("created {created}\nchanged Cargo.toml\n{show}\nnext: ax dev <app>"))
+    out.extend([show, "next: ax dev <app>".into()]);
+    Ok(out.join("\n"))
+}
+
+/// `writes` into the app at `root` (each file replaced whole, its folder
+/// made), then `removes` removed, with the folders that leaves empty.
+fn write(root: &Path, writes: &[(String, Vec<u8>)], removes: &[String]) -> Result<(), String> {
+    for (f, bytes) in writes {
+        let p = root.join(f);
+        std::fs::create_dir_all(p.parent().unwrap_or(root)).map_err(|e| format!("{f}: {e}"))?;
+        aio::paths::write_atomic(&p, bytes, false).map_err(|e| format!("{f}: {e}"))?;
+    }
+    for f in removes {
+        std::fs::remove_file(root.join(f)).map_err(|e| format!("{f}: {e}"))?;
+        let src = root.join("src");
+        let mut d = root.join(f).parent().map(Path::to_path_buf);
+        while let Some(p) = d.filter(|p| p.starts_with(&src) && *p != src && std::fs::remove_dir(p).is_ok()) {
+            d = p.parent().map(Path::to_path_buf);
+        }
+    }
+    Ok(())
 }
 
 /// `f` relative to `root`, with `/`.
@@ -570,7 +745,7 @@ mod tests {
         let released =
             format!("git = \"https://github.com/riagentic/aio-rs\", tag = \"v{}\"", env!("CARGO_PKG_VERSION"));
         let manifest = manifest.replace(&released, "path = \"../a/aio\"");
-        let [app, own, source] = page_crate(&manifest, "due_date", "DueDate").unwrap();
+        let [app, own, source] = page_crate(&manifest, "due_date", "DueDate", None).unwrap();
         assert!(app.contains("members = [\".\", \"app\", \"pages/due_date\"]"), "{app}");
         assert!(app.contains("\ndue_date = { package = \"notes-due-date\", path = \"pages/due_date\" }\n"), "{app}");
         assert_eq!(
@@ -591,10 +766,32 @@ mod tests {
                 && source.contains("`due_date::DueDate {}`")
                 && !source.contains("thing")
         );
-        assert!(page_crate(&app, "due_date", "DueDate").unwrap_err().contains("already"));
-        assert!(page_crate("[package]\nname = \"x\"\n", "p", "P").unwrap_err().contains("members"));
+        assert!(page_crate(&app, "due_date", "DueDate", None).unwrap_err().contains("already"));
+        assert!(page_crate("[package]\nname = \"x\"\n", "p", "P", None).unwrap_err().contains("members"));
         let ui = aio::testing::TestUi::new(add_page::Thing);
         assert!(ui.html().contains("<h2>Thing</h2>"), "{}", ui.html());
+        // On the app's core crate: its prelude, a field of its cell shown.
+        let r = split::Reading { prelude: "notes_core::prelude".into(), field: Some(("count".into(), false)) };
+        let [_, own, source] = page_crate(&manifest, "due_date", "DueDate", Some(("notes-core", Some(&r)))).unwrap();
+        assert!(own.ends_with("features = [\"kit\"] }\nnotes-core = { path = \"../../core\" }\n"), "{own}");
+        assert!(!source.contains("use aio::ui::prelude::*;") && source.contains("\nuse notes_core::prelude::*;\n"));
+        assert!(source.contains("    let count = part(|c| &c.count);\n    rsx! {\n"), "{source}");
+        assert!(source.contains("            h2 { \"DueDate\" }\n            p { \"count: {count}\" }\n"), "{source}");
+        let r = split::Reading { prelude: "notes_core::todo::prelude".into(), field: Some(("items".into(), true)) };
+        let list = page_source("x", "X", Some(&r));
+        assert!(list.contains("p { {format!(\"items: {}\", items.with(Vec::len))} }"), "{list}");
+        let r = split::Reading { prelude: "notes_core::prelude".into(), field: None };
+        assert!(!page_source("x", "X", Some(&r)).contains("part("));
+    }
+
+    /// A page named `core` (or `std`) is refused: its crate would hide Rust's
+    /// own from the app, and `core` is the cells' crate's folder.
+    #[test]
+    fn a_page_may_not_take_a_name_of_rusts_own_crates() {
+        let d = tempfile::tempdir().unwrap();
+        for n in ["core", "std", "alloc"] {
+            assert!(page(d.path(), n, true, false).unwrap_err().contains("Rust's own crates"), "{n}");
+        }
     }
 
     #[test]

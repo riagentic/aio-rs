@@ -129,7 +129,11 @@ changed) · cargo check → ax dev <app> → tests",
   builds are M.m.<git commit count>, -dirty.<hash> while uncommitted).
 - A big app keeps its views by area in page crates (ax add <app> page <n>):
   ax dev recompiles the edited crate alone (~0.5 s; one crate of 70 000
-  lines: ~5 s). ax lint hints past 15 000 lines in one crate.
+  lines: ~5 s). ax lint hints past 15 000 lines in one crate. The first
+  page moves the cells (client!, prelude, what they use) to the core crate
+  (core/, <app>-core; asked first, --yes: not); the library re-exports it
+  (pub use <app>_core::*;, every path as before), a page reads a cell with
+  use <app>_core::prelude::*;, ax add cell writes into core/ then.
 - main: let cfg = aio::config!();  (the nearest aio.toml, parsed and checked
   as the app builds: a mistake is a compile error; no build.rs)
   let aio_shell::Start::Run(dirs) = aio_shell::start(&cfg, aio::app_version!())?
@@ -232,9 +236,10 @@ once at the root · another module: use crate::prelude::*; · data-t on what tes
   calls a method from a handler (a refusal is logged and gives None); a view's
   call shows at once, commits from effects and schedules at most once per
   150 ms. use_live() once in the root. All of these are made where client!
-  is called; another module (a page) takes them and the view API with
-  `use crate::prelude::*;` (client! makes that prelude; without it: cannot
-  find function part, cannot find type Ui).
+  is called; another module takes them and the view API with
+  `use crate::prelude::*;`, a page crate with use <app>_core::prelude::*;
+  (client! makes that prelude; without it: cannot find function part,
+  cannot find type Ui).
 - App-lifetime state that isn't saved (a run's report, a scan's result): a
   `static REPORT: Global<Option<u64>> = Global::new(|| None);` any view shows,
   filled by work that outlives the view that started it:

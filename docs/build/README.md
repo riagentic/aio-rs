@@ -43,7 +43,9 @@ most of each, is the same in 0.2, and the template's patch now lands in
 Keep a big app fast to edit by splitting it into crates of a few
 thousand lines (its views by area, say), each a path dependency and a
 member of the app's workspace. `ax add <app> page <name>` makes one
-([ax add](../clients/ax.md#ax-add)), and `ax lint` hints at a crate of
+([ax add](../clients/ax.md#ax-add)); the first moves the cells to the
+app's core crate (`core/`), which the library and every page read them
+from. `ax lint` hints at a crate of
 more than 15 000 lines. An edit then recompiles its own crate alone and
 is patched in; the crates built on it compile after, off the time to the
 screen ([dev](dev.md#hot-patching)). So keep the often-edited code
@@ -63,6 +65,16 @@ shared cores, from the save to the window showing it, medians of 4-5):
 Before 0.4.0 an edit compiled every crate built on the edited one before
 its patch: a page's edit 1.9 s, one in the shared kit or core 8-14 s
 (measured in 0.1).
+
+A page reads the app's cells from its core crate, and an edit there is
+patched too. `ax create`'s template with two pages (`ax add page`, the
+cell moved to `core/`; 12 shared cores, CARGO_BUILD_JOBS=2, medians of 5):
+
+| The edited crate | An edit lands |
+|---|---|
+| a page | **0.10 s** (rustc 0.06 s) |
+| the library (its root view) | 0.19 s |
+| the core crate (the cell's method; the library and pages above it) | 0.24 s |
 
 Splitting has a cost in release builds: generic code, async functions
 included, is copied into each crate that uses it, so the binary grows a
