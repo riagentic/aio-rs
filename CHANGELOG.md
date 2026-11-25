@@ -334,6 +334,15 @@ version may break things.
 
 ### Fixed
 
+- `ax start` on a nested display (`--display isolated`, or no terminal)
+  removed the display's access cookie once the window was up: Chromium's
+  GPU process connects after that, was refused ("Authorization required,
+  but no authorization protocol specified"), failed its ANGLE/EGL start
+  and was restarted again and again, flooding the app's log and leaving
+  the window without its GPU process. Removed before any client had
+  connected (an app with no window), the X server never read it and let
+  every local account in. The cookie is kept in the app's
+  `logs/display.auth` (private; replaced at its next start).
 - A `TestUi` step waits for the files its event reads: a form's submit
   read its files as the event went out, and a click that submitted it
   could end before they were read (the submit unheard on a loaded
