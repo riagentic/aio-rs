@@ -572,3 +572,40 @@ fn a_text_takes_format_arguments() {
     p.click("up");
     assert_eq!(p.text("t"), "By threads (1024 per SM,      x) sm_80 007");
 }
+
+#[component]
+fn Tally(name: &'static str) -> View {
+    let n = signal(|| 0u32);
+    let t = format!("n-{name}");
+    rsx! { button { "data-t": "{t}", onclick: move |_| n += 1, "{name}{n}" } }
+}
+
+/// A keyed row's component keeps its own state (its signals and hooks) by
+/// its key while rows around it move, come and go; a new row starts afresh.
+#[test]
+fn a_keyed_rows_component_keeps_its_state_through_reorder_insert_and_remove() {
+    fn app() -> View {
+        let rows = signal(|| vec!["a", "b", "c"]);
+        rsx! {
+            div { "data-t": "list", for r in rows.get() { Tally { key: "{r}", name: r } } }
+            button { "data-t": "turn", onclick: move |_| rows.set(vec!["c", "a", "b"]), "turn" }
+            button { "data-t": "add", onclick: move |_| rows.set(vec!["d", "c", "a", "e", "b"]), "add" }
+            button { "data-t": "cut", onclick: move |_| rows.set(vec!["e", "b"]), "cut" }
+            button { "data-t": "back", onclick: move |_| rows.set(vec!["a", "b"]), "back" }
+        }
+    }
+    let mut p = TestPage::mount(app);
+    p.click("n-a");
+    p.click("n-b");
+    p.click("n-b");
+    assert_eq!(p.text("list"), "a1b2c0");
+    p.click("turn");
+    assert_eq!(p.text("list"), "c0a1b2", "moved: each keeps its own");
+    p.click("add");
+    p.click("n-e");
+    assert_eq!(p.text("list"), "d0c0a1e1b2", "new rows start afresh");
+    p.click("cut");
+    assert_eq!(p.text("list"), "e1b2", "the rest kept when rows go");
+    p.click("back");
+    assert_eq!(p.text("list"), "a0b2", "a row that left comes back afresh");
+}

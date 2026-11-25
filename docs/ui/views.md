@@ -294,7 +294,7 @@ compile error naming it.
 | a value that may be absent | `if let Some(n) = note.get() { p { "{n}" } }`: made again when what it binds changes |
 | a match | `match page.get() { Page::A => { A {} } Page::B(id) if id > 9 => p { "{id}" }, _ => {} }`: an arm's view is kept until another arm matches (one that binds names: until they change) |
 | a repeat | `for`, never `while` or `loop` (refused): a view says what shows, not how long to repeat |
-| a list | `for x in xs.get() { li { key: "{x.id}", .. } }` (`key:` on every row's first node: `rsx!` refuses a row without one; items are `Clone + PartialEq`) |
+| a list | `for x in xs.get() { li { key: "{x.id}", .. } }` (`key:` on every row's first node: `rsx!` refuses a row without one; items are `Clone + PartialEq`). A row's component keeps its state by its key while rows move, come and go |
 | a fresh start | `key:` outside a list: `Editor { key: "{doc.id}", .. }` is made again (its state afresh) when the key changes |
 | several roots | a component may return them side by side: `rsx! { A {} B {} }` |
 | an element made elsewhere | `{elem}` where `elem: View` |
