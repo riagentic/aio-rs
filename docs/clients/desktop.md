@@ -632,6 +632,7 @@ listens).
 
   ```toml
   [app]
+  id = "notes"
   spellcheck = "https://dl.example.org/dictionaries/"
 
   [capabilities]
