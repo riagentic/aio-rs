@@ -449,7 +449,8 @@ mod tests {
         assert!(!p.install.join("notes").exists() && !p.share.join("applications/notes.desktop").exists());
         assert!(std::fs::symlink_metadata(p.bin.join("notes")).is_err());
         assert!(p.apps.join("notes/data").exists(), "the data stays");
-        assert!(remove(&p, "notes", false).unwrap_err().contains("not installed"));
+        let again = remove(&p, "notes", false);
+        assert!(again.as_ref().is_err_and(|e| e.contains("not installed")), "{again:?}");
         // Its schemes' handler lines go with it; another app's stay.
         std::fs::create_dir_all(&p.config).unwrap();
         let list = p.config.join("mimeapps.list");
