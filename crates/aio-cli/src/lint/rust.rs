@@ -1062,7 +1062,7 @@ fn unkeyed(roots: &[Node]) -> Found {
     let missing = match roots.first() {
         Some(n @ (Node::El { key: None, .. } | Node::Comp { key: None, .. })) => name_of(n),
         // A block's rsx! is a node inside the pass's unkeyed one: its key keys nothing.
-        Some(Node::Expr(e)) => {
+        Some(Node::Expr(e, _)) => {
             let msg =
                 "a for loop over a block keys nothing (the block's rsx! sits inside an unkeyed node): air refuses it";
             return vec![(

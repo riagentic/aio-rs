@@ -386,6 +386,7 @@ mod on_air {
             for e in r.uncaught() {
                 super::say(&format!("a view failed and no ErrorBoundary is above it: {e}"));
             }
+            r.faults().iter().for_each(|f| super::say(f));
         });
     }
 
