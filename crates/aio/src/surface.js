@@ -191,32 +191,37 @@
       if (!root) return missing(t.slice(0, cut));
       const n = comps(seg, root).length;
       const all = [...new Set(tree.map(label))].join(", ") || "none";
-      return { error: n ? `${n} components match ${t}: name one by its key (comp=Name[key])` : `no component ${seg.slice(COMP.length)} there; the components are: ${all}` };
+      return n ? { error: `${n} components match ${t}: name one by its key (comp=Name[key])`, many: n } : { error: `no component ${seg.slice(COMP.length)} there; the components are: ${all}` };
     }
     if (t.startsWith(CSS_) || cssAt(t) > 0) {
       const sel = t.slice(cssAt(t) + CSS_.length);
       try { document.querySelector(sel); } catch { return { error: `${JSON.stringify(sel)} is no CSS selector (in ${t})` }; }
       const n = bySelector(t).length;
       if (!n) return { error: `no element matches ${t}; ${there}` };
-      return { error: `${n} elements match ${t}: narrow the selector to one (:nth-child(2), an id)` };
+      return { error: `${n} elements match ${t}: narrow the selector to one (:nth-child(2), an id)`, many: n };
     }
     // A selector given as a handle: say how to give it.
     const looks = /^[#.[]|[\s>:]/.test(t) ? ` (a CSS selector? css=${t})` : "";
     const [root, inner] = t.startsWith(TEXT) ? [null] : split(t);
     const twins = root ? handled(root, inner) : [];
     if (twins.length > 1) {
+      // Each one and the path of handles that names it alone, if one does.
       const place = (el) => {
-        const who = el.parentElement?.closest("[data-t]")?.getAttribute("data-t");
+        let p = inner, at = null;
+        for (let a = el.parentElement?.closest("[data-t]"); a && !at; a = a.parentElement?.closest("[data-t]")) {
+          p = `${a.getAttribute("data-t")}/${p}`;
+          if (find(p) === el) at = p;
+        }
         const text = words(el.textContent);
-        return `<${el.localName}>${text ? " " + debug(cutText(text, 30)) : ""}${who ? ` in data-t="${who}"` : ""}`;
+        return `<${el.localName}>${text ? " " + debug(cutText(text, 30)) : ""} ${at ? `at ${at}` : "(no path of handles names it)"}`;
       };
-      return { error: `${twins.length} elements have data-t="${inner}" (${twins.map(place).join(", ")}): give each its own handle, or name one inside another (outer/${inner})` };
+      return { error: `${twins.length} elements have data-t="${inner}": ${twins.map(place).join(", ")}: give each its own handle, or name one inside another (outer/${inner})`, many: twins.length };
     }
     if (!t.startsWith(TEXT)) return { error: `no element with data-t="${t}"${looks}; ${there}` };
     const hits = byText(t.slice(TEXT.length)), all = named(top);
     if (!hits.length) return { error: `no showing element has the text ${JSON.stringify(t.slice(TEXT.length))}; ${there}` };
     const which = hits.map((el) => el.getAttribute("data-t") || (all.find(([, e]) => e === el) || [`<${el.localName}>`])[0]);
-    return { error: `${hits.length} elements show the text ${JSON.stringify(t.slice(TEXT.length))} (${which.join(", ")}): name one of them instead` };
+    return { error: `${hits.length} elements show the text ${JSON.stringify(t.slice(TEXT.length))} (${which.join(", ")}): name one of them instead`, many: hits.length };
   };
   // A string as Rust's `{:?}` writes it (TestUi's lines are written so).
   const debug = (s) => '"' + s.replace(/[\\"\n\r\t\0]|[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Grapheme_Extend}]/gu, (c) =>

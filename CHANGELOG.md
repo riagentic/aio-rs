@@ -280,8 +280,9 @@ version may break things.
   kit's sheet: a page without it no longer warns that `aio-browser` is
   unstyled. Any rule of the app's wins over it, as before.
 - **Breaking: `TestUi` refuses a `data-t` handle two showing elements
-  share**, naming both (`2 elements have data-t="fleet" (<button> "Fleet"
-  in data-t="side", <table> "gpu 1")`), where it read the first: name one
+  share**, naming both and the path that names each (`2 elements have
+  data-t="fleet": <button> "Fleet" at side/fleet, <table> "gpu 1" (no
+  path of handles names it)`), where it read the first: name one
   inside another (`side/fleet`) or give each its own. A hidden one doesn't
   count while one shows; `count`, `present` and `handles` are as before.
 - In the test world, `aio::process::Command` refuses a program that
