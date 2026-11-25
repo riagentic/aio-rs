@@ -143,3 +143,13 @@ find = "window.__aioRunning = 0;"
 put = "window.__aioRunning = 0)"
 expect = "[page] Uncaught SyntaxError"
 fast = true
+
+[[break]]
+id = "repeated-key-fault"
+what = "a list's repeated key fails a test (the window draws on, so nothing else would say it)"
+in = "source"
+file = "crates/air/src/dom.rs"
+find = "dom(|d| d.faults.push(msg));"
+put = "drop(msg);"
+test = "aio-rs-air test:gates gate_2_two_rows_with_one_key_fail_a_test_saying_where_and_draw_on"
+fast = true

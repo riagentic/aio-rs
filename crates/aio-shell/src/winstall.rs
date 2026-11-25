@@ -225,17 +225,44 @@ fn place(cfg: &aio::config::Config, version: &str, shortcut: bool) -> io::Result
     }
     // Its links (`[app] schemes`) open it.
     for s in &cfg.app.schemes {
-        for (key, value, data) in crate::oneclick::scheme_values(s, name, &exe.display().to_string()) {
-            let mut reg = Command::new("reg");
-            reg.args(["add", &key]);
-            match value {
-                Some(v) => reg.args(["/v", v]),
-                None => reg.arg("/ve"),
-            };
-            run(reg.args(["/t", "REG_SZ", "/d", &data, "/f"]), &format!("the {s}: links"))?;
-        }
+        register(s, name, &exe.display().to_string())?;
     }
     Ok(())
+}
+
+/// Make the installed `exe` the handler of `scheme`'s links.
+fn register(scheme: &str, name: &str, exe: &str) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    for (key, value, data) in crate::oneclick::scheme_values(scheme, name, exe) {
+        let mut reg = Command::new("reg");
+        reg.creation_flags(CREATE_NO_WINDOW).args(["add", &key]);
+        match value {
+            Some(v) => reg.args(["/v", v]),
+            None => reg.arg("/ve"),
+        };
+        run(reg.args(["/t", "REG_SZ", "/d", &data, "/f"]), &format!("the {scheme}: links"))?;
+    }
+    Ok(())
+}
+
+/// At a start of the installed app: each scheme with no handler (an update
+/// added it) or this app's at another path is made the installed exe's
+/// again; another app's that took one since stays.
+pub(crate) fn reregister(id: &str, name: &str, schemes: &[String]) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let exe = installed_exe(id).display().to_string();
+    for s in schemes {
+        let key = format!(r"{}\shell\open\command", crate::oneclick::scheme_key(s));
+        let said = Command::new("reg").creation_flags(CREATE_NO_WINDOW).args(["query", &key, "/ve"]).output();
+        let said = said.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+        if crate::oneclick::rehandle(said.as_deref(), &exe, id)
+            && let Err(e) = register(s, name, &exe)
+        {
+            eprintln!("[aio] {e}");
+        }
+    }
 }
 
 pub fn install(cfg: &aio::config::Config, version: &str) -> io::Result<()> {

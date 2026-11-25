@@ -348,6 +348,19 @@ mod tests {
     /// because it costs about 0.2 µs (0.6 µs in a debug build; measured).
     #[test]
     fn a_calls_accounting_costs_under_two_microseconds() {
+        // Alone in a process of its own: the suite's other tests share the
+        // meters' locks and caches, and on a CI runner they tripled the cost
+        // (2.09 us, 0.4 us alone).
+        if std::env::var_os("AIO_PERF_ALONE").is_none() {
+            let name = format!("{}::a_calls_accounting_costs_under_two_microseconds", module_path!().split_once("::").unwrap().1);
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture", "--test-threads", "1"])
+                .env("AIO_PERF_ALONE", "1")
+                .output()
+                .unwrap();
+            let (said, err) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            return assert!(out.status.success() && said.contains("1 passed"), "{said}{err}");
+        }
         // The fastest of 10 batches: a busy runner's preemption only ever
         // slows a batch, so its least is the accounting's own cost.
         let n = 2_000u32;

@@ -1021,7 +1021,7 @@ What aio has that aio-rs does not, or does differently:
 `cargo doc -p aio-rs --no-deps --all-features --open`: `aio::auth`
 (`Auth`, `Policy`, `Login`, `User`, `Session`, `Users`, `Mail`,
 `Refusal`, `serving`), `aio::auth::client` (`Client`, `AuthError`),
-`aio::auth::oidc` (`Oidc`), `aio::auth::budget`, `aio::kit::SignIn`,
+`aio::auth::oidc` (`Oidc`), `aio::kit::SignIn`,
 `aio::fns::Access`, `aio::http::Http` (`users`, `mail`, `oidc`),
 `aio::security`, `aio::capabilities`, `aio::tls`, `aio::pairing`,
 `aio::gate`.

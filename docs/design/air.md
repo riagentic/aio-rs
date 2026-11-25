@@ -117,8 +117,9 @@ until one calls `stop_propagation` (AIR's innermost handler alone wins;
 the views were written against Dioxus's bubbling); an event that doesn't
 bubble (`focus`, `mouseenter`, a media element's `loadeddata`, told by
 the event itself, never by a list) reaches its target's handlers alone. Two rows of a list
-with one key fail in every build (aio's tripwire), where AIR made the
-second fresh.
+with one key fail a test in every build (aio's tripwire), saying the
+component and where its `for` is; a window draws both, the second keyed
+by its repeat (AIR made the second fresh), and says it once.
 
 ## API (real code, from the prototype's tests)
 

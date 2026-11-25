@@ -934,9 +934,24 @@ pub(crate) fn telling() -> bool {
 /// one per app instance (so per test). Call `use_live()` once in the root
 /// component so commits made off the UI thread (effects, schedules)
 /// show too, at most once per [`BACKGROUND`].
+///
+/// These are made in the module that calls `client!`; another module (a
+/// page) takes them, with the view API, from the `prelude` module it makes
+/// beside them: `use crate::prelude::*;` (`use crate::todo::prelude::*;`
+/// for a `client!` in `mod todo`).
 #[macro_export]
 macro_rules! client {
     ($cell:ty, $read:ident $(, $at:ident)?) => {
+        /// What a view module needs of this cell's client, and the view API
+        /// (`aio::ui::prelude`): `use crate::prelude::*;` in a page module.
+        pub mod prelude {
+            pub use $crate::ui::prelude::*;
+            pub use super::{HANDLE, SOURCE, Ui, $read, part, use_live, use_pending, use_status};
+            $(pub use super::$at;)?
+            #[cfg(not(target_arch = "wasm32"))]
+            pub use super::{time_travel, use_time_travel};
+        }
+
         pub static DB: ::std::sync::OnceLock<::std::path::PathBuf> = ::std::sync::OnceLock::new();
 
         /// Set by `main` to use another source (a synced copy); else the

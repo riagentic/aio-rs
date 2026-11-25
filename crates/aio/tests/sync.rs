@@ -1336,6 +1336,31 @@ async fn an_unreadable_saved_copy_is_kept_aside_never_saved_over() {
     drop(a);
 }
 
+/// A saved copy that can't be read now (refused, held by another program,
+/// a disk error) is not damaged: never moved aside nor started over, the
+/// open fails naming it, and it opens whole once it can be read.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_saved_copy_refused_to_read_is_left_as_it_is_and_the_open_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("copy.json");
+    let (a, _) = Remote::<Board>::connect_later(None, "ana", &file).await.unwrap();
+    a.add("made offline".into()).unwrap();
+    drop(a);
+    let was = std::fs::read(&file).unwrap();
+    let mode = |m: u32| std::fs::set_permissions(&file, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o000);
+    let e = Remote::<Board>::connect_later(None, "ana", &file).await.err().expect("refused: the open fails");
+    mode(0o600);
+    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(e.to_string().contains(&file.display().to_string()) && e.to_string().contains("can't be read"), "{e}");
+    assert!(asides(dir.path(), "copy.unreadable-").is_empty(), "never moved aside");
+    assert_eq!(std::fs::read(&file).unwrap(), was, "never saved over");
+    let (b, _) = Remote::<Board>::connect_later(None, "ana", &file).await.unwrap();
+    assert_eq!(b.pending(), 1, "the call made offline is still there");
+}
+
 /// A save that failed (the disk full, the folder unwritable a moment) is
 /// written again by the next one, the drop's or the exit's: a call made
 /// offline then is never lost once the disk takes writes again.

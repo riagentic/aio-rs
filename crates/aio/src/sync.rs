@@ -1717,18 +1717,26 @@ fn of_user<T: Cell>(file: &std::path::Path, s: &Saved, user: &str, said: Option<
     false
 }
 
-/// The copy saved in `file`, if any. One that can't be read (torn by a
-/// disk fault, edited by hand, another aio-rs's format) is moved aside as
-/// `<file>.unreadable-<ms>` and said, never saved over: the calls waiting
-/// in it are the user's.
-fn read_saved<T: Cell>(file: &std::path::Path) -> Option<Saved> {
-    let why = match std::fs::read(file) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+/// The copy saved in `file`, if any. One whose content is damaged (torn
+/// by a disk fault, edited by hand, another aio-rs's format) is moved aside
+/// as `<file>.unreadable-<ms>` and said, never saved over: the calls
+/// waiting in it are the user's. A file that can't be read now (held by
+/// another program, refused, a disk error) is tried again briefly, then
+/// an error naming it: it is left where it is, never started over.
+fn read_saved<T: Cell>(file: &std::path::Path) -> std::io::Result<Option<Saved>> {
+    let bytes = match read_retried(file, &|ms| std::thread::sleep(Duration::from_millis(ms))) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!("{}: the saved copy can't be read ({e}); it is left as it is, open it again once it can be", file.display()),
+            ));
+        }
+        Ok(b) => b,
+    };
+    let why = match serde_json::from_slice(&bytes) {
+        Ok(s) => return Ok(Some(s)),
         Err(e) => e.to_string(),
-        Ok(b) => match serde_json::from_slice(&b) {
-            Ok(s) => return Some(s),
-            Err(e) => e.to_string(),
-        },
     };
     let mut at = crate::store::now_ms();
     let kept = loop {
@@ -1746,7 +1754,26 @@ fn read_saved<T: Cell>(file: &std::path::Path) -> Option<Saved> {
     );
     eprintln!("[aio] WARN {msg}");
     crate::report::tell_kept("sync:unreadable-copy", &msg);
-    None
+    Ok(None)
+}
+
+/// Pauses between reads of a saved copy that failed (a program holding it
+/// a moment, a disk retrying): 315 ms in all.
+const READ_RETRY_MS: [u64; 6] = [5, 10, 20, 40, 80, 160];
+
+/// `file`'s bytes, read again after each of [`READ_RETRY_MS`] (`pause`)
+/// while it fails for another reason than not being there: the last error.
+fn read_retried(file: &std::path::Path, pause: &dyn Fn(u64)) -> std::io::Result<Vec<u8>> {
+    let mut waits = READ_RETRY_MS.iter();
+    loop {
+        match std::fs::read(file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => match waits.next() {
+                Some(&ms) => pause(ms),
+                None => return Err(e),
+            },
+            r => return r,
+        }
+    }
 }
 
 /// Keep `s` beside `file` as `<file>.<tag>-<ms>` (0600), never over an
@@ -2438,7 +2465,7 @@ impl<T: Cell> Remote<T> {
         // A save still on its way (a copy dropped just now) is newer than the file.
         let saved: Option<Saved> = match claimed.as_ref().and_then(|(_, _, n)| n.as_deref()) {
             Some(n) => Some(n.clone()),
-            None => file.as_deref().and_then(read_saved::<T>),
+            None => file.as_deref().map(read_saved::<T>).transpose()?.flatten(),
         }
         .filter(|s| file.as_deref().is_none_or(|f| kept_aside::<T>(f, s) && of_user::<T>(f, s, user, None)));
         // A saved copy holds what it held.
@@ -3778,4 +3805,37 @@ fn a_pages_console_lines_are_cut_masked_and_paced() {
     let said = b.take(t0 + std::time::Duration::from_secs(1)).unwrap();
     assert!(said.starts_with("50 page console lines were dropped"), "{said}");
     assert!(b.room(), "a new second");
+}
+
+/// A saved copy that fails to read a moment (held, a disk retrying) is
+/// read once it can be; one that keeps failing gives its last error after
+/// every pause; one not there is not waited for.
+#[cfg(test)]
+#[test]
+fn a_saved_copy_is_read_again_while_it_fails_a_moment() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("copy.json");
+    // A folder where the file goes: a read that fails, not "not there".
+    std::fs::create_dir(&file).unwrap();
+    let paused = std::sync::Mutex::new(vec![]);
+    let freed = |ms| {
+        let mut p = paused.lock().unwrap();
+        p.push(ms);
+        if p.len() == 2 {
+            std::fs::remove_dir(&file).unwrap();
+            std::fs::write(&file, b"saved").unwrap();
+        }
+    };
+    assert_eq!(read_retried(&file, &freed).unwrap(), b"saved");
+    assert_eq!(*paused.lock().unwrap(), [5, 10], "read again after each pause, until it could be");
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    paused.lock().unwrap().clear();
+    let held = |ms| paused.lock().unwrap().push(ms);
+    assert_ne!(read_retried(&file, &held).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(*paused.lock().unwrap(), READ_RETRY_MS, "every pause, then the last error");
+    paused.lock().unwrap().clear();
+    let gone = dir.path().join("none.json");
+    assert_eq!(read_retried(&gone, &held).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+    assert!(paused.lock().unwrap().is_empty(), "not there: no wait");
 }

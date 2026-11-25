@@ -41,6 +41,23 @@ pub fn App() -> View {
         style { {aio::use_css!(aio::ui::scheme(), &theme; "assets/style.css")} }
         main { class: "container",
             h1 { "data-t": "count", "{n}" }
+            controls::Controls {}
+        }
+    }
+}
+
+/// Views in another module (a page, a panel): `client!` made `part`, `Ui`
+/// (what `act!` calls through), `counter()` and the rest at the crate's
+/// root, and a `prelude` with them and the view API. A module in a file of
+/// its own (`mod controls;`, src/controls.rs) takes it with
+/// `use crate::prelude::*;`.
+mod controls {
+    use super::prelude::*;
+
+    #[component]
+    pub fn Controls() -> View {
+        let n = part(|c| &c.count);
+        rsx! {
             button { class: aio::ui::btn("primary"), onclick: move |_| _ = act!(add(1)), "Add" }
             button { class: aio::ui::btn("ghost"), onclick: move |_| _ = act!(add(-1)), "Subtract" }
             button { class: aio::ui::btn("ghost"), disabled: n.get() == 0, onclick: move |_| _ = act!(reset()), "Reset" }

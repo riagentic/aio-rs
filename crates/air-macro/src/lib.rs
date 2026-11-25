@@ -682,7 +682,8 @@ pub(crate) enum Node {
     Text(String),
     /// A `"…{x}…"` text: `format!`'s literal and arguments, and the names it reads.
     Fmt(TokenStream, Vec<String>),
-    Expr(TokenStream),
+    /// A `{ … }` hole: its expression, and where its braces are.
+    Expr(TokenStream, Span),
     El {
         tag: String,
         /// Where its tag is written (`ax lint`'s line).
@@ -749,6 +750,18 @@ fn is_colon(toks: &[TokenTree], i: usize) -> bool {
     matches!(toks.get(i), Some(TokenTree::Punct(p)) if p.as_char() == ':' && p.spacing() == Spacing::Alone)
         && !is_punct(toks.get(i.wrapping_sub(1)), ':')
 }
+/// Where `s` is written (line, column, 1-based) in a compile; `(0, 0)` as
+/// `ax` reads the source (a hot reload's shape holds no place).
+fn line_col(s: Span) -> (u32, u32) {
+    #[cfg(proc_macro)]
+    return (s.unwrap().line() as u32, s.unwrap().column() as u32);
+    #[cfg(not(proc_macro))]
+    {
+        _ = s;
+        (0, 0)
+    }
+}
+
 fn span_of(toks: &[TokenTree], i: usize) -> Span {
     toks.get(i).or(toks.last()).map_or(Span::call_site(), |t| t.span())
 }
@@ -787,13 +800,30 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
         && let Some(s) = lit_str(l)
     {
         *i += 1;
-        return Ok(text(&s, l.span()));
+        // `"{} per SM", n, w = 2`: format!'s arguments, as many as its `{}`s take, then named ones.
+        let mut given = vec![];
+        for _ in 0..positional(&s) {
+            if !is_punct(toks.get(*i), ',') || *i + 1 == toks.len() {
+                break;
+            }
+            *i += 1;
+            given.push((None, take_expr(toks, i)));
+        }
+        while is_punct(toks.get(*i), ',')
+            && let Some(TokenTree::Ident(name)) = toks.get(*i + 1)
+            && matches!(toks.get(*i + 2), Some(TokenTree::Punct(p)) if p.as_char() == '=' && p.spacing() == Spacing::Alone)
+        {
+            let name = name.clone();
+            *i += 3;
+            given.push((Some(name), take_expr(toks, i)));
+        }
+        return Ok(fmt_text(&s, l.span(), &given));
     }
     if let TokenTree::Group(g) = t
         && g.delimiter() == Delimiter::Brace
     {
         *i += 1;
-        return Ok(Node::Expr(g.stream()));
+        return Ok(Node::Expr(g.stream(), g.span()));
     }
     if is_ident(t, "for") {
         let at = t.span();
@@ -838,6 +868,18 @@ fn parse_node(toks: &[TokenTree], i: &mut usize) -> Res<Node> {
     }
     if let TokenTree::Ident(_) = t {
         let start = *i;
+        // No `{ … }` before the next `,` (a turbofish's own kept): a value, not a node.
+        let end = start + split_top(&toks[start..]).first().map_or(0, Vec::len);
+        if !toks[start..end].iter().any(|t| matches!(t, TokenTree::Group(g) if g.delimiter() == Delimiter::Brace)) {
+            let v = toks[start..end].iter().cloned().collect::<TokenStream>().to_string().replace(" . ", ".");
+            return Err((
+                t.span(),
+                format!(
+                    "air: `{v}` is not a node: an element or a component takes braces (`div {{ … }}`); a value in \
+                     text goes in its string (`\"{{{v}}}\"`) or after a `{{}}` in it (`\"{{}} …\", {v}`)"
+                ),
+            ));
+        }
         let (path, inner) = until_block(toks, i)?;
         let path: Vec<TokenTree> = path.into_iter().collect();
         if is_punct(path.get(1), '!') {
@@ -1570,8 +1612,41 @@ fn unbrace(s: &str) -> String {
     s.replace("{{", "{").replace("}}", "}")
 }
 
+/// How many positional arguments `s`'s placeholders take, as `format!`
+/// counts them (`{}`, `{0}`, `{:.*}`, `{:1$}`) (pure).
+fn positional(s: &str) -> usize {
+    let (mut next, mut most, mut it) = (0, 0, s.chars().peekable());
+    while let Some(c) = it.next() {
+        if c != '{' || it.next_if_eq(&'{').is_some() {
+            continue;
+        }
+        let inner: String = it.by_ref().take_while(|c| *c != '}').collect();
+        let (arg, spec) = inner.split_once(':').unwrap_or((&inner, ""));
+        match arg.trim() {
+            "" => next += 1,
+            a => most = most.max(a.parse::<usize>().map_or(0, |n| n + 1)),
+        }
+        next += spec.contains(".*") as usize;
+        // `1$`: a width or precision from argument 1.
+        let refs = spec.split('$').rev().skip(1);
+        for w in refs.filter_map(|w| w.rsplit(|c: char| !c.is_ascii_digit()).next()?.parse::<usize>().ok()) {
+            most = most.max(w + 1);
+        }
+    }
+    next.max(most)
+}
+
 /// A text: static, or `format!`'s literal and arguments with the names they read.
 fn text(s: &str, span: Span) -> Node {
+    fmt_text(s, span, &[])
+}
+
+/// [`text`] with arguments given after it (`"{} per SM", n`, `w = 2`): a
+/// `{}`, `{0}` or a named one's `{w}` is theirs, as in `format!`; any other
+/// `{expr}` reads `expr`, as without them.
+fn fmt_text(s: &str, span: Span, given: &[(Option<Ident>, TokenStream)]) -> Node {
+    let named: Vec<String> = given.iter().filter_map(|(n, _)| n.as_ref().map(Ident::to_string)).collect();
+    let first = given.iter().filter(|(n, _)| n.is_none()).count();
     let (mut fmt, mut args, mut roots, mut it) = (String::new(), vec![], vec![], s.char_indices().peekable());
     while let Some((_, c)) = it.next() {
         match c {
@@ -1593,22 +1668,39 @@ fn text(s: &str, span: Span) -> Node {
                     Some((k, _)) => (&inner[..k], &inner[k..]),
                     None => (inner.as_str(), ""),
                 };
+                let e = expr.trim();
+                if !given.is_empty() && (e.is_empty() || e.parse::<usize>().is_ok() || named.iter().any(|n| n == e)) {
+                    fmt.push_str(&format!("{{{inner}}}"));
+                    continue;
+                }
                 let ts: TokenStream = expr.parse().unwrap_or_default();
                 let ts: TokenStream = ts.into_iter().map(|mut t| (t.set_span(span), t).1).collect();
                 captures(&ts, &mut roots);
+                // After the given positional ones, by place: `{}`s count only their own.
+                match given.is_empty() {
+                    true => fmt.push('{'),
+                    false => fmt.push_str(&format!("{{{}", first + args.len())),
+                }
                 args.push(ts);
-                fmt.push('{');
                 fmt.push_str(spec);
                 fmt.push('}');
             }
             c => fmt.push(c),
         }
     }
-    if args.is_empty() {
+    if args.is_empty() && given.is_empty() {
         return Node::Text(unbrace(s));
     }
+    let mut all: Vec<TokenStream> = given.iter().filter(|(n, _)| n.is_none()).map(|(_, e)| e.clone()).collect();
+    all.append(&mut args);
+    for (n, e) in given {
+        captures(e, &mut roots);
+        if let Some(n) = n {
+            all.push(quote!(#n = #e));
+        }
+    }
     let lit = Literal::string(&fmt);
-    Node::Fmt(quote!(#lit, #(#args),*), roots)
+    Node::Fmt(quote!(#lit #(, #all)*), roots)
 }
 
 const KEYWORDS: &[&str] = &[
@@ -1827,7 +1919,7 @@ fn node_captures(nodes: &[Node], out: &mut Vec<String>) {
         match n {
             Node::Text(_) => {}
             Node::Fmt(_, r) => out.extend(r.iter().cloned()),
-            Node::Expr(e) => captures(e, out),
+            Node::Expr(e, _) => captures(e, out),
             Node::El { attrs, spreads, children, key, .. } => {
                 for (_, v) in attrs {
                     match v {
@@ -1910,7 +2002,7 @@ fn let_bound(cond: &TokenStream) -> Vec<String> {
 
 /// Is `n` a placeholder in its template (an anchor its content goes before)?
 fn anchored(n: &Node) -> bool {
-    matches!(n, Node::Expr(_) | Node::Comp { .. } | Node::For { .. } | Node::If { .. } | Node::Match { .. })
+    matches!(n, Node::Expr(..) | Node::Comp { .. } | Node::For { .. } | Node::If { .. } | Node::Match { .. })
         || remounted(n).is_some()
 }
 
@@ -2017,6 +2109,7 @@ impl Tpl {
                                 let (head, set) = attr_fn();
                                 hole_fn(
                                     e,
+                                    at_expr(e),
                                     head,
                                     |v| quote!(#set(air::IntoAttr::into_attr(#v))),
                                     |e| quote!(air::__rt::attr(#id, #k, #e);),
@@ -2033,12 +2126,14 @@ impl Tpl {
                                     let data = Ident::new(data, Span::call_site());
                                     // A closure gets its parameter's type from a direct bound.
                                     let closure = is_closure(e);
+                                    // Said at the handler: a borrow it can't keep is its.
+                                    let sp = at_expr(e);
                                     let h = if closure {
-                                        quote!(air::__rt::handler_fn::<air::__rt::#data, _, _>(::std::boxed::Box::new(#e)))
+                                        quote_spanned!(sp=> air::__rt::handler_fn::<air::__rt::#data, _, _>(::std::boxed::Box::new(#e)))
                                     } else {
-                                        quote!(air::__rt::handler::<air::__rt::#data, _>(#e))
+                                        quote_spanned!(sp=> air::__rt::handler::<air::__rt::#data, _>(#e))
                                     };
-                                    quote!(air::__rt::on(#id, #dom, { #c #h });)
+                                    quote_spanned!(sp=> air::__rt::on(#id, #dom, { #c #h });)
                                 }
                             }
                             _ => continue,
@@ -2079,12 +2174,16 @@ impl Tpl {
                             { #ck ::std::boxed::Box::new(move || (#key).to_owned()) },
                             { #cr ::std::boxed::Box::new(move || #view) });)
                     }
-                    Node::Expr(e) => hole_fn(
-                        e,
-                        quote!(move ||),
-                        |v| quote!(air::IntoChild::into_child(#v)),
-                        |e| quote!(air::__rt::child(#id, #e);),
-                    ),
+                    Node::Expr(e, braces) => {
+                        let sp = Span::call_site().located_at(*braces);
+                        hole_fn(
+                            e,
+                            sp,
+                            quote_spanned!(sp=> move ||),
+                            |v| quote_spanned!(sp=> air::IntoChild::into_child(#v)),
+                            |e| quote_spanned!(sp=> air::__rt::child(#id, #e);),
+                        )
+                    }
                     Node::Comp { path, key, .. } => {
                         let mut r = vec![];
                         node_captures(std::slice::from_ref(n), &mut r);
@@ -2127,7 +2226,11 @@ impl Tpl {
                         cr.retain(|n| !b.contains(n));
                         let (ce, ck, cr) = (clones(&ce), clones(&ck), clones(&cr));
                         let view = body(rows);
-                        quote!(#[allow(unused_variables)] air::__rt::each(#id,
+                        // Where the `for` is, for what a repeated key says.
+                        let file = HOT.with_borrow(|h| h.at.as_ref().map(|a| a.0.clone())).unwrap_or_default();
+                        let (line, col) = line_col(*at);
+                        let site = quote!(&air::__rt::At { file: #file, line: #line, col: #col, idx: 0 });
+                        quote!(#[allow(unused_variables)] air::__rt::each(#id, #site,
                             { #ce move || { #ce ::std::iter::IntoIterator::into_iter(#expr).collect::<::std::vec::Vec<_>>() } },
                             { #ck move |#pat: &_| (#key).to_owned() },
                             { #cr move |#pat| #view });)
@@ -2180,12 +2283,19 @@ fn attr_fn() -> (TokenStream, TokenStream) {
     (quote!(move |#s: &mut air::__rt::AttrSlot|), quote!(#s.set))
 }
 
+/// Where the expression `e` is written (its first token), resolved as the
+/// macro's own code: the code made for its hole is said there.
+fn at_expr(e: &TokenStream) -> Span {
+    e.clone().into_iter().next().map_or(Span::call_site(), |t| Span::call_site().located_at(t.span()))
+}
+
 /// A hole's closure (`head`, then `into` of the value): the names it reads
 /// are cloned in, and again per run (as a component's props), so `{match
 /// who { .. }}` or `{note.map(..)}` may take them by value; a single name's
 /// type decides whether it follows anything (a signal does).
 fn hole_fn(
     e: &TokenStream,
+    sp: Span,
     head: TokenStream,
     into: impl Fn(TokenStream) -> TokenStream,
     call: impl Fn(TokenStream) -> TokenStream,
@@ -2196,11 +2306,13 @@ fn hole_fn(
         && i.to_string().starts_with(|c: char| c.is_uppercase())
     {
         let v = into(quote!(::std::clone::Clone::clone(&#i)));
-        return call(quote!(::std::boxed::Box::new(#head #v)));
+        return call(quote_spanned!(sp=> ::std::boxed::Box::new(#head #v)));
     }
     if let [TokenTree::Ident(i)] = v.as_slice() {
         let v = into(quote!(::std::clone::Clone::clone(&#i)));
-        return call(quote!({ let #i = ::std::clone::Clone::clone(&#i); ::std::boxed::Box::new(#head #v) }));
+        return call(
+            quote_spanned!(sp=> { let #i = ::std::clone::Clone::clone(&#i); ::std::boxed::Box::new(#head #v) }),
+        );
     }
     let mut r = vec![];
     captures(e, &mut r);
@@ -2208,8 +2320,9 @@ fn hole_fn(
     // The per-run clones outlive `into`: `{t(&x)}` may borrow them. A lone
     // expression is `into`'s argument, so what it makes lives as long
     // (`{t(&sig.get())}`); a block's tail drops its temporaries at its end.
-    let v = into(if v.iter().any(|t| is_punct(Some(t), ';')) { quote!({ #e }) } else { e.clone() });
-    call(quote!({ #c ::std::boxed::Box::new(#head { #c #v }) }))
+    // Its own code is said where the hole is: a borrow error points there, not at the whole `rsx!`.
+    let v = into(if v.iter().any(|t| is_punct(Some(t), ';')) { quote_spanned!(sp=> { #e }) } else { e.clone() });
+    call(quote_spanned!(sp=> { #c ::std::boxed::Box::new(#head { #c #v }) }))
 }
 
 /// `Row { a: x, "data-t": t, ..more, children… }`'s props:
@@ -2451,6 +2564,57 @@ mod tests {
             })
         }
         find(expand(src.parse().unwrap(), None))
+    }
+
+    /// Where `expand(src)`'s first `name` is (line, column).
+    fn made_at(src: &str, name: &str) -> Option<(usize, usize)> {
+        fn find(ts: TokenStream, name: &str) -> Option<(usize, usize)> {
+            ts.into_iter().find_map(|t| match t {
+                TokenTree::Ident(i) if i == name => Some((i.span().start().line, i.span().start().column)),
+                TokenTree::Group(g) => find(g.stream(), name),
+                _ => None,
+            })
+        }
+        find(expand(src.parse().unwrap(), None), name)
+    }
+
+    /// A borrow error in a hole (a temporary a view keeps, a local a
+    /// handler borrows) is said at the hole, not over the whole `rsx!`.
+    #[test]
+    fn the_code_made_for_a_hole_is_said_where_the_hole_is() {
+        assert_eq!(made_at("div {\n  {a.b().map(f)}\n}", "into_child"), Some((2, 2)), "a child hole: its braces");
+        assert_eq!(made_at("p {\n  title: t.get().x,\n}", "Box"), Some((2, 9)), "an attribute's value");
+        assert_eq!(made_at("button {\n  onclick: move |_| f(&x),\n}", "handler_fn"), Some((2, 11)), "a handler");
+    }
+
+    #[test]
+    fn a_text_takes_format_arguments_as_its_placeholders_count_them() {
+        assert_eq!(positional("By threads ({} per SM)"), 1);
+        assert_eq!(positional("{} {x} {{}} {0} {}"), 2, "a name and an escape take none");
+        assert_eq!(positional("{2} {:>5} {a:1$} {:.*}"), 3, "an index, a width's, a precision's");
+        assert_eq!(positional("{x:5}"), 0, "a width given in place");
+        let made = |src: &str| match parse_nodes(&src.parse::<TokenStream>().unwrap().into_iter().collect::<Vec<_>>()) {
+            Ok(n) => match &n[..] {
+                [Node::El { children, .. }] => match &children[..] {
+                    [Node::Fmt(f, r)] => (f.to_string(), r.clone()),
+                    _ => panic!("{src}: one text"),
+                },
+                _ => panic!("{src}: one element"),
+            },
+            Err((_, e)) => panic!("{src}: {e}"),
+        };
+        assert_eq!(
+            made("span { \"({} per SM)\", g.threads_sm }"),
+            ("\"({} per SM)\" , g . threads_sm".into(), vec!["g".into()])
+        );
+        assert_eq!(
+            made("span { \"{} of {n.max} {w}\", a, w = b }").0,
+            "\"{} of {1} {w}\" , a , n . max , w = b",
+            "a read in place goes after the given ones, by place"
+        );
+        assert_eq!(error_at("span {\n  \"By threads\", g.threads_sm\n}"), Some((2, 16)), "a value with no `{{}}`");
+        assert_eq!(error_at("span { \"{} {}\", a, b } p { \"x\" }"), None);
+        assert_eq!(error_at("div { \"a\", WebIsland::<Shown, ()> { src: s } }"), None, "a turbofish's comma");
     }
 
     #[test]

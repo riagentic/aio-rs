@@ -561,11 +561,29 @@ pub fn build_features(pkg: &Pkg, dev: bool) -> Vec<String> {
 }
 
 /// Compiler errors whose fix is aio's to say, by what rustc says, and the fix.
-const HINTS: &[(&[&str], &str)] = &[(
-    &["aio::serde::Serialize", "aio::serde::Deserialize"],
-    "ax: a type a cell keeps (a field's, a method argument's) is saved and sent: put #[aio::data] on it \
-     (it derives serde through aio: no serde dependency to add)",
-)];
+const HINTS: &[(&[&str], &str)] = &[
+    (
+        &["aio::serde::Serialize", "aio::serde::Deserialize"],
+        "ax: a type a cell keeps (a field's, a method argument's) is saved and sent: put #[aio::data] on it \
+         (it derives serde through aio: no serde dependency to add)",
+    ),
+    (
+        &[
+            "cannot find function `part`",
+            "cannot find type `Ui`",
+            "cannot find value `Ui`",
+            "cannot find function `use_live`",
+        ],
+        "ax: client! makes part, Ui (act!'s door), use_live and the cell's reader in the module that calls it; \
+         another module takes them, with the view API, from the prelude it makes there: \
+         use crate::prelude::*; (use crate::<module>::prelude::*; for a client! in a module)",
+    ),
+];
+
+/// aio's fix for the first error in `text` it knows (pure).
+pub fn hint(text: &str) -> Option<&'static str> {
+    HINTS.iter().find(|(said, _)| said.iter().any(|s| text.contains(s))).map(|(_, h)| *h)
+}
 
 /// Compiler output `text` with aio's hint after it for each error it knows (pure).
 pub fn with_hints(text: &str) -> String {
@@ -2357,6 +2375,12 @@ mod tests {
         let said = with_hints(e);
         assert!(said.starts_with(e.trim_end()) && said.contains("= ax: ") && said.contains("#[aio::data]"), "{said}");
         assert_eq!(with_hints("error[E0425]: cannot find value `x`\n"), "error[E0425]: cannot find value `x`\n");
+        // A page module without the client's names: where they are.
+        let e = "error[E0425]: cannot find function `part` in this scope\n --> src/page.rs:5:13\n\
+                 error[E0412]: cannot find type `Ui` in this scope\n --> src/page.rs:9:40\n";
+        let said = with_hints(e);
+        assert_eq!(said.matches("= ax: client! makes part").count(), 1, "{said}");
+        assert!(said.contains("use crate::prelude::*;"), "{said}");
     }
 
     #[test]

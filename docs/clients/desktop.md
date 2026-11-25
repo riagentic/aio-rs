@@ -99,9 +99,14 @@ schemes = ["notes"]
   schemes stay in `aio_shell::launches()` only.
 - `ax dev` registers nothing: try a link with a second launch,
   `<app> notes://item/7`, while the app runs.
-- A scheme an update adds is registered by the next install (Linux,
-  Windows): an update swaps the program, not its registration. macOS and
-  Android read theirs from the new bundle.
+- An update swaps the program in place, so the registration keeps naming
+  it. A scheme an update adds (or drops) is set at the app's next start
+  (Linux: its menu entry's `MimeType` and `xdg-mime`; Windows: a handler
+  that is missing, or this app's at another path; another app's that took
+  the scheme stays). macOS and Android read theirs from the new bundle.
+- Reading a link by hand: `aio::route::of_link(&url)` is its place
+  (`notes://item/7?tab=a` is `/item/7?tab=a`), and `aio::route::Loc::parse`
+  of that its `path` and decoded `query("tab")`.
 
 Names are checked as the app builds: RFC 3986's form in lower case, and
 none of the system's (`http`, `https`, `file`, `data`, `javascript`,
