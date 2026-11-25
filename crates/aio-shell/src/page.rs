@@ -1,9 +1,10 @@
 //! What only the window can do, for views on the shared runtime: bring an
-//! element into view, set a scroll position, read a text field's caret,
+//! element into view, set a scroll position, read or set a text field's selection (and put text in it),
 //! copy text, print, ask for files or a folder, or where to save. Each is one small script in
 //! the page (aio did these on its DOM) or one line to the runtime; with no
 //! window (headless tests) they do nothing, but a pick asks the desktop.
 use aio::serde_json::json;
+use aio::ui::prelude::{Eval, EvalError, TextSelection, eval};
 use std::io;
 
 fn run(js: &str) {
@@ -43,10 +44,38 @@ pub fn set_scroll(selector: &str, y: f64) {
 }
 
 /// Where the caret is in the text field matching `selector` (in UTF-16
-/// units, as the page counts), if there is one.
+/// units, as the page counts), if there is one. [`selection`] gives it in
+/// bytes of the value, as Rust indexes it.
 pub async fn caret(selector: &str) -> Option<usize> {
     let js = format!("return document.querySelector({})?.selectionStart ?? null", json!(selector));
     aio::ui::prelude::eval(&js).join::<Option<usize>>().await.ok().flatten()
+}
+
+/// A field script on the element matching `selector`.
+fn on_field(selector: &str, js: &str) -> Eval {
+    eval(&format!(
+        "const el = document.querySelector({0}); if (!el) throw new Error('no element matches ' + {0});\n{js}",
+        json!(selector)
+    ))
+}
+
+/// The selection of the text field matching `selector`
+/// ([`MountedData::selection`](aio::ui::prelude::MountedData::selection)'s,
+/// for a field the view didn't draw).
+pub async fn selection(selector: &str) -> Result<TextSelection, EvalError> {
+    let (start, end, backward) = on_field(selector, &TextSelection::read_js()).join().await?;
+    Ok(TextSelection { start, end, backward })
+}
+
+/// Select `s` in the text field matching `selector` (`MountedData::set_selection`'s).
+pub async fn set_selection(selector: &str, s: TextSelection) -> Result<(), EvalError> {
+    on_field(selector, &s.set_js()).join().await
+}
+
+/// `text` in place of the selection of the text field matching `selector`,
+/// as typed (`MountedData::insert_text`'s: undoable while it has focus).
+pub async fn insert_text(selector: &str, text: &str) -> Result<(), EvalError> {
+    on_field(selector, &TextSelection::insert_js(text)).join().await
 }
 
 /// Own part of the window's `<head>` while this component lives (aio's `useHead`).

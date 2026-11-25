@@ -75,6 +75,12 @@ version may break things.
 
 ### Added
 
+- A text field's selection, written as well as read: `MountedData::
+  selection()`, `set_selection(TextSelection)` and `insert_text(text)`
+  (the browser's own typing: `input` fires, Ctrl+Z undoes it), in bytes
+  of the value as Rust indexes it, on the desktop, the web and Android;
+  `aio_shell::page::selection`, `set_selection` and `insert_text` by
+  selector, beside `caret` ([views](docs/ui/views.md#a-text-fields-selection)).
 - `aio::kit::NavList` and `NavItem`: a sidebar's rail of pages, the
   current one `aria-current="page"` (marked by a bar and weight, not
   colour alone), one tab stop with ↑/↓, Home and End moving focus and

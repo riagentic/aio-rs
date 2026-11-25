@@ -722,8 +722,59 @@ Rows from a signal cost 5% more (the list follows it).
 | `use_head(aio::head::Head::title("Inbox"))` | owns the window's title and `<meta>`/`<link>` tags while the component lives (a page's `routes!` variant gives its own: `page.head()`) |
 | `reveal(selector, center)`, `reveal_id(id, center)` | scrolls an element into view |
 | `set_scroll(selector, y)`, `caret(selector).await` | sets a scroll position, reads a field's caret |
+| `selection(selector).await`, `set_selection(selector, s)`, `insert_text(selector, text)` | a field's selection, as `MountedData`'s ([below](#a-text-fields-selection)), for a field the view didn't draw |
 | `copy(text).await`, `print()` | the clipboard, the print dialog |
 | `pick(&Pick { .. }).await`, `pick_many`, `save(&Save { .. }).await` | the system's open and save dialogs |
+
+### A text field's selection
+
+A field's `MountedData` (its `onmounted`) reads and sets its selection
+and puts text in it, on the desktop, the web and Android alike:
+
+```rust
+use aio::ui::prelude::*;
+
+#[component]
+fn Note() -> View {
+    let field = signal(|| None::<std::rc::Rc<MountedData>>);
+    let text = signal(|| "Hello world".to_string());
+    rsx! {
+        textarea { "data-t": "note", "aria-label": "Note", value: text.get(),
+            oninput: move |e| text.set(e.value()),
+            onmounted: move |e| *field.write() = Some(e.data()) }
+        button { "data-t": "stamp", onclick: move |_| async move {
+            let Some(f) = field.get() else { return };
+            let s = f.selection().await.unwrap_or_default();
+            _ = f.set_focus(true).await;
+            // Selected text replaced, or put in at the caret; Ctrl+Z takes it back.
+            _ = f.insert_text(&format!("[{}]", &text.get()[s.start..s.end])).await;
+        }, "Stamp" }
+        button { "data-t": "word", onclick: move |_| async move {
+            if let Some(f) = field.get() { _ = f.set_selection(TextSelection::range(6, 11)).await }
+        }, "Select world" }
+    }
+}
+
+# fn main() {
+let mut ui = aio::testing::TestUi::new(Note);
+ui.click("word");
+ui.click("stamp");
+assert_eq!(ui.value("note"), "Hello [world]");
+# }
+```
+
+- `TextSelection { start, end, backward }` counts bytes of the value, as
+  Rust indexes the `String` (`&value[s.start..s.end]`); the page's UTF-16
+  units are converted both ways. `TextSelection::caret(at)` is the caret
+  alone.
+- `insert_text` is the browser's own typing (`insertText`): the field's
+  `input` fires (`oninput` hears it), the caret goes after it, and Ctrl+Z
+  undoes it while the field has focus; a field without focus takes it with
+  no undo step.
+- A field's own keys: `data-aio-prevent="Tab"` on the field keeps Tab in
+  it (the view's `prevent_default()` comes too late) and the view does what
+  Tab means ([kit](kit.md#keys)). A code editor: the kit's
+  [`CodeArea`](kit.md#code).
 
 `aio::kit::use_window_event(|e| ..)` hears the window's pointer, wheel, key
 and resize events (pointer moves at most every `kit::MOVE_MS`, 100 ms),

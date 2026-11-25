@@ -1800,6 +1800,105 @@ impl MountedData {
             }
         }
     }
+
+    /// A text field's selection (an `input` that takes text, a `textarea`).
+    pub fn selection(&self) -> impl std::future::Future<Output = Result<TextSelection, String>> + use<> {
+        let f = self.eval(&TextSelection::read_js()).join_json();
+        async move { TextSelection::parse(&f.await?) }
+    }
+
+    /// Select `s` in a text field (the caret alone when it is empty), as a
+    /// person's drag or Shift+arrows would; the focus stays where it is.
+    pub fn set_selection(&self, s: TextSelection) -> impl std::future::Future<Output = Result<(), String>> + use<> {
+        let f = self.eval(&s.set_js()).join_json();
+        async move { f.await.map(drop) }
+    }
+
+    /// `text` in place of a text field's selection (at its caret), as typing
+    /// or a paste puts it: its `input` fires, the caret goes after it, and
+    /// in a focused field Ctrl+Z takes it back (the browser's
+    /// `insertText`; a field without focus takes it with no undo step).
+    pub fn insert_text(&self, text: &str) -> impl std::future::Future<Output = Result<(), String>> + use<> {
+        let f = self.eval(&TextSelection::insert_js(text)).join_json();
+        async move { f.await.map(drop) }
+    }
+}
+
+/// A text field's selection, in bytes of its value as Rust indexes it
+/// (`&value[s.start..s.end]`; the page counts UTF-16 units, converted
+/// both ways): `start <= end`, the caret at `end`, or at `start` when
+/// `backward` (selected towards the start). Empty: the caret alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextSelection {
+    pub start: usize,
+    pub end: usize,
+    pub backward: bool,
+}
+
+impl TextSelection {
+    /// The caret at byte `at`, nothing selected.
+    pub const fn caret(at: usize) -> Self {
+        Self { start: at, end: at, backward: false }
+    }
+
+    /// `start..end`, selected forwards.
+    pub const fn range(start: usize, end: usize) -> Self {
+        Self { start, end, backward: false }
+    }
+
+    /// What every field script starts with, on `el`: its value, and its
+    /// UTF-16 offsets to bytes (`bytes`) and back (`at`, rounding down
+    /// inside a character).
+    const FIELD: &str = "if (typeof el.selectionStart !== 'number') throw new Error('not a text field: an input that takes text, or a textarea');
+const v = el.value, bytes = (i) => new TextEncoder().encode(v.slice(0, i)).length;
+const at = (n) => { let i = 0; for (const c of v) { const p = c.codePointAt(0); n -= p < 0x80 ? 1 : p < 0x800 ? 2 : p < 0x10000 ? 3 : 4; if (n < 0) break; i += c.length; } return i; };
+";
+
+    /// The script on `el` that answers its selection ([`Self::parse`] reads it).
+    #[doc(hidden)]
+    pub fn read_js() -> String {
+        format!(
+            "{}return [bytes(el.selectionStart), bytes(el.selectionEnd), el.selectionDirection === 'backward'];",
+            Self::FIELD
+        )
+    }
+
+    /// The selection a [`Self::read_js`] answered (`[start, end, backward]`).
+    fn parse(json: &str) -> Result<Self, String> {
+        let bad = || format!("a selection the page did not give: {json}");
+        let inner = json.trim().strip_prefix('[').and_then(|s| s.strip_suffix(']')).ok_or_else(bad)?;
+        match inner.split(',').map(str::trim).collect::<Vec<_>>()[..] {
+            [s, e, b] => Ok(Self {
+                start: s.parse().map_err(|_| bad())?,
+                end: e.parse().map_err(|_| bad())?,
+                backward: b == "true",
+            }),
+            _ => Err(bad()),
+        }
+    }
+
+    /// The script on `el` that selects this.
+    #[doc(hidden)]
+    pub fn set_js(self) -> String {
+        let (a, b) = (self.start.min(self.end), self.start.max(self.end));
+        let dir = if self.backward { "backward" } else { "forward" };
+        format!("{}el.setSelectionRange(at({a}), at({b}), '{dir}');", Self::FIELD)
+    }
+
+    /// The script on `el` that puts `text` in place of its selection.
+    #[doc(hidden)]
+    pub fn insert_js(text: &str) -> String {
+        format!(
+            "{}const t = {}, a = el.selectionStart, z = el.selectionEnd;
+if ((t || a !== z) && !(document.activeElement === el && document.execCommand(t ? 'insertText' : 'delete', false, t))) {{
+  el.setRangeText(t, a, z, 'end');
+  el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: t ? 'insertText' : 'deleteContentBackward', data: t || null }}));
+}}
+",
+            Self::FIELD,
+            crate::ssr::json_str(text)
+        )
+    }
 }
 
 // ------------------------------------------------------------------- root
@@ -2092,5 +2191,14 @@ mod tests {
         assert_eq!(pick(&[2, 0, 1]), [1, 2], "one move: the first row to the end");
         assert_eq!(pick(&[-1, 0, -1, 1]), [1, 3], "new rows never stay");
         assert_eq!(pick(&[]), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_selection_reads_as_the_page_answers_it_and_is_set_in_order() {
+        assert_eq!(TextSelection::parse("[2,7,true]"), Ok(TextSelection { start: 2, end: 7, backward: true }));
+        assert_eq!(TextSelection::parse(" [0, 0, false] "), Ok(TextSelection::caret(0)));
+        assert!(TextSelection::parse("null").is_err() && TextSelection::parse("[1,x,false]").is_err());
+        assert!(TextSelection::range(5, 2).set_js().contains("setSelectionRange(at(2), at(5), 'forward')"));
+        assert!(TextSelection::insert_js("a\"\n").contains(r#"const t = "a\"\u000a""#));
     }
 }

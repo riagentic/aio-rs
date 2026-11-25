@@ -68,8 +68,8 @@ pub mod events {
         AnimationEvent, ClipboardEvent, CompositionEvent, DataTransfer, DragData, DragEvent, Event, FileData,
         FocusData, FocusEvent, FormData, FormEvent, ImageEvent, KeyboardData, KeyboardEvent, MediaEvent, MountedData,
         MountedEvent, MouseData, MouseEvent, PlainData, PointerData, PointerEvent, ResizeData, ResizeEvent,
-        ScrollBehavior, ScrollData, ScrollEvent, SelectionEvent, ToggleEvent, TouchEvent, TransitionEvent, VisibleData,
-        VisibleEvent, WheelData, WheelEvent,
+        ScrollBehavior, ScrollData, ScrollEvent, SelectionEvent, TextSelection, ToggleEvent, TouchEvent,
+        TransitionEvent, VisibleData, VisibleEvent, WheelData, WheelEvent,
     };
 }
 
