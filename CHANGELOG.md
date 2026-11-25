@@ -349,6 +349,25 @@ version may break things.
 
 ### Changed
 
+- Internal: the runtime compiles its store, handle, sync server and boot
+  once, not once per cell. `Store<T>`, `Handle<T>` and `Source<T>` are thin
+  typed shells over one type-erased core (the state behind a trait
+  object, the cell's constants and constructors in a table made once per
+  cell type). The transaction and `db:` table code links only into apps
+  with a cell that uses it. No API change (`scripts/api` unchanged).
+  Measured back to back on one Linux x86_64 machine (`desktop-dev`
+  profile, the app's crates rebuilt, median of 3; release binary):
+
+  | app | clean build | after a cell method edit | release binary |
+  |---|---|---|---|
+  | `ax create` template (1 cell) | 1.10 → 0.76 s | 0.44 → 0.48 s | 5.18 → 5.22 MB (+0.9%) |
+  | template + 9 cells (`ax add cell`) | 3.68 → 1.35 s | 0.74 → 0.54 s | 6.78 → 5.43 MB (−20%) |
+  | `--template service` | 1.84 → 1.28 s | 0.61 → 0.53 s | 6.06 → 6.07 MB (+0.2%) |
+
+  The 10-cell app's release build takes 21.0 s, down from 35.6 s. Runtime
+  (`rt_gate`, release, p10 over 5 interleaved runs): a call in memory
+  takes 3.93 µs, up from 3.79 µs (one indirect call per step). A boot, a
+  saved call and a call's accounting are unchanged.
 - ax reads and writes objects with object 0.39 (from 0.37): one hashbrown
   in the workspace, a crate fewer in ax's graph.
 - **Breaking:** a module named `prelude` beside an `aio::client!(..)`
