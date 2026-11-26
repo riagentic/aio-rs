@@ -6,7 +6,7 @@ members = ["crates/air", "crates/air-macro", "crates/air-bench", "crates/aio", "
 edition = "2024"
 # The toolchain rust-toolchain.toml pins: the oldest aio-rs is built and tested with.
 rust-version = "1.98"
-version = "0.4.2"
+version = "0.5.0"
 license = "MIT"
 repository = "https://github.com/riagentic/aio-rs"
 readme = "README.md"
@@ -15,14 +15,14 @@ categories = ["gui", "database", "development-tools"]
 
 # The crates each other use: one version, the workspace's.
 [workspace.dependencies]
-aio = { package = "aio-rs", version = "0.4.2", path = "crates/aio", default-features = false }
-aio-config = { package = "aio-rs-config", version = "0.4.2", path = "crates/aio-config" }
-aio-config-macro = { package = "aio-rs-config-macro", version = "0.4.2", path = "crates/aio-config-macro" }
-aio-macros = { package = "aio-rs-macros", version = "0.4.2", path = "crates/aio-macros" }
-air = { package = "aio-rs-air", version = "0.4.2", path = "crates/air" }
-air-macro = { package = "aio-rs-air-macro", version = "0.4.2", path = "crates/air-macro" }
-aio-hotpatch = { package = "aio-rs-hotpatch", version = "0.4.2", path = "crates/hotpatch" }
-aio-shell = { package = "aio-rs-shell", version = "0.4.2", path = "crates/aio-shell" }
+aio = { package = "aio-rs", version = "0.5.0", path = "crates/aio", default-features = false }
+aio-config = { package = "aio-rs-config", version = "0.5.0", path = "crates/aio-config" }
+aio-config-macro = { package = "aio-rs-config-macro", version = "0.5.0", path = "crates/aio-config-macro" }
+aio-macros = { package = "aio-rs-macros", version = "0.5.0", path = "crates/aio-macros" }
+air = { package = "aio-rs-air", version = "0.5.0", path = "crates/air" }
+air-macro = { package = "aio-rs-air-macro", version = "0.5.0", path = "crates/air-macro" }
+aio-hotpatch = { package = "aio-rs-hotpatch", version = "0.5.0", path = "crates/hotpatch" }
+aio-shell = { package = "aio-rs-shell", version = "0.5.0", path = "crates/aio-shell" }
 # ax's dates and time zones, the tz database the runtime's tests check
 # against (chrono is unmaintained: RUSTSEC-2026-0543).
 jiff = { version = "1", default-features = false, features = ["std"] }

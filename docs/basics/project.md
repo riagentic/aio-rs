@@ -206,7 +206,7 @@ The templates: `app` uses `kit` (and `web` for its browser build),
 dev-dependency. A feature is added in the app's `Cargo.toml`:
 
 ```toml
-aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.4.0", features = ["kit", "net"] }
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.5.0", features = ["kit", "net"] }
 ```
 
 `aio-rs-shell` has two features an app names: `dev` (what `ax dev` builds

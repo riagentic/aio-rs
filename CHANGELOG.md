@@ -7,6 +7,21 @@ version may break things.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-26
+
+Feedback from three app ports, five bug-hunt rounds and a public API
+cleanup. New: the OS's secret store (`aio::secrets`, in a page too, through
+a passkey), USB devices (`aio::hw`, with fake devices for tests), deep
+links, a QR scanner, charts, heat maps and a 2-D canvas drawn from Rust
+(`draw`), a light code editor (`CodeArea`) and a text selection API, a
+side rail (`NavList`), `ax expect-ui` and `ax wait --idle` for agents, and
+a core crate `ax add page` makes so pages reach the app's cells. The
+runtime is compiled once instead of once per cell: clean builds up to 63%
+faster and apps up to 20% smaller. Releases are signed and `ax upgrade`
+checks the signature. This release breaks the API in places; the
+[0.4 to 0.5 migration guide](docs/migration/0.4-to-0.5.md) lists every
+change with its before and after.
+
 ### Security
 
 - `ax upgrade` checks the release's `SHA256SUMS` against its signature
@@ -3680,6 +3695,7 @@ a time ([migration guide](docs/migration/README.md)).
 - The prebuilt archives and app bundles are not OS-signed yet: Windows
   SmartScreen and macOS Gatekeeper warn on first start.
 
+[0.5.0]: https://github.com/riagentic/aio-rs/releases/tag/v0.5.0
 [0.4.2]: https://github.com/riagentic/aio-rs/releases/tag/v0.4.2
 [0.4.1]: https://github.com/riagentic/aio-rs/releases/tag/v0.4.1
 [0.4.0]: https://github.com/riagentic/aio-rs/releases/tag/v0.4.0

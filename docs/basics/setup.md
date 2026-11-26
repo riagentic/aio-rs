@@ -26,17 +26,17 @@ rustup already put on `PATH`.
 x86_64:
 
 ```sh
-curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.4.0/install.sh | sh
+curl -fsSL https://github.com/riagentic/aio-rs/releases/download/v0.5.0/install.sh | sh
 ```
 
 Windows x86_64, in PowerShell (aio's one line):
 
 ```powershell
-irm https://github.com/riagentic/aio-rs/releases/download/v0.4.0/install.ps1 | iex
+irm https://github.com/riagentic/aio-rs/releases/download/v0.5.0/install.ps1 | iex
 ```
 
 or download `install.ps1` from the
-[release](https://github.com/riagentic/aio-rs/releases/tag/v0.4.0), then
+[release](https://github.com/riagentic/aio-rs/releases/tag/v0.5.0), then
 `powershell -ExecutionPolicy Bypass -File install.ps1`. A failure is said
 and leaves the window open (under `-File`, exit code 1).
 
@@ -60,7 +60,7 @@ Electron folder copied over and put `wasm-bindgen` on `PATH`
 **From source** (minutes):
 
 ```sh
-git clone --branch v0.4.0 https://github.com/riagentic/aio-rs
+git clone --branch v0.5.0 https://github.com/riagentic/aio-rs
 cargo install --locked --path aio-rs/crates/aio-cli
 ```
 
@@ -74,7 +74,7 @@ The package is `aio-rs-cli`, its binary `ax`.
 
 ```sh
 ax upgrade                    # to aio-rs's newest release
-ax upgrade 0.4.0              # to that release (again, if it is this one)
+ax upgrade 0.5.0              # to that release (again, if it is this one)
 ax upgrade --aio ../aio-rs    # ax built from a checkout (plain ax upgrade returns)
 ```
 
@@ -91,7 +91,7 @@ aio-rs is not on crates.io: an app `ax create` makes takes it from git,
 at this `ax`'s release tag, in both of its `Cargo.toml` files:
 
 ```toml
-aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.4.0", features = ["kit"] }
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.5.0", features = ["kit"] }
 ```
 
 `Cargo.lock` pins the commit. A clone builds on any machine, with or
@@ -99,9 +99,9 @@ without an aio-rs checkout, and nothing of the machine the app was made on
 is in it. To pick or change the version (aio's `am pin`):
 
 ```sh
-ax create notes --aio-version 0.4.0   # another release (main: the branch; latest: the newest)
+ax create notes --aio-version 0.5.0   # another release (main: the branch; latest: the newest)
 ax pin                                # in the app: what Cargo.toml asks for, what Cargo.lock built, the releases
-ax pin 0.4.0                          # every one moved to that release, Cargo.lock with it
+ax pin 0.5.0                          # every one moved to that release, Cargo.lock with it
 ax pin ../aio-rs                      # to a checkout, co-developing aio-rs
 ```
 

@@ -14,7 +14,7 @@ cells or its log. One API on every platform:
 
 ```toml
 # the app's Cargo.toml
-aio = { package = "aio-rs", version = "0.4", features = ["kit", "secrets"] }
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.5.0", features = ["kit", "secrets"] }
 ```
 
 Each call is `async`: the OS may ask the user (a locked keyring, a

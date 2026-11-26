@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "aio-rs"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "aio-rs",
  "aio-rs-air",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "aio-rs-air"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "aio-rs-air-macro",
  "keyboard-types",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "aio-rs-air-macro"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "aio-rs-cli"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "aio-rs",
  "aio-rs-config",
@@ -104,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "aio-rs-config"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "aio-rs-macros",
  "base64 0.23.1",
@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "aio-rs-config-macro"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "aio-rs-config",
  "proc-macro2",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "aio-rs-hotpatch"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "libc",
  "serde",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "aio-rs-macros"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "aio-rs-shell"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "aio-rs",
  "aio-rs-air",
@@ -167,7 +167,7 @@ dependencies = [
 
 [[package]]
 name = "air-bench"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "aio-rs",
  "aio-rs-air",

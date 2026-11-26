@@ -9,7 +9,7 @@ protocol on top (a vendor's commands, a key's framing) stays in the app.
 
 ```toml
 # the app's Cargo.toml
-aio = { package = "aio-rs", version = "0.4", features = ["kit", "usb"] }
+aio = { package = "aio-rs", git = "https://github.com/riagentic/aio-rs", tag = "v0.5.0", features = ["kit", "usb"] }
 
 # aio.toml: the devices the app may see (lsusb shows the ids)
 [capabilities]
